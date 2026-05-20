@@ -1,0 +1,98 @@
+import("../src/orgntr_prim/omir") as omir
+import("../src/orgntr_prim/x86_64_encode") as enc
+import("../src/orgntr_prim/lower_ocir_to_omir") as lower
+import("../src/orgntr_prim/ocir") as ocir
+import("std/list") as list
+
+test "lea rdi rbp disp8 encodes correctly" {
+  enc.lea_rdi_rbp_disp8(-16) == [72, 141, 125, 240]
+}
+
+test "mov rsi rbp disp8 encodes correctly" {
+  enc.mov_rsi_rbp_disp8(-16) == [72, 139, 117, 240]
+}
+
+test "mov rdx rbp disp8 encodes correctly" {
+  enc.mov_rdx_rbp_disp8(-16) == [72, 139, 85, 240]
+}
+
+test "mov rcx rbp disp8 encodes correctly" {
+  enc.mov_rcx_rbp_disp8(-16) == [72, 139, 77, 240]
+}
+
+test "mov r8 rbp disp8 encodes correctly" {
+  enc.mov_r8_rbp_disp8(-16) == [76, 139, 69, 240]
+}
+
+test "CallAddBoxed lowers to five arg insts then call_reloc" {
+  let m = ocir.module("f", [ocir.func("f", [
+    ocir.block(0, [
+      ocir.inst_imm_i64(0, 1),
+      ocir.inst_imm_i64(1, 2),
+      ocir.inst_box_int(2, 0),
+      ocir.inst_box_int(3, 1),
+      ocir.inst_call_add_boxed(4, 2, 3)
+    ], ocir.term_ret_i64(0))
+  ])]) in
+  let om = lower.lower_module(m) in
+  let f = list.get(om.funcs, 0) in
+  let insts = f.insts in
+  let call_idx = list.find_index(insts, fn(i) { i.op == "CallReloc" }) in
+  call_idx > 0 &&
+  list.get(insts, call_idx - 5).op == "LeaRdiBrp" &&
+  list.get(insts, call_idx - 4).op == "MovRsiRbp" &&
+  list.get(insts, call_idx - 3).op == "MovRdxRbp" &&
+  list.get(insts, call_idx - 2).op == "MovRcxRbp" &&
+  list.get(insts, call_idx - 1).op == "MovR8Rbp"
+}
+
+test "CallAddBoxed call_reloc targets fard_add_boxed_out" {
+  let m = ocir.module("f", [ocir.func("f", [
+    ocir.block(0, [
+      ocir.inst_imm_i64(0, 1),
+      ocir.inst_imm_i64(1, 2),
+      ocir.inst_box_int(2, 0),
+      ocir.inst_box_int(3, 1),
+      ocir.inst_call_add_boxed(4, 2, 3)
+    ], ocir.term_ret_i64(0))
+  ])]) in
+  let om = lower.lower_module(m) in
+  let f = list.get(om.funcs, 0) in
+  let reloc = list.find(f.insts, fn(i) { i.op == "CallReloc" }) in
+  reloc.some.name == "fard_add_boxed_out"
+}
+
+test "CallMulBoxed call_reloc targets fard_mul_boxed_out" {
+  let m = ocir.module("f", [ocir.func("f", [
+    ocir.block(0, [
+      ocir.inst_imm_i64(0, 1),
+      ocir.inst_imm_i64(1, 2),
+      ocir.inst_box_int(2, 0),
+      ocir.inst_box_int(3, 1),
+      ocir.inst_call_mul_boxed(4, 2, 3)
+    ], ocir.term_ret_i64(0))
+  ])]) in
+  let om = lower.lower_module(m) in
+  let f = list.get(om.funcs, 0) in
+  let reloc = list.find(f.insts, fn(i) { i.op == "CallReloc" }) in
+  reloc.some.name == "fard_mul_boxed_out"
+}
+
+test "lhs slot offset 8 used for rdx (high word of lhs)" {
+  let m = ocir.module("f", [ocir.func("f", [
+    ocir.block(0, [
+      ocir.inst_imm_i64(0, 1),
+      ocir.inst_imm_i64(1, 2),
+      ocir.inst_box_int(2, 0),
+      ocir.inst_box_int(3, 1),
+      ocir.inst_call_add_boxed(4, 2, 3)
+    ], ocir.term_ret_i64(0))
+  ])]) in
+  let om = lower.lower_module(m) in
+  let f = list.get(om.funcs, 0) in
+  let insts = f.insts in
+  let call_idx = list.find_index(insts, fn(i) { i.op == "CallReloc" }) in
+  let rsi = list.get(insts, call_idx - 4) in
+  let rdx = list.get(insts, call_idx - 3) in
+  rdx.slot == rsi.slot + 8
+}

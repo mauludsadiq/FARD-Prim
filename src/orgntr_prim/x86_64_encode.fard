@@ -123,6 +123,26 @@ fn call_rel32_placeholder() {
   [232, 0, 0, 0, 0]
 }
 
+fn lea_rdi_rbp_disp8(slot) {
+  [72, 141, 125, disp8(slot)]
+}
+
+fn mov_rsi_rbp_disp8(slot) {
+  [72, 139, 117, disp8(slot)]
+}
+
+fn mov_rdx_rbp_disp8(slot) {
+  [72, 139, 85, disp8(slot)]
+}
+
+fn mov_rcx_rbp_disp8(slot) {
+  [72, 139, 77, disp8(slot)]
+}
+
+fn mov_r8_rbp_disp8(slot) {
+  [76, 139, 69, disp8(slot)]
+}
+
 fn ret() {
   [195]
 }
@@ -148,6 +168,16 @@ fn encode_inst(inst) {
     jmp_rel32_placeholder()
   else if inst.op == "CallReloc" then
     call_rel32_placeholder()
+  else if inst.op == "LeaRdiBrp" then
+    lea_rdi_rbp_disp8(inst.slot)
+  else if inst.op == "MovRsiRbp" then
+    mov_rsi_rbp_disp8(inst.slot)
+  else if inst.op == "MovRdxRbp" then
+    mov_rdx_rbp_disp8(inst.slot)
+  else if inst.op == "MovRcxRbp" then
+    mov_rcx_rbp_disp8(inst.slot)
+  else if inst.op == "MovR8Rbp" then
+    mov_r8_rbp_disp8(inst.slot)
   else if inst.op == "Ret" then
     ret()
   else if inst.op == "Label" then
@@ -192,6 +222,11 @@ export {
   jne_rel32_placeholder,
   jmp_rel32_placeholder,
   call_rel32_placeholder,
+  lea_rdi_rbp_disp8,
+  mov_rsi_rbp_disp8,
+  mov_rdx_rbp_disp8,
+  mov_rcx_rbp_disp8,
+  mov_r8_rbp_disp8,
   ret,
   encode_inst,
   encode_insts,

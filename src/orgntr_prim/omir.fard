@@ -62,6 +62,26 @@ fn call_reloc(name) {
   { op: "CallReloc", name: name }
 }
 
+fn lea_rdi_rbp(slot) {
+  { op: "LeaRdiBrp", slot: slot }
+}
+
+fn mov_rsi_rbp(slot) {
+  { op: "MovRsiRbp", slot: slot }
+}
+
+fn mov_rdx_rbp(slot) {
+  { op: "MovRdxRbp", slot: slot }
+}
+
+fn mov_rcx_rbp(slot) {
+  { op: "MovRcxRbp", slot: slot }
+}
+
+fn mov_r8_rbp(slot) {
+  { op: "MovR8Rbp", slot: slot }
+}
+
 fn ret_i64(src) {
   { op: "RetI64", src: src }
 }
@@ -91,6 +111,11 @@ export {
   jmp,
   bind_label,
   call_reloc,
+  lea_rdi_rbp,
+  mov_rsi_rbp,
+  mov_rdx_rbp,
+  mov_rcx_rbp,
+  mov_r8_rbp,
   ret_i64,
   prologue,
   epilogue,

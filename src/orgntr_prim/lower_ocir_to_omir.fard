@@ -101,13 +101,27 @@ fn lower_inst(layout, inst) {
       omir.write_fval_int(stack_for(layout, inst.dst), stack_for(layout, inst.src_i64))
     ]
   else if inst.op == "CallAddBoxed" then
+    let dst = stack_for(layout, inst.dst_fval) in
+    let lhs = stack_for(layout, inst.lhs_fval) in
+    let rhs = stack_for(layout, inst.rhs_fval) in
     [
-      { op: "PrepareBoxed2", dst: stack_for(layout, inst.dst_fval), lhs: stack_for(layout, inst.lhs_fval), rhs: stack_for(layout, inst.rhs_fval) },
+      omir.lea_rdi_rbp(dst.slot),
+      omir.mov_rsi_rbp(lhs.slot),
+      omir.mov_rdx_rbp(lhs.slot + 8),
+      omir.mov_rcx_rbp(rhs.slot),
+      omir.mov_r8_rbp(rhs.slot + 8),
       omir.call_reloc("fard_add_boxed_out")
     ]
   else if inst.op == "CallMulBoxed" then
+    let dst = stack_for(layout, inst.dst_fval) in
+    let lhs = stack_for(layout, inst.lhs_fval) in
+    let rhs = stack_for(layout, inst.rhs_fval) in
     [
-      { op: "PrepareBoxed2", dst: stack_for(layout, inst.dst_fval), lhs: stack_for(layout, inst.lhs_fval), rhs: stack_for(layout, inst.rhs_fval) },
+      omir.lea_rdi_rbp(dst.slot),
+      omir.mov_rsi_rbp(lhs.slot),
+      omir.mov_rdx_rbp(lhs.slot + 8),
+      omir.mov_rcx_rbp(rhs.slot),
+      omir.mov_r8_rbp(rhs.slot + 8),
       omir.call_reloc("fard_mul_boxed_out")
     ]
   else
