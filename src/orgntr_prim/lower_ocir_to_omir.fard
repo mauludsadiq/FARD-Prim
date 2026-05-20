@@ -25,6 +25,12 @@ fn align16(n) {
   if rem == 0 then n else n + (16 - rem)
 }
 
+fn collect_param_slots(acc, params) {
+  list.fold(params, acc, fn(a, p) {
+    rec.set(a, str.from(p.reg), "I64")
+  })
+}
+
 fn collect_inst_dst(acc, inst) {
   if inst.op == "ImmI64" then rec.set(acc, str.from(inst.dst), "I64")
   else if inst.op == "ImmBool" then rec.set(acc, str.from(inst.dst), "I64")
@@ -32,6 +38,7 @@ fn collect_inst_dst(acc, inst) {
   else if inst.op == "BoxInt" then rec.set(acc, str.from(inst.dst), "FardVal")
   else if inst.op == "CallAddBoxed" then rec.set(acc, str.from(inst.dst_fval), "FardVal")
   else if inst.op == "CallMulBoxed" then rec.set(acc, str.from(inst.dst_fval), "FardVal")
+  else if inst.op == "CallI64" then rec.set(acc, str.from(inst.dst), "I64")
   else acc
 }
 
@@ -40,7 +47,9 @@ fn collect_block_slots(acc, block) {
 }
 
 fn collect_func_slots(f) {
-  list.fold(f.blocks, {}, fn(acc, block) { collect_block_slots(acc, block) })
+  let params = if rec.has(f, "params") then f.params else [] in
+  let base = collect_param_slots({}, params) in
+  list.fold(f.blocks, base, fn(acc, block) { collect_block_slots(acc, block) })
 }
 
 fn sorted_reg_keys(slot_types) {
@@ -124,6 +133,16 @@ fn lower_inst(layout, inst) {
       omir.mov_r8_rbp(rhs.slot + 8),
       omir.call_reloc("fard_mul_boxed_out")
     ]
+  else if inst.op == "CallI64" then
+    let dst_slot = stack_for(layout, inst.dst) in
+    let arg_moves = list.build(list.len(inst.args), fn(i) {
+      omir.load_arg(i, stack_for(layout, list.get(inst.args, i)).slot)
+    }) in
+    list.concat([
+      arg_moves,
+      [omir.call_reloc(inst.callee)],
+      [omir.mov_reg_to_stack(dst_slot, omir.reg("rax"))]
+    ])
   else
     [{ op: "LowerError", message: "unknown inst", inst: inst }]
 }
@@ -159,13 +178,31 @@ fn lower_block(layout, block) {
   ])
 }
 
+fn arg_reg_name(idx) {
+  if idx == 0 then "rdi"
+  else if idx == 1 then "rsi"
+  else if idx == 2 then "rdx"
+  else if idx == 3 then "rcx"
+  else if idx == 4 then "r8"
+  else "r9"
+}
+
+fn lower_params(layout, params) {
+  list.build(list.len(params), fn(i) {
+    let p = list.get(params, i) in
+    omir.mov_reg_to_stack(stack_for(layout, p.reg), omir.reg(arg_reg_name(i)))
+  })
+}
+
 fn lower_func(f) {
   let layout = assign_slots(f) in
+  let params = if rec.has(f, "params") then f.params else [] in
+  let param_moves = lower_params(layout, params) in
   let body = list.flatten(list.map(f.blocks, fn(block) { lower_block(layout, block) })) in
   omir.func(
     f.name,
     layout.frame_size,
-    list.concat([[omir.prologue(layout.frame_size)], body])
+    list.concat([[omir.prologue(layout.frame_size)], param_moves, body])
   )
 }
 

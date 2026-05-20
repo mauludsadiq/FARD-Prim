@@ -62,6 +62,21 @@ fn call_reloc(name) {
   { op: "CallReloc", name: name }
 }
 
+// Store incoming param: mov [rbp+slot], arg_reg_n
+fn store_param(arg_idx, slot) {
+  { op: "StoreParam", arg_idx: arg_idx, slot: slot }
+}
+
+// Load outgoing arg: mov arg_reg_n, [rbp+slot]
+fn load_arg(arg_idx, slot) {
+  { op: "LoadArg", arg_idx: arg_idx, slot: slot }
+}
+
+// Move rax to stack after a call
+fn mov_rax_to_stack(slot) {
+  { op: "MovRegToStack", dst: stack(slot), src: reg("rax") }
+}
+
 fn lea_rdi_rbp(slot) {
   { op: "LeaRdiBrp", slot: slot }
 }
@@ -111,6 +126,9 @@ export {
   jmp,
   bind_label,
   call_reloc,
+  store_param,
+  load_arg,
+  mov_rax_to_stack,
   lea_rdi_rbp,
   mov_rsi_rbp,
   mov_rdx_rbp,

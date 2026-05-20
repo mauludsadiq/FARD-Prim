@@ -22,13 +22,9 @@ fn layout_funcs(encoded_funcs) {
 fn build_symbol_table(laid_out) {
   list.fold(laid_out, {}, fn(sym_table, entry) {
     let base = entry.base in
-    let f = entry.func in
-    // Function entry = base + offset of label "0" within func, or just base
-    let entry_offset =
-      if rec.has(f.labels, "0") then rec.get(f.labels, "0")
-      else 0
-    in
-    rec.set(sym_table, f.name, base + entry_offset)
+    // Function entry is always at base (byte 0 of function text)
+    // Label "0" is after the prologue — do not use it as the entry point
+    rec.set(sym_table, entry.func.name, base)
   })
 }
 

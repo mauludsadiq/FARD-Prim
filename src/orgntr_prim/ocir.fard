@@ -22,6 +22,16 @@ fn inst_call_mul_boxed(dst_fval, lhs_fval, rhs_fval) {
   { op: "CallMulBoxed", dst_fval: dst_fval, lhs_fval: lhs_fval, rhs_fval: rhs_fval }
 }
 
+fn func_with_params(name, params, blocks) {
+  { name: name, params: params, blocks: blocks }
+}
+
+fn param(reg, ty) { { reg: reg, ty: ty } }
+
+fn inst_call_i64(dst, callee, args) {
+  { op: "CallI64", dst: dst, callee: callee, args: args }
+}
+
 fn term_ret_i64(src) { { op: "RetI64", src: src } }
 fn term_br(to) { { op: "Br", to: to } }
 fn term_br_cond(cond, then_blk, else_blk) {
@@ -36,6 +46,7 @@ export {
   module, func, block,
   inst_imm_i64, inst_imm_bool, inst_add_i64, inst_box_int,
   inst_call_add_boxed, inst_call_mul_boxed,
+  func_with_params, param, inst_call_i64,
   term_ret_i64, term_br, term_br_cond,
   canonical_text, digest,
 }

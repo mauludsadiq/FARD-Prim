@@ -1,0 +1,91 @@
+import("../src/orgntr_prim/ocir") as ocir
+import("../src/orgntr_prim/lower_ocir_to_omir") as lower
+import("../src/orgntr_prim/x86_64_fixups") as fix
+import("../src/orgntr_prim/x86_64_link") as link
+import("std/list") as list
+import("std/rec") as rec
+
+fn make_add2() {
+  let blk = ocir.block(0, [
+    ocir.inst_add_i64(2, 0, 1)
+  ], ocir.term_ret_i64(2)) in
+  ocir.func_with_params("add2", [
+    ocir.param(0, "I64"),
+    ocir.param(1, "I64")
+  ], [blk])
+}
+
+fn make_fard_main() {
+  let args = [0, 1] in
+  let call = ocir.inst_call_i64(2, "add2", args) in
+  let blk = ocir.block(0, [
+    ocir.inst_imm_i64(0, 40),
+    ocir.inst_imm_i64(1, 2),
+    call
+  ], ocir.term_ret_i64(2)) in
+  ocir.func_with_params("fard_main", [], [blk])
+}
+
+fn add2_module() {
+  ocir.module("fard_main", [make_add2(), make_fard_main()])
+}
+
+test "module has two functions" {
+  list.len(add2_module().funcs) == 2
+}
+
+test "add2 has two params" {
+  list.len(list.get(add2_module().funcs, 0).params) == 2
+}
+
+test "lower add2 emits param moves at entry" {
+  let om = lower.lower_module(add2_module()) in
+  let f = list.get(om.funcs, 0) in
+  list.get(f.insts, 1).op == "MovRegToStack" &&
+  list.get(f.insts, 2).op == "MovRegToStack"
+}
+
+test "lower fard_main emits load_arg before call" {
+  let om = lower.lower_module(add2_module()) in
+  let f = list.get(om.funcs, 1) in
+  let call_idx = list.find_index(f.insts, fn(i) { i.op == "CallReloc" }) in
+  call_idx > 0 &&
+  list.get(f.insts, call_idx - 2).op == "MovStackToReg" || list.get(f.insts, call_idx - 2).op == "LoadArg" &&
+  list.get(f.insts, call_idx - 1).op == "MovStackToReg" || list.get(f.insts, call_idx - 1).op == "LoadArg"
+}
+
+test "lower fard_main emits mov rax to stack after call" {
+  let om = lower.lower_module(add2_module()) in
+  let f = list.get(om.funcs, 1) in
+  let call_idx = list.find_index(f.insts, fn(i) { i.op == "CallReloc" }) in
+  list.get(f.insts, call_idx + 1).op == "MovRegToStack"
+}
+
+test "call reloc targets add2" {
+  let om = lower.lower_module(add2_module()) in
+  let f = list.get(om.funcs, 1) in
+  let reloc = list.find(f.insts, fn(i) { i.op == "CallReloc" }) in
+  reloc.some.name == "add2"
+}
+
+test "link resolves add2 call reloc" {
+  let om = lower.lower_module(add2_module()) in
+  let encoded = fix.encode_module_with_fixups(om) in
+  let linked = link.link_module(encoded) in
+  list.len(linked.unresolved_relocs) == 0
+}
+
+test "linked module has two functions" {
+  let om = lower.lower_module(add2_module()) in
+  let encoded = fix.encode_module_with_fixups(om) in
+  let linked = link.link_module(encoded) in
+  list.len(linked.funcs) == 2
+}
+
+test "sym_table has add2 and fard_main" {
+  let om = lower.lower_module(add2_module()) in
+  let encoded = fix.encode_module_with_fixups(om) in
+  let linked = link.link_module(encoded) in
+  rec.has(linked.sym_table, "add2") &&
+  rec.has(linked.sym_table, "fard_main")
+}

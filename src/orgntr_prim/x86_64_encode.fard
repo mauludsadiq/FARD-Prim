@@ -127,6 +127,24 @@ fn call_rel32_placeholder() {
   [232, 0, 0, 0, 0]
 }
 
+fn store_param_enc(arg_idx, slot) {
+ if arg_idx == 0 then [72, 137, 125, disp8(slot)]
+ else if arg_idx == 1 then [72, 137, 117, disp8(slot)]
+ else if arg_idx == 2 then [72, 137, 85,  disp8(slot)]
+ else if arg_idx == 3 then [72, 137, 77,  disp8(slot)]
+ else if arg_idx == 4 then [73, 137, 69,  disp8(slot)]
+ else                      [73, 137, 77,  disp8(slot)]
+}
+
+fn load_arg_enc(arg_idx, slot) {
+ if arg_idx == 0 then [72, 139, 125, disp8(slot)]
+ else if arg_idx == 1 then [72, 139, 117, disp8(slot)]
+ else if arg_idx == 2 then [72, 139, 85,  disp8(slot)]
+ else if arg_idx == 3 then [72, 139, 77,  disp8(slot)]
+ else if arg_idx == 4 then [73, 139, 69,  disp8(slot)]
+ else                      [73, 139, 77,  disp8(slot)]
+}
+
 fn lea_rdi_rbp_disp8(slot) {
   [72, 141, 125, disp8(slot)]
 }
@@ -172,6 +190,10 @@ fn encode_inst(inst) {
     jmp_rel32_placeholder()
   else if inst.op == "CallReloc" then
     call_rel32_placeholder()
+  else if inst.op == "StoreParam" then
+    store_param_enc(inst.arg_idx, inst.slot)
+  else if inst.op == "LoadArg" then
+    load_arg_enc(inst.arg_idx, inst.slot)
   else if inst.op == "LeaRdiBrp" then
     lea_rdi_rbp_disp8(inst.slot)
   else if inst.op == "MovRsiRbp" then
@@ -210,6 +232,8 @@ fn encode_module(m) {
 }
 
 export {
+  store_param_enc,
+  load_arg_enc,
   u8,
   le32,
   le64,
