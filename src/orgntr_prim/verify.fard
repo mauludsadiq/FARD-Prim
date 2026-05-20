@@ -1,0 +1,104 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+
+fn ok(v) { { t: "ok", v: v } }
+fn err(code, data) { { t: "err", code: code, data: data } }
+
+fn has_name(funcs, name) {
+  list.any(funcs, fn(f) { f.name == name })
+}
+
+fn label_record(blocks) {
+  list.fold(blocks, {}, fn(acc, b) {
+    let key = str.from(b.label) in
+    if rec.has(acc, key) then rec.set(acc, "__duplicate__", b.label)
+    else rec.set(acc, key, true)
+  })
+}
+
+fn has_label(labels, label) { rec.has(labels, str.from(label)) }
+fn reg_key(r) { str.from(r) }
+fn get_ty(env, r) { rec.get(env, reg_key(r)) }
+fn put_ty(env, r, ty) { rec.set(env, reg_key(r), ty) }
+
+fn require_ty(env, r, ty, code, data) {
+  if get_ty(env, r) == ty then ok(env) else err(code, data)
+}
+
+fn verify_inst(inst, env, func_name, block_label) {
+  if inst.op == "ImmI64" then
+    ok(put_ty(env, inst.dst, "I64"))
+  else if inst.op == "ImmBool" then
+    ok(put_ty(env, inst.dst, "Bool"))
+  else if inst.op == "AddI64" then
+    let a = require_ty(env, inst.lhs, "I64", "ADD_I64_LHS_TYPE", { func: func_name, block: block_label, reg: inst.lhs }) in
+    if a.t == "err" then a else
+      let b = require_ty(a.v, inst.rhs, "I64", "ADD_I64_RHS_TYPE", { func: func_name, block: block_label, reg: inst.rhs }) in
+      if b.t == "err" then b else ok(put_ty(b.v, inst.dst, "I64"))
+  else if inst.op == "BoxInt" then
+    let a = require_ty(env, inst.src_i64, "I64", "BOX_INT_INPUT_TYPE", { func: func_name, block: block_label, reg: inst.src_i64 }) in
+    if a.t == "err" then a else ok(put_ty(a.v, inst.dst, "FardVal"))
+  else if inst.op == "CallAddBoxed" || inst.op == "CallMulBoxed" then
+    let a = require_ty(env, inst.lhs_fval, "FardVal", "BOXED_CALL_LHS_TYPE", { func: func_name, block: block_label, reg: inst.lhs_fval, op: inst.op }) in
+    if a.t == "err" then a else
+      let b = require_ty(a.v, inst.rhs_fval, "FardVal", "BOXED_CALL_RHS_TYPE", { func: func_name, block: block_label, reg: inst.rhs_fval, op: inst.op }) in
+      if b.t == "err" then b else ok(put_ty(b.v, inst.dst_fval, "FardVal"))
+  else
+    err("UNKNOWN_INST", { func: func_name, block: block_label, op: inst.op })
+}
+
+fn verify_insts(insts, env, func_name, block_label) {
+  list.fold(insts, ok(env), fn(state, inst) {
+    if state.t == "err" then state else verify_inst(inst, state.v, func_name, block_label)
+  })
+}
+
+fn verify_term(term, env, labels, func_name, block_label) {
+  if term.op == "RetI64" then
+    require_ty(env, term.src, "I64", "RET_I64_TYPE", { func: func_name, block: block_label, reg: term.src })
+  else if term.op == "Br" then
+    if has_label(labels, term.to) then ok(env) else err("BR_TARGET_MISSING", { func: func_name, block: block_label, target: term.to })
+  else if term.op == "BrCond" then
+    let c = require_ty(env, term.cond, "Bool", "BRCOND_COND_TYPE", { func: func_name, block: block_label, reg: term.cond }) in
+    if c.t == "err" then c else
+      if !has_label(labels, term.then_blk) then err("BRCOND_THEN_MISSING", { func: func_name, block: block_label, target: term.then_blk })
+      else if !has_label(labels, term.else_blk) then err("BRCOND_ELSE_MISSING", { func: func_name, block: block_label, target: term.else_blk })
+      else ok(c.v)
+  else
+    err("UNKNOWN_TERM", { func: func_name, block: block_label, op: term.op })
+}
+
+fn verify_block(block, state, labels, func_name) {
+  if state.t == "err" then state else
+    let inst_state = verify_insts(block.insts, state.v, func_name, block.label) in
+    if inst_state.t == "err" then inst_state else verify_term(block.term, inst_state.v, labels, func_name, block.label)
+}
+
+fn verify_func(f) {
+  if list.len(f.blocks) == 0 then err("FUNC_HAS_NO_BLOCKS", { func: f.name })
+  else
+    let labels = label_record(f.blocks) in
+    if rec.has(labels, "__duplicate__") then err("DUPLICATE_BLOCK_LABEL", { func: f.name, label: rec.get(labels, "__duplicate__") })
+    else list.fold(f.blocks, ok({}), fn(state, b) { verify_block(b, state, labels, f.name) })
+}
+
+fn duplicate_func_name(funcs) {
+  let names = list.fold(funcs, { seen: {}, duplicate: null }, fn(acc, f) {
+    if acc.duplicate != null then acc else
+      if rec.has(acc.seen, f.name) then { seen: acc.seen, duplicate: f.name }
+      else { seen: rec.set(acc.seen, f.name, true), duplicate: null }
+  }) in
+  names.duplicate
+}
+
+fn verify_module(m) {
+  let dup = duplicate_func_name(m.funcs) in
+  if dup != null then err("DUPLICATE_FUNC_NAME", { name: dup })
+  else if !has_name(m.funcs, m.entry) then err("ENTRY_FUNCTION_MISSING", { entry: m.entry })
+  else list.fold(m.funcs, ok({ entry: m.entry }), fn(state, f) {
+    if state.t == "err" then state else verify_func(f)
+  })
+}
+
+export { ok, err, verify_module, verify_func }

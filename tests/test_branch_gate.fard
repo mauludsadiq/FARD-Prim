@@ -1,0 +1,16 @@
+import("../src/orgntr_prim/run_gate") as gate
+
+test "branch gate true verifies and expects 2" {
+  let r = gate.branch_gate_report(true)
+  r.verified == true && r.expected_runtime_value == 2
+}
+
+test "branch gate false verifies and expects 3" {
+  let r = gate.branch_gate_report(false)
+  r.verified == true && r.expected_runtime_value == 3
+}
+
+test "branch gate carries LC_BUILD_VERSION proof" {
+  let r = gate.branch_gate_report(true)
+  r.native_rust_boundary_proof.object_load_command == "LC_BUILD_VERSION"
+}

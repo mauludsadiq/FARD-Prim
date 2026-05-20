@@ -1,0 +1,41 @@
+import("std/json") as json
+import("std/hash") as hash
+
+fn ty_i64() { "I64" }
+fn ty_bool() { "Bool" }
+fn ty_fard_val() { "FardVal" }
+
+fn module(entry, funcs) { { entry: entry, funcs: funcs } }
+fn func(name, blocks) { { name: name, blocks: blocks } }
+fn block(label, insts, term) { { label: label, insts: insts, term: term } }
+
+fn inst_imm_i64(dst, val) { { op: "ImmI64", dst: dst, val: val } }
+fn inst_imm_bool(dst, val) { { op: "ImmBool", dst: dst, val: val } }
+fn inst_add_i64(dst, lhs, rhs) { { op: "AddI64", dst: dst, lhs: lhs, rhs: rhs } }
+fn inst_box_int(dst, src_i64) { { op: "BoxInt", dst: dst, src_i64: src_i64 } }
+
+fn inst_call_add_boxed(dst_fval, lhs_fval, rhs_fval) {
+  { op: "CallAddBoxed", dst_fval: dst_fval, lhs_fval: lhs_fval, rhs_fval: rhs_fval }
+}
+
+fn inst_call_mul_boxed(dst_fval, lhs_fval, rhs_fval) {
+  { op: "CallMulBoxed", dst_fval: dst_fval, lhs_fval: lhs_fval, rhs_fval: rhs_fval }
+}
+
+fn term_ret_i64(src) { { op: "RetI64", src: src } }
+fn term_br(to) { { op: "Br", to: to } }
+fn term_br_cond(cond, then_blk, else_blk) {
+  { op: "BrCond", cond: cond, then_blk: then_blk, else_blk: else_blk }
+}
+
+fn canonical_text(m) { json.canonicalize(m) }
+fn digest(m) { hash.sha256_text(canonical_text(m)) }
+
+export {
+  ty_i64, ty_bool, ty_fard_val,
+  module, func, block,
+  inst_imm_i64, inst_imm_bool, inst_add_i64, inst_box_int,
+  inst_call_add_boxed, inst_call_mul_boxed,
+  term_ret_i64, term_br, term_br_cond,
+  canonical_text, digest,
+}

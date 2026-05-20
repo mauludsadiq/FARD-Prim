@@ -1,0 +1,20 @@
+import("std/json") as json
+import("std/hash") as hash
+
+fn canonical_text(v) { json.canonicalize(v) }
+fn sha256_record(v) { hash.sha256_text(canonical_text(v)) }
+
+fn trust_record(fard_version, asc7_graph_hash, ocir_hash, h_sem_bits, delta, target) {
+  {
+    fard_version: fard_version,
+    asc7_graph_hash: asc7_graph_hash,
+    ocir_hash: ocir_hash,
+    h_sem_bits: h_sem_bits,
+    delta: delta,
+    target: target
+  }
+}
+
+fn trust_hash(trust) { sha256_record(trust) }
+
+export { canonical_text, sha256_record, trust_record, trust_hash }

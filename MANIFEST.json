@@ -1,0 +1,16 @@
+{
+  "name": "FARD Prim",
+  "files": [
+    ".gitignore",
+    "README.md",
+    "docs/FARD_TO_ORGNTR.md",
+    "programs/branch_gate.fard",
+    "src/orgntr_prim/hash.fard",
+    "src/orgntr_prim/ocir.fard",
+    "src/orgntr_prim/run_gate.fard",
+    "src/orgntr_prim/target.fard",
+    "src/orgntr_prim/verify.fard",
+    "tests/test_branch_gate.fard",
+    "tests/test_ocir_verify.fard"
+  ]
+}

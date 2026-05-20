@@ -1,0 +1,52 @@
+import("../orgntr_prim/ocir") as ocir
+import("../orgntr_prim/verify") as verify
+import("../orgntr_prim/hash") as h
+import("../orgntr_prim/target") as target
+
+fn branch_gate_module(cond_value) {
+  let entry = ocir.block(
+    0,
+    [ocir.inst_imm_bool(0, cond_value)],
+    ocir.term_br_cond(0, 10, 20)
+  ) in
+
+  let then_block = ocir.block(
+    10,
+    [ocir.inst_imm_i64(1, 2)],
+    ocir.term_ret_i64(1)
+  ) in
+
+  let else_block = ocir.block(
+    20,
+    [ocir.inst_imm_i64(2, 3)],
+    ocir.term_ret_i64(2)
+  ) in
+
+  ocir.module("fard_main", [ocir.func("fard_main", [entry, then_block, else_block])])
+}
+
+fn branch_gate_report(cond_value) {
+  let m = branch_gate_module(cond_value) in
+  let v = verify.verify_module(m) in
+  let ocir_hash = ocir.digest(m) in
+  let t = target.x86_64_apple_darwin() in
+  let trust = h.trust_record("0.5.0", "sha256:dev", ocir_hash, 0.0, 0, t.triple) in
+
+  {
+    verified: v.t == "ok",
+    verifier: v,
+    entry: m.entry,
+    ocir_hash: ocir_hash,
+    trust: trust,
+    trust_hash: h.trust_hash(trust),
+    target: t.triple,
+    expected_runtime_value: if cond_value then 2 else 3,
+    native_rust_boundary_proof: {
+      last_stdout: "2",
+      object_load_command: "LC_BUILD_VERSION"
+    },
+    module: m
+  }
+}
+
+export { branch_gate_module, branch_gate_report }

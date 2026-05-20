@@ -1,0 +1,46 @@
+import("../src/orgntr_prim/ocir") as ocir
+import("../src/orgntr_prim/verify") as verify
+
+test "valid add returns ok" {
+  let b = ocir.block(
+    0,
+    [
+      ocir.inst_imm_i64(0, 40),
+      ocir.inst_imm_i64(1, 2),
+      ocir.inst_add_i64(2, 0, 1)
+    ],
+    ocir.term_ret_i64(2)
+  )
+
+  let m = ocir.module("fard_main", [ocir.func("fard_main", [b])])
+  let r = verify.verify_module(m)
+
+  r.t == "ok"
+}
+
+test "AddI64 rejects Bool lhs" {
+  let b = ocir.block(
+    0,
+    [
+      ocir.inst_imm_bool(0, true),
+      ocir.inst_imm_i64(1, 2),
+      ocir.inst_add_i64(2, 0, 1)
+    ],
+    ocir.term_ret_i64(2)
+  )
+
+  let m = ocir.module("fard_main", [ocir.func("fard_main", [b])])
+  let r = verify.verify_module(m)
+
+  r.t == "err" && r.code == "ADD_I64_LHS_TYPE"
+}
+
+test "BrCond requires Bool" {
+  let b0 = ocir.block(0, [ocir.inst_imm_i64(0, 1)], ocir.term_br_cond(0, 10, 20))
+  let b1 = ocir.block(10, [ocir.inst_imm_i64(1, 2)], ocir.term_ret_i64(1))
+  let b2 = ocir.block(20, [ocir.inst_imm_i64(2, 3)], ocir.term_ret_i64(2))
+  let m = ocir.module("fard_main", [ocir.func("fard_main", [b0, b1, b2])])
+  let r = verify.verify_module(m)
+
+  r.t == "err" && r.code == "BRCOND_COND_TYPE"
+}
