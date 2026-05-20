@@ -1,0 +1,60 @@
+import("../src/orgntr_prim/omir") as omir
+import("../src/orgntr_prim/x86_64_encode") as enc
+import("../src/orgntr_prim/run_gate") as gate
+import("../src/orgntr_prim/lower_ocir_to_omir") as lower
+import("std/list") as list
+
+test "le32 encodes little endian" {
+  enc.le32(305419896) == [120, 86, 52, 18]
+}
+
+test "le64 encodes little endian" {
+  enc.le64(42) == [42, 0, 0, 0, 0, 0, 0, 0]
+}
+
+test "prologue encodes push rbp mov rbp rsp" {
+  enc.prologue() == [85, 72, 137, 229]
+}
+
+test "sub rsp imm8 encodes frame 32" {
+  enc.sub_rsp(32) == [72, 131, 236, 32]
+}
+
+test "add rsp imm8 encodes frame 32" {
+  enc.add_rsp(32) == [72, 131, 196, 32]
+}
+
+test "mov rax imm64 encodes 42" {
+  enc.mov_r64_imm64(omir.reg("rax"), 42) == [72, 184, 42, 0, 0, 0, 0, 0, 0, 0]
+}
+
+test "mov stack to rax encodes rbp disp8 load" {
+  enc.mov_stack_to_reg(omir.reg("rax"), omir.stack(0 - 8)) == [72, 139, 69, 248]
+}
+
+test "mov rax to stack encodes rbp disp8 store" {
+  enc.mov_reg_to_stack(omir.stack(0 - 8), omir.reg("rax")) == [72, 137, 69, 248]
+}
+
+test "add rax stack encodes rbp disp8 add" {
+  enc.add_reg_stack(omir.reg("rax"), omir.stack(0 - 16)) == [72, 3, 69, 240]
+}
+
+test "cmp stack zero encodes rbp disp8 cmp" {
+  enc.cmp_stack_zero(omir.stack(0 - 8)) == [72, 131, 125, 248, 0]
+}
+
+test "branch placeholders encode fixed rel32 shapes" {
+  enc.jne_rel32_placeholder() == [15, 133, 0, 0, 0, 0] &&
+  enc.jmp_rel32_placeholder() == [233, 0, 0, 0, 0] &&
+  enc.call_rel32_placeholder() == [232, 0, 0, 0, 0]
+}
+
+test "branch gate lowers and encodes nonempty text" {
+  let ocir = gate.branch_gate_module(true)
+  let om = lower.lower_module(ocir)
+  let encoded = enc.encode_module(om)
+  let f = list.get(encoded.funcs, 0)
+
+  list.len(f.text) > 0 && f.frame_size == 32
+}
