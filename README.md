@@ -7,7 +7,7 @@ machine at any time.
 
 FARD Prim is the x86-64 native backend — written entirely in FARD. It takes
 the compiler from producing verified receipts to producing native machine code.
-2,356 lines of pure FARD across 19 files.
+2,501 lines of pure FARD across 24 files.
 
 No C driver. No libclang_rt. Two Mach-O objects emitted entirely in FARD,
 linked by ld against libSystem only, executing natively:
