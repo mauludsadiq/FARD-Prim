@@ -28,6 +28,10 @@ fn func_with_params(name, params, blocks) {
 
 fn param(reg, ty) { { reg: reg, ty: ty } }
 
+fn inst_unbox_int(dst, src_fval) {
+  { op: "UnboxInt", dst: dst, src_fval: src_fval }
+}
+
 fn inst_call_i64(dst, callee, args) {
   { op: "CallI64", dst: dst, callee: callee, args: args }
 }
@@ -46,7 +50,7 @@ export {
   module, func, block,
   inst_imm_i64, inst_imm_bool, inst_add_i64, inst_box_int,
   inst_call_add_boxed, inst_call_mul_boxed,
-  func_with_params, param, inst_call_i64,
+  func_with_params, param, inst_call_i64, inst_unbox_int,
   term_ret_i64, term_br, term_br_cond,
   canonical_text, digest,
 }

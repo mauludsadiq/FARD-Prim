@@ -127,6 +127,31 @@ fn call_rel32_placeholder() {
   [232, 0, 0, 0, 0]
 }
 
+// Write FardVal int: tag=0 at slot+0, pad=0 at slot+4, payload at slot+8
+fn write_fval_int_enc(dst_slot, src_slot) {
+  list.concat([
+    // mov dword [rbp+dst_slot], 0  (tag=INT=0)
+    [199, 69, disp8(dst_slot), 0, 0, 0, 0],
+    // mov dword [rbp+dst_slot+4], 0  (pad=0)
+    [199, 69, disp8(dst_slot + 4), 0, 0, 0, 0],
+    // mov rax, [rbp+src_slot]
+    [72, 139, 69, disp8(src_slot)],
+    // mov qword [rbp+dst_slot+8], rax
+    [72, 137, 69, disp8(dst_slot + 8)]
+  ])
+}
+
+// Unbox i64 from FardVal: load payload qword at src_fval_slot+8 into rax,
+// then store to dst_slot
+fn unbox_int_enc(dst_slot, src_fval_slot) {
+  list.concat([
+    // mov rax, [rbp+src_fval_slot+8]
+    [72, 139, 69, disp8(src_fval_slot + 8)],
+    // mov [rbp+dst_slot], rax
+    [72, 137, 69, disp8(dst_slot)]
+  ])
+}
+
 fn store_param_enc(arg_idx, slot) {
  if arg_idx == 0 then [72, 137, 125, disp8(slot)]
  else if arg_idx == 1 then [72, 137, 117, disp8(slot)]
@@ -190,6 +215,10 @@ fn encode_inst(inst) {
     jmp_rel32_placeholder()
   else if inst.op == "CallReloc" then
     call_rel32_placeholder()
+  else if inst.op == "WriteFvalIntOps" then
+    write_fval_int_enc(inst.dst_slot, inst.src_slot)
+  else if inst.op == "UnboxInt" then
+    unbox_int_enc(inst.dst_slot, inst.src_fval_slot)
   else if inst.op == "StoreParam" then
     store_param_enc(inst.arg_idx, inst.slot)
   else if inst.op == "LoadArg" then
@@ -232,6 +261,8 @@ fn encode_module(m) {
 }
 
 export {
+  write_fval_int_enc,
+  unbox_int_enc,
   store_param_enc,
   load_arg_enc,
   u8,

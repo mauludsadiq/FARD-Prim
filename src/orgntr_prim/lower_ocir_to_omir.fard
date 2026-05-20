@@ -39,6 +39,7 @@ fn collect_inst_dst(acc, inst) {
   else if inst.op == "CallAddBoxed" then rec.set(acc, str.from(inst.dst_fval), "FardVal")
   else if inst.op == "CallMulBoxed" then rec.set(acc, str.from(inst.dst_fval), "FardVal")
   else if inst.op == "CallI64" then rec.set(acc, str.from(inst.dst), "I64")
+  else if inst.op == "UnboxInt" then rec.set(acc, str.from(inst.dst), "I64")
   else acc
 }
 
@@ -106,9 +107,9 @@ fn lower_inst(layout, inst) {
       omir.mov_reg_to_stack(stack_for(layout, inst.dst), omir.reg("rax"))
     ]
   else if inst.op == "BoxInt" then
-    [
-      omir.write_fval_int(stack_for(layout, inst.dst), stack_for(layout, inst.src_i64))
-    ]
+    let dst = stack_for(layout, inst.dst) in
+    let src = stack_for(layout, inst.src_i64) in
+    [omir.write_fval_int_ops(dst.slot, src.slot)]
   else if inst.op == "CallAddBoxed" then
     let dst = stack_for(layout, inst.dst_fval) in
     let lhs = stack_for(layout, inst.lhs_fval) in
@@ -133,6 +134,10 @@ fn lower_inst(layout, inst) {
       omir.mov_r8_rbp(rhs.slot + 8),
       omir.call_reloc("fard_mul_boxed_out")
     ]
+  else if inst.op == "UnboxInt" then
+    let dst = stack_for(layout, inst.dst) in
+    let src = stack_for(layout, inst.src_fval) in
+    [omir.unbox_int(dst.slot, src.slot)]
   else if inst.op == "CallI64" then
     let dst_slot = stack_for(layout, inst.dst) in
     let arg_moves = list.build(list.len(inst.args), fn(i) {

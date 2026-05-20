@@ -63,6 +63,19 @@ fn call_reloc(name) {
 }
 
 // Store incoming param: mov [rbp+slot], arg_reg_n
+// Write i64 into FardVal slot: tag=0, pad=0, payload=src
+// Expands to: mov dword [rbp+dst+0], 0
+//             mov rax, [rbp+src]
+//             mov qword [rbp+dst+8], rax
+fn write_fval_int_ops(dst_slot, src_slot) {
+  { op: "WriteFvalIntOps", dst_slot: dst_slot, src_slot: src_slot }
+}
+
+// Load i64 payload from FardVal slot: mov rax, [rbp+src+8]
+fn unbox_int(dst_slot, src_fval_slot) {
+  { op: "UnboxInt", dst_slot: dst_slot, src_fval_slot: src_fval_slot }
+}
+
 fn store_param(arg_idx, slot) {
   { op: "StoreParam", arg_idx: arg_idx, slot: slot }
 }
@@ -126,6 +139,8 @@ export {
   jmp,
   bind_label,
   call_reloc,
+  write_fval_int_ops,
+  unbox_int,
   store_param,
   load_arg,
   mov_rax_to_stack,

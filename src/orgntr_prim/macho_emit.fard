@@ -393,10 +393,15 @@ fn emit_macho(linked) {
   })) in
 
   // Build nlist_64 entries
+  // Defined symbols: type=0x0F (N_EXT|N_SECT), sect=1
+  // Undefined symbols: type=0x01 (N_EXT), sect=0, value=0
   let nlist_bytes = list.flatten(list.map(all_syms, fn(s) {
     let strx = list.get(str_indices, sym_index(all_syms, s.name)) in
-    let sect = if s.addr == 0 && list.any(undef_syms, fn(u) { u.name == s.name }) then 0 else 1 in
-    nlist64(strx, sect, s.addr)
+    let is_undef = list.any(undef_syms, fn(u) { u.name == s.name }) in
+    if is_undef then
+      list.concat([le32(strx), [1], [0], le16(0), le64(0)])
+    else
+      nlist64(strx, 1, s.addr)
   })) in
 
   // Assemble load commands with correct offsets
