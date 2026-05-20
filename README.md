@@ -1,157 +1,67 @@
 # FARD Prim
 
-**FARD Prim** is the FARD-first foundation for rebuilding ORGNTR inside FARD.
+FARD is a deterministic, content-addressed language where every execution
+produces a SHA-256 receipt committing to source, imports, inputs, and result.
+Two runs of the same program on the same inputs produce the same digest on any
+machine at any time.
 
-The Rust repository `COMPILER---ORGNTR` has reached a concrete native-code milestone:
+FARD Prim is the x86-64 native backend — written entirely in FARD. It takes
+the compiler from producing verified receipts to producing native machine code.
+1,125 lines of pure FARD across 16 files.
 
-```text
-cargo clean
-cargo build -p orgntr_rt --target x86_64-apple-darwin
-cargo build -p orgntr_cli
-cargo run -p orgntr_cli
-RT=target/x86_64-apple-darwin/debug/liborgntr_rt.a
-cc -arch x86_64 -o run host.c out.o "$RT"
-./run
-```
+## What it does
 
-Observed result:
+Three-stage pipeline from typed IR to native bytes:
 
-```text
-wrote out.o
-2
-```
+   OCIR  ->  lower_ocir_to_omir  ->  OMIR  ->  x86_64_encode  ->  x86_64_fixups  ->  native x86-64
 
-And the object file now carries modern Mach-O platform metadata:
-
-```text
-otool -l out.o | rg -n "LC_BUILD_VERSION|LC_VERSION_MIN"
-39:      cmd LC_BUILD_VERSION
-```
-
-That proves the current Rust implementation can emit a valid x86_64 Mach-O object, link it against the ORGNTR runtime, execute it, and preserve the platform load command.
-
-This repo moves the **compiler truth layer** into FARD.
-
----
-
-## What this repo contains
-
-```text
-src/orgntr_prim/ocir.fard          OCIR constructors and digest
-src/orgntr_prim/verify.fard        OCIR verifier
-src/orgntr_prim/hash.fard          trust hashing helpers
-src/orgntr_prim/target.fard        deterministic target descriptor
-src/orgntr_prim/run_gate.fard      branch-gate OCIR builder/report
-programs/branch_gate.fard          executable gate program
-tests/test_ocir_verify.fard        verifier tests
-tests/test_branch_gate.fard        branch-gate trust tests
-docs/FARD_TO_ORGNTR.md             transition plan from Rust ORGNTR to pure FARD
-```
-
-This is not the full FARD object emitter yet. It is the required pure-FARD semantic layer before object emission can move out of Rust.
-
----
-
-## Where we are now
-
-Current Rust ORGNTR proof:
-
-```text
-OCIR branch gate -> x86_64 Mach-O object -> link -> run -> 2
-```
-
-Current FARD Prim layer:
-
-```text
-FARD OCIR model
-FARD OCIR verifier
-FARD OCIR digest
-FARD trust record
-FARD target descriptor
-FARD branch gate report
-```
-
-The authority transition is:
-
-```text
-Rust as compiler authority
-```
-
-to:
-
-```text
-FARD as compiler authority
-Rust as temporary object-emission comparison backend
-```
-
----
+- Stage 1: slot assignment, frame sizing, branch lowering (174 lines)
+- Stage 2: instruction encoding, rel32 placeholders (200 lines)
+- Stage 3: label scanning, forward branch patching, reloc tracking (123 lines)
 
 ## Run
 
-```bash
-fardrun run --program programs/branch_gate.fard --out out/branch_gate
-cat out/branch_gate/result.json
-```
+   fardrun run --program programs/branch_gate.fard --out out/branch_gate
+   cat out/branch_gate/result.json
 
-Expected semantic shape:
+The result includes the encoded function, verified execution proof, OCIR hash,
+and trust record — all content-addressed.
 
-```json
-{
-  "verified": true,
-  "entry": "fard_main",
-  "ocir_hash": "sha256:...",
-  "target": "x86_64-apple-darwin",
-  "expected_runtime_value": 2
-}
-```
+## Test
 
----
+   fardrun test --program tests/test_lower_ocir_to_omir.fard
+   fardrun test --program tests/test_x86_64_encode.fard
+   fardrun test --program tests/test_x86_64_fixups.fard
 
-## Tests
+22 tests. All pass.
 
-```bash
-fardrun test --program tests/test_ocir_verify.fard
-fardrun test --program tests/test_branch_gate.fard
-```
+## Source
 
----
+   src/orgntr_prim/
+     ocir.fard               typed IR definitions (41 lines)
+     omir.fard               machine IR definitions (97 lines)
+     lower_ocir_to_omir.fard stage 1 lowering (174 lines)
+     x86_64_encode.fard      stage 2 encoding (200 lines)
+     x86_64_fixups.fard      stage 3 fixups (123 lines)
+     verify.fard             execution verification (104 lines)
+     run_gate.fard           branch gate driver (52 lines)
+     hash.fard               trust record construction (20 lines)
+     target.fard             target triple (18 lines)
 
-## What is next
+## Context
 
-Next repo layer:
+FARD is currently in Stage 8 of self-hosting: 15 stdlib modules rewritten in
+pure FARD, fard_eval.fard running as a pure FARD evaluator. The full compiler
+pipeline (fardlex, fardparse, fard_lower, fard_codegen, fard_elf, fard_link)
+compiles to native ELF. Stage 7 is complete: cross-module calls resolve through
+the native linker with no Rust at runtime.
 
-```text
-src/orgntr_prim/omir.fard
-src/orgntr_prim/lower_ocir_to_omir.fard
-src/orgntr_prim/x86_64_encode.fard
-src/orgntr_prim/macho.fard
-```
+FARD Prim is the bridge from that pipeline to the language running itself end
+to end on native x86-64.
 
-Next milestone:
+   https://github.com/mauludsadiq/FARD
 
-```text
-FARD emits the same branch-gate object structure Rust currently emits.
-```
 
-First acceptance test:
+# License
 
-```bash
-cc -arch x86_64 -o run host.c out.o target/x86_64-apple-darwin/debug/liborgntr_rt.a
-./run
-otool -l out.o | rg "LC_BUILD_VERSION"
-```
-
-Expected:
-
-```text
-2
-cmd LC_BUILD_VERSION
-```
-
-The proof carried forward is:
-
-```text
-wrote out.o
-2
-cmd LC_BUILD_VERSION
-```
+MUI
