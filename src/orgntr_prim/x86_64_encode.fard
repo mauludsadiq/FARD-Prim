@@ -77,6 +77,10 @@ fn epilogue() {
   [93, 195]
 }
 
+fn pop_rbp() {
+  [93]
+}
+
 fn sub_rsp(frame_size) {
   if frame_size < 128 then [72, 131, 236, u8(frame_size)]
   else list.concat([[72, 129, 236], le32(frame_size)])
@@ -151,7 +155,7 @@ fn encode_inst(inst) {
   if inst.op == "Prologue" then
     append_bytes(prologue(), sub_rsp(inst.frame_size))
   else if inst.op == "Epilogue" then
-    add_rsp(inst.frame_size)
+    list.concat([add_rsp(inst.frame_size), pop_rbp()])
   else if inst.op == "MovImm64" then
     mov_r64_imm64(inst.dst, inst.val)
   else if inst.op == "MovStackToReg" then

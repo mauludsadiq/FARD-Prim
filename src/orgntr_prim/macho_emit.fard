@@ -1,0 +1,469 @@
+import("std/list") as list
+import("std/str") as str
+import("std/bits") as bits
+import("../orgntr_prim/x86_64_encode") as enc
+
+// ── byte helpers ─────────────────────────────────────────────────────────────
+
+fn u8(n) { bits.band(n, 255) }
+
+fn le16(n) {
+  [u8(n), u8(bits.bshr(n, 8))]
+}
+
+fn le32(n) { enc.le32(n) }
+fn le64(n) { enc.le64(n) }
+
+fn zeros(n) { list.build(n, fn(_) { 0 }) }
+
+fn pad_to(bs, align) {
+  let r = list.len(bs) % align in
+  if r == 0 then bs
+  else list.concat([bs, zeros(align - r)])
+}
+
+fn align_up(n, a) {
+  let r = n % a in
+  if r == 0 then n else n + (a - r)
+}
+
+// ── string table ─────────────────────────────────────────────────────────────
+// Layout: \x00, then for each symbol "_name\x00"
+// Returns { table: bytes, indices: record of name->index }
+
+fn build_strtab(symbol_names) {
+  let init = { table: [0], indices: {} } in
+  let result = list.fold(symbol_names, init, fn(acc, name) {
+    let idx = list.len(acc.table) in
+    let mangled = str.concat(["_", name]) in
+    let chars = list.map(str.chars(mangled), fn(c) {
+      list.get(bytes_of_char(c), 0)
+    }) in
+    {
+      table: list.concat([acc.table, chars, [0]]),
+      indices: rec_set(acc.indices, name, idx)
+    }
+  }) in
+  // pad to 4
+  { table: pad_to(result.table, 4), indices: result.indices }
+}
+
+fn bytes_of_char(c) {
+  // single char string -> first byte
+  let b = list.get(list.map(str.chars(c), fn(_) { 0 }), 0) in
+  // use bytes module approach: encode char as ascii codepoint
+  // str.chars gives single-char strings; we need the codepoint
+  // Workaround: build a lookup for printable ASCII via known encoding
+  ascii_byte(c)
+}
+
+fn ascii_byte(c) {
+  // Return ASCII codepoint of a single character
+  // We exploit that str.from(n) gives decimal string, not char
+  // Use bytes.of_str and bytes.get
+  let bs = bytes_of_str_list(c) in
+  list.get(bs, 0)
+}
+
+fn bytes_of_str_list(s) {
+  // Convert string to list of byte values using known ranges
+  list.map(str.chars(s), fn(ch) { char_to_byte(ch) })
+}
+
+fn char_to_byte(ch) {
+  // Map single char to its ASCII codepoint
+  // Build via arithmetic on known anchors
+  if ch == " " then 32
+  else if ch == "!" then 33
+  else if ch == "\"" then 34
+  else if ch == "#" then 35
+  else if ch == "$" then 36
+  else if ch == "%" then 37
+  else if ch == "&" then 38
+  else if ch == "'" then 39
+  else if ch == "(" then 40
+  else if ch == ")" then 41
+  else if ch == "*" then 42
+  else if ch == "+" then 43
+  else if ch == "," then 44
+  else if ch == "-" then 45
+  else if ch == "." then 46
+  else if ch == "/" then 47
+  else if ch == "0" then 48
+  else if ch == "1" then 49
+  else if ch == "2" then 50
+  else if ch == "3" then 51
+  else if ch == "4" then 52
+  else if ch == "5" then 53
+  else if ch == "6" then 54
+  else if ch == "7" then 55
+  else if ch == "8" then 56
+  else if ch == "9" then 57
+  else if ch == ":" then 58
+  else if ch == ";" then 59
+  else if ch == "<" then 60
+  else if ch == "=" then 61
+  else if ch == ">" then 62
+  else if ch == "?" then 63
+  else if ch == "@" then 64
+  else if ch == "A" then 65
+  else if ch == "B" then 66
+  else if ch == "C" then 67
+  else if ch == "D" then 68
+  else if ch == "E" then 69
+  else if ch == "F" then 70
+  else if ch == "G" then 71
+  else if ch == "H" then 72
+  else if ch == "I" then 73
+  else if ch == "J" then 74
+  else if ch == "K" then 75
+  else if ch == "L" then 76
+  else if ch == "M" then 77
+  else if ch == "N" then 78
+  else if ch == "O" then 79
+  else if ch == "P" then 80
+  else if ch == "Q" then 81
+  else if ch == "R" then 82
+  else if ch == "S" then 83
+  else if ch == "T" then 84
+  else if ch == "U" then 85
+  else if ch == "V" then 86
+  else if ch == "W" then 87
+  else if ch == "X" then 88
+  else if ch == "Y" then 89
+  else if ch == "Z" then 90
+  else if ch == "[" then 91
+  else if ch == "\\" then 92
+  else if ch == "]" then 93
+  else if ch == "^" then 94
+  else if ch == "_" then 95
+  else if ch == "`" then 96
+  else if ch == "a" then 97
+  else if ch == "b" then 98
+  else if ch == "c" then 99
+  else if ch == "d" then 100
+  else if ch == "e" then 101
+  else if ch == "f" then 102
+  else if ch == "g" then 103
+  else if ch == "h" then 104
+  else if ch == "i" then 105
+  else if ch == "j" then 106
+  else if ch == "k" then 107
+  else if ch == "l" then 108
+  else if ch == "m" then 109
+  else if ch == "n" then 110
+  else if ch == "o" then 111
+  else if ch == "p" then 112
+  else if ch == "q" then 113
+  else if ch == "r" then 114
+  else if ch == "s" then 115
+  else if ch == "t" then 116
+  else if ch == "u" then 117
+  else if ch == "v" then 118
+  else if ch == "w" then 119
+  else if ch == "x" then 120
+  else if ch == "y" then 121
+  else if ch == "z" then 122
+  else if ch == "{" then 123
+  else if ch == "|" then 124
+  else if ch == "}" then 125
+  else if ch == "~" then 126
+  else 0
+}
+
+fn str_to_bytes(s) {
+  list.flatten(list.map(str.chars(s), fn(c) { [char_to_byte(c)] }))
+}
+
+fn rec_set(r, k, v) {
+  let pairs = list.map(rec_keys_list(r), fn(key) { { k: key, v: rec_get(r, key) } }) in
+  let filtered = list.filter(pairs, fn(p) { p.k != k }) in
+  list.fold(filtered, { [k]: v }, fn(acc, p) { { ...acc, [p.k]: p.v } })
+}
+
+fn rec_keys_list(r) {
+  list.map(str.chars(""), fn(_) { "" })
+}
+
+// ── fixed-width name bytes (16 bytes, null-padded) ───────────────────────────
+
+fn name16(s) {
+  let bs = str_to_bytes(s) in
+  let trimmed = list.take(bs, 16) in
+  let padding = zeros(16 - list.len(trimmed)) in
+  list.concat([trimmed, padding])
+}
+
+// ── Mach-O constants ─────────────────────────────────────────────────────────
+
+fn mh_magic_64()   { [207, 250, 237, 254] }  // 0xFEEDFACF little-endian
+fn cpu_type()      { le32(16777223) }          // CPU_TYPE_X86_64 = 0x01000007
+fn cpu_subtype()   { le32(3) }                 // CPU_SUBTYPE_X86_64_ALL
+fn mh_object()     { le32(1) }                 // MH_OBJECT
+fn mh_subsections_via_symbols() { le32(8192) } // 0x2000
+
+// ── Mach-O header (32 bytes) ─────────────────────────────────────────────────
+
+fn macho_header(ncmds, sizeofcmds) {
+  list.concat([
+    mh_magic_64(),
+    cpu_type(),
+    cpu_subtype(),
+    mh_object(),
+    le32(ncmds),
+    le32(sizeofcmds),
+    mh_subsections_via_symbols(),
+    zeros(4)  // reserved
+  ])
+}
+
+// ── section_64 header (80 bytes) ─────────────────────────────────────────────
+
+fn section_header(sectname, segname, addr, size, offset, align, reloff, nreloc, flags) {
+  list.concat([
+    name16(sectname),
+    name16(segname),
+    le64(addr),
+    le64(size),
+    le32(offset),
+    le32(align),
+    le32(reloff),
+    le32(nreloc),
+    le32(flags),
+    le32(0),   // reserved1
+    le32(0),   // reserved2
+    le32(0)    // reserved3
+  ])
+}
+
+// ── LC_SEGMENT_64 with one __text section (152 bytes) ────────────────────────
+
+fn lc_segment_64(text_size, text_offset, reloff, nreloc) {
+  let sect = section_header(
+    "__text", "__TEXT",
+    0, text_size, text_offset,
+    4,             // align = 2^4 = 16
+    reloff, nreloc,
+    2147484672     // S_REGULAR | S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS = 0x80000400
+  ) in
+  let vmsize = align_up(text_size, 4096) in
+  list.concat([
+    le32(25),        // LC_SEGMENT_64 = 0x19
+    le32(152),       // cmdsize = 72 + 80
+    name16(""),      // segname = ""
+    le64(0),         // vmaddr
+    le64(vmsize),    // vmsize
+    le64(text_offset), // fileoff
+    le64(text_size), // filesize
+    le32(7),         // maxprot  = VM_PROT_ALL
+    le32(7),         // initprot = VM_PROT_ALL
+    le32(1),         // nsects
+    le32(0),         // flags
+    sect
+  ])
+}
+
+// ── LC_BUILD_VERSION (24 bytes, no tools) ────────────────────────────────────
+
+fn lc_build_version() {
+  list.concat([
+    le32(50),    // LC_BUILD_VERSION = 0x32
+    le32(24),    // cmdsize
+    le32(1),     // platform = PLATFORM_MACOS
+    le32(720896), // minos = 11.0.0 = 0x000B0000
+    le32(851968), // sdk  = 13.0.0 = 0x000D0000
+    le32(0)      // ntools
+  ])
+}
+
+// ── LC_SYMTAB (24 bytes) ─────────────────────────────────────────────────────
+
+fn lc_symtab(symoff, nsyms, stroff, strsize) {
+  list.concat([
+    le32(2),           // LC_SYMTAB
+    le32(24),          // cmdsize
+    le32(symoff),
+    le32(nsyms),
+    le32(stroff),
+    le32(strsize)
+  ])
+}
+
+// ── LC_DYSYMTAB (80 bytes) ───────────────────────────────────────────────────
+
+fn lc_dysymtab(nextdefsym) {
+  list.concat([
+    le32(11),          // LC_DYSYMTAB
+    le32(80),          // cmdsize
+    le32(0),           // ilocalsym
+    le32(0),           // nlocalsym
+    le32(0),           // iextdefsym
+    le32(nextdefsym),  // nextdefsym
+    le32(nextdefsym),  // iundefsym
+    le32(0),           // nundefsym
+    le32(0),           // tocoff
+    le32(0),           // ntoc
+    le32(0),           // modtaboff
+    le32(0),           // nmodtab
+    le32(0),           // extrefsymoff
+    le32(0),           // nextrefsyms
+    le32(0),           // indirectsymoff
+    le32(0),           // nindirectsyms
+    le32(0),           // extreloff
+    le32(0),           // nextrel
+    le32(0),           // locreloff
+    le32(0)            // nlocrel
+  ])
+}
+
+// ── nlist_64 entry (16 bytes) ────────────────────────────────────────────────
+// type 0x0F = N_EXT | N_SECT (external defined symbol in section)
+
+fn nlist64(strx, sect, value) {
+  list.concat([
+    le32(strx),   // n_strx
+    [15],         // n_type = N_EXT | N_SECT = 0x0F
+    [sect],       // n_sect (1-indexed)
+    le16(0),      // n_desc
+    le64(value)   // n_value = address within section
+  ])
+}
+
+// ── relocation entry (8 bytes) ───────────────────────────────────────────────
+// X86_64_RELOC_BRANCH = 2, pcrel=1, len=2 (4 bytes), ext=1
+
+fn reloc_entry(addr, sym_idx) {
+  // r_info: sym_idx(24) | pcrel(1) | len(2) | ext(1) | type(4)
+  // pcrel=1, len=2, ext=1, type=2 (X86_64_RELOC_BRANCH)
+  // packed: bits[27]=ext=1, bits[25:26]=len=2, bits[24]=pcrel=1, bits[28:31]=type=2
+  // = type<<28 | ext<<27 | len<<25 | pcrel<<24 | sym_idx
+  // = 2<<28 | 1<<27 | 2<<25 | 1<<24 | sym_idx
+  // = 0x20000000 | 0x08000000 | 0x04000000 | 0x01000000 | sym_idx
+  // = 0x2D000000 | sym_idx
+  let r_info = bits.bor(805306368, sym_idx) in  // 0x2D000000 = 754974720... recalc:
+  // 2<<28 = 536870912, 1<<27 = 134217728, 2<<25 = 67108864, 1<<24 = 16777216
+  // sum = 754974720 = 0x2D000000
+  let r_info_val = bits.bor(754974720, sym_idx) in
+  list.concat([le32(addr), le32(r_info_val)])
+}
+
+// ── main emitter ─────────────────────────────────────────────────────────────
+// Input: linked module from x86_64_link.link_module
+// linked.funcs = list of { name, base, text, relocs }
+// linked.text  = concatenated text
+// linked.unresolved_relocs = list of { kind, at, next_ip, symbol }
+// linked.sym_table = { name -> addr }
+
+fn emit_macho(linked) {
+  let text = linked.text in
+  let text_len = list.len(text) in
+
+  // Collect defined symbols (all function names) sorted by address
+  let def_syms = list.map(linked.funcs, fn(f) { { name: f.name, addr: f.base } }) in
+
+  // Collect undefined symbols (unresolved relocs) — unique symbol names
+  let undef_syms = list.fold(linked.unresolved_relocs, [], fn(acc, r) {
+    if list.any(acc, fn(s) { s.name == r.symbol }) then acc
+    else list.append(acc, { name: r.symbol, addr: 0 })
+  }) in
+
+  let all_syms = list.concat([def_syms, undef_syms]) in
+  let nsyms = list.len(all_syms) in
+  let nrelocs = list.len(linked.unresolved_relocs) in
+
+  // Build string table
+  let sym_names = list.map(all_syms, fn(s) { s.name }) in
+  let strtab_bytes = build_strtab_simple(sym_names) in
+  let str_indices = strtab_indices(sym_names) in
+  let strsize = list.len(strtab_bytes) in
+
+  // File layout constants
+  let lc_total = 280 in  // 152 + 24 + 24 + 80
+  let text_offset = 320 in  // 32 + 280, aligned to 16
+  let text_end = text_offset + text_len in
+  let reloc_offset = align_up(text_end, 8) in
+  let reloc_size = nrelocs * 8 in
+  let symoff = align_up(reloc_offset + reloc_size, 8) in
+  let stroff = symoff + nsyms * 16 in
+
+  // Build reloc entries — map symbol name to index in all_syms
+  let reloc_bytes = list.flatten(list.map(linked.unresolved_relocs, fn(r) {
+    let sym_idx = sym_index(all_syms, r.symbol) in
+    reloc_entry(r.at, sym_idx)
+  })) in
+
+  // Build nlist_64 entries
+  let nlist_bytes = list.flatten(list.map(all_syms, fn(s) {
+    let strx = list.get(str_indices, sym_index(all_syms, s.name)) in
+    let sect = if s.addr == 0 && list.any(undef_syms, fn(u) { u.name == s.name }) then 0 else 1 in
+    nlist64(strx, sect, s.addr)
+  })) in
+
+  // Assemble load commands with correct offsets
+  let lc_seg  = lc_segment_64(text_len, text_offset, reloc_offset, nrelocs) in
+  let lc_bv   = lc_build_version() in
+  let lc_sym  = lc_symtab(symoff, nsyms, stroff, strsize) in
+  let lc_dys  = lc_dysymtab(list.len(def_syms)) in
+
+  let hdr = macho_header(4, lc_total) in
+
+  // Pad between sections
+  let hdr_and_lc = list.concat([hdr, lc_seg, lc_bv, lc_sym, lc_dys]) in
+  let after_lc_pad = zeros(text_offset - list.len(hdr_and_lc)) in
+  let after_text_pad = zeros(reloc_offset - text_end) in
+  let after_reloc_pad = zeros(symoff - (reloc_offset + reloc_size)) in
+
+  list.concat([
+    hdr_and_lc,
+    after_lc_pad,
+    text,
+    after_text_pad,
+    reloc_bytes,
+    after_reloc_pad,
+    nlist_bytes,
+    strtab_bytes
+  ])
+}
+
+// ── simple string table builder (no rec dependency) ──────────────────────────
+
+fn build_strtab_simple(names) {
+  let body = list.fold(names, [0], fn(acc, name) {
+    let mangled = str.concat(["_", name]) in
+    list.concat([acc, str_to_bytes(mangled), [0]])
+  }) in
+  pad_to(body, 4)
+}
+
+fn strtab_indices(names) {
+  let result = list.fold(names, { off: 1, indices: [] }, fn(acc, name) {
+    let mangled = str.concat(["_", name]) in
+    let len = list.len(str_to_bytes(mangled)) + 1 in
+    {
+      off: acc.off + len,
+      indices: list.append(acc.indices, acc.off)
+    }
+  }) in
+  result.indices
+}
+
+fn sym_index(syms, name) {
+  list.find_index(syms, fn(s) { s.name == name })
+}
+
+export {
+  char_to_byte,
+  str_to_bytes,
+  name16,
+  macho_header,
+  section_header,
+  lc_segment_64,
+  lc_build_version,
+  lc_symtab,
+  lc_dysymtab,
+  nlist64,
+  reloc_entry,
+  build_strtab_simple,
+  strtab_indices,
+  emit_macho
+}

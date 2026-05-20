@@ -1,0 +1,143 @@
+import("../src/orgntr_prim/macho_emit") as macho
+import("../src/orgntr_prim/x86_64_link") as link
+import("../src/orgntr_prim/x86_64_fixups") as fix
+import("../src/orgntr_prim/run_gate") as gate
+import("../src/orgntr_prim/lower_ocir_to_omir") as lower
+import("std/list") as list
+
+fn u32le(bs, off) {
+  list.get(bs, off) +
+  list.get(bs, off + 1) * 256 +
+  list.get(bs, off + 2) * 65536 +
+  list.get(bs, off + 3) * 16777216
+}
+
+fn u16le(bs, off) {
+  list.get(bs, off) + list.get(bs, off + 1) * 256
+}
+
+fn branch_gate_object() {
+  let ocir = gate.branch_gate_module(true) in
+  let om = lower.lower_module(ocir) in
+  let encoded = fix.encode_module_with_fixups(om) in
+  let linked = link.link_module(encoded) in
+  macho.emit_macho(linked)
+}
+
+test "macho header magic is 0xFEEDFACF" {
+  let bs = branch_gate_object() in
+  u32le(bs, 0) == 4277009103
+}
+
+test "macho cputype is x86_64" {
+  let bs = branch_gate_object() in
+  u32le(bs, 4) == 16777223
+}
+
+test "macho filetype is MH_OBJECT" {
+  let bs = branch_gate_object() in
+  u32le(bs, 12) == 1
+}
+
+test "macho ncmds is 4" {
+  let bs = branch_gate_object() in
+  u32le(bs, 16) == 4
+}
+
+test "macho sizeofcmds is 280" {
+  let bs = branch_gate_object() in
+  u32le(bs, 20) == 280
+}
+
+test "macho flags has MH_SUBSECTIONS_VIA_SYMBOLS" {
+  let bs = branch_gate_object() in
+  u32le(bs, 24) == 8192
+}
+
+test "text section offset is 320" {
+  let bs = branch_gate_object() in
+  // section offset field is at: 32 (hdr) + 8 (lc_seg cmd+size) + 16 (segname)
+  // + 8 (vmaddr) + 8 (vmsize) + 8 (fileoff) + 8 (filesize) + 4 (maxprot)
+  // + 4 (initprot) + 4 (nsects) + 4 (flags) = 32+72 = 104
+  // then section header: 16 (sectname) + 16 (segname) + 8 (addr) + 8 (size) = 48
+  // offset field at 104 + 48 = 152
+  u32le(bs, 152) == 320
+}
+
+test "text section size matches branch gate text length" {
+  let ocir = gate.branch_gate_module(true) in
+  let om = lower.lower_module(ocir) in
+  let encoded = fix.encode_module_with_fixups(om) in
+  let linked = link.link_module(encoded) in
+  let bs = macho.emit_macho(linked) in
+  let text_len = list.len(linked.text) in
+  // size field at section header offset 104 + 16+16+8 = 144
+  let lo = list.get(bs, 144) in
+  let hi = list.get(bs, 145) in
+  lo + hi * 256 == text_len % 65536
+}
+
+test "text bytes at offset 320 match linked text" {
+  let ocir = gate.branch_gate_module(true) in
+  let om = lower.lower_module(ocir) in
+  let encoded = fix.encode_module_with_fixups(om) in
+  let linked = link.link_module(encoded) in
+  let bs = macho.emit_macho(linked) in
+  let text = linked.text in
+  let text_len = list.len(text) in
+  list.all(list.range(0, text_len), fn(i) {
+    list.get(bs, 320 + i) == list.get(text, i)
+  })
+}
+
+test "name16 pads to 16 bytes" {
+  list.len(macho.name16("__text")) == 16
+}
+
+test "name16 null pads short names" {
+  let bs = macho.name16("hi") in
+  list.get(bs, 2) == 0 && list.get(bs, 15) == 0
+}
+
+test "char_to_byte maps a to 97" {
+  macho.char_to_byte("a") == 97
+}
+
+test "char_to_byte maps underscore to 95" {
+  macho.char_to_byte("_") == 95
+}
+
+test "str_to_bytes encodes fard_main correctly" {
+  let bs = macho.str_to_bytes("fard_main") in
+  list.get(bs, 0) == 102 &&  // f
+  list.get(bs, 1) == 97  &&  // a
+  list.get(bs, 4) == 95  &&  // _
+  list.len(bs) == 9
+}
+
+test "strtab starts with null byte" {
+  let st = macho.build_strtab_simple(["fard_main"]) in
+  list.get(st, 0) == 0
+}
+
+test "strtab contains underscore-prefixed name" {
+  let st = macho.build_strtab_simple(["fard_main"]) in
+  list.get(st, 1) == 95  // '_'
+}
+
+test "nlist64 is 16 bytes" {
+  list.len(macho.nlist64(1, 1, 0)) == 16
+}
+
+test "nlist64 type byte is 0x0F" {
+  let nl = macho.nlist64(1, 1, 0) in
+  list.get(nl, 4) == 15
+}
+
+test "reloc_entry is 8 bytes" {
+  list.len(macho.reloc_entry(21, 0)) == 8
+}
+
+test "emitted object is nonempty" {
+  list.len(branch_gate_object()) > 320
+}
