@@ -1,0 +1,99 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("../orgntr_prim/x86_64_fixups") as fix
+
+// Layout functions sequentially, computing base address of each.
+// Returns list of { name, base, func } where base is byte offset
+// of that function's text within the linked text section.
+fn layout_funcs(encoded_funcs) {
+  let result = list.fold(encoded_funcs, { offset: 0, funcs: [] }, fn(acc, f) {
+    {
+      offset: acc.offset + list.len(f.text),
+      funcs: list.append(acc.funcs, { name: f.name, base: acc.offset, func: f })
+    }
+  }) in
+  result.funcs
+}
+
+// Build symbol table: name -> absolute address (base + label offset within func)
+// Entry point of each function is base + label offset of its entry label (0).
+// Also expose all named labels as name.label_id -> addr for future use.
+fn build_symbol_table(laid_out) {
+  list.fold(laid_out, {}, fn(sym_table, entry) {
+    let base = entry.base in
+    let f = entry.func in
+    // Function entry = base + offset of label "0" within func, or just base
+    let entry_offset =
+      if rec.has(f.labels, "0") then rec.get(f.labels, "0")
+      else 0
+    in
+    rec.set(sym_table, f.name, base + entry_offset)
+  })
+}
+
+// Resolve a single CallReloc patch against the symbol table.
+// patch.at = byte index of rel32 field in the func's local text
+// patch.next_ip = local pc after the call instruction
+// base = base address of this function in the linked text
+// Returns { resolved: bool, text: patched_text }
+fn resolve_call_patch(text, base, patch, sym_table) {
+  if rec.has(sym_table, patch.symbol) then
+    let target_addr = rec.get(sym_table, patch.symbol) in
+    let call_next_ip = base + patch.next_ip in
+    let rel = target_addr - call_next_ip in
+    {
+      resolved: true,
+      text: fix.replace4(text, patch.at, rel)
+    }
+  else
+    { resolved: false, text: text }
+}
+
+// Resolve all CallReloc patches in one function.
+fn resolve_func_relocs(laid_out_entry, sym_table) {
+  let base = laid_out_entry.base in
+  let f = laid_out_entry.func in
+  let call_relocs = list.filter(f.relocs, fn(p) { p.kind == "CallReloc" }) in
+  let result = list.fold(call_relocs, { text: f.text, unresolved: [] }, fn(acc, patch) {
+    let r = resolve_call_patch(acc.text, base, patch, sym_table) in
+    if r.resolved then
+      { text: r.text, unresolved: acc.unresolved }
+    else
+      { text: r.text, unresolved: list.append(acc.unresolved, patch) }
+  }) in
+  {
+    name: f.name,
+    base: base,
+    frame_size: f.frame_size,
+    text: result.text,
+    labels: f.labels,
+    relocs: result.unresolved
+  }
+}
+
+// Link a fully encoded module: resolve all call relocs, concatenate text sections.
+fn link_module(encoded_module) {
+  let laid_out = layout_funcs(encoded_module.funcs) in
+  let sym_table = build_symbol_table(laid_out) in
+  let linked_funcs = list.map(laid_out, fn(entry) {
+    resolve_func_relocs(entry, sym_table)
+  }) in
+  let text = list.flatten(list.map(linked_funcs, fn(f) { f.text })) in
+  let unresolved = list.flatten(list.map(linked_funcs, fn(f) { f.relocs })) in
+  {
+    entry: encoded_module.entry,
+    funcs: linked_funcs,
+    text: text,
+    sym_table: sym_table,
+    unresolved_relocs: unresolved
+  }
+}
+
+export {
+  layout_funcs,
+  build_symbol_table,
+  resolve_call_patch,
+  resolve_func_relocs,
+  link_module
+}

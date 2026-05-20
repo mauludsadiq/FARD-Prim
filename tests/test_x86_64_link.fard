@@ -1,0 +1,89 @@
+import("../src/orgntr_prim/omir") as omir
+import("../src/orgntr_prim/x86_64_fixups") as fix
+import("../src/orgntr_prim/x86_64_link") as link
+import("../src/orgntr_prim/run_gate") as gate
+import("../src/orgntr_prim/lower_ocir_to_omir") as lower
+import("std/list") as list
+import("std/rec") as rec
+
+// Helper: two-function module where fn_b calls fn_a
+fn two_func_module() {
+  // fn_a: prologue, mov rax 42, epilogue, ret
+  let fn_a_insts = [
+    omir.prologue(32),
+    omir.bind_label(omir.label(0)),
+    omir.mov_imm64(omir.reg("rax"), 42),
+    omir.epilogue(32),
+    omir.ret_i64(omir.reg("rax"))
+  ] in
+  // fn_b: prologue, call fn_a, epilogue, ret
+  let fn_b_insts = [
+    omir.prologue(32),
+    omir.bind_label(omir.label(0)),
+    omir.call_reloc("fn_a"),
+    omir.epilogue(32),
+    omir.ret_i64(omir.reg("rax"))
+  ] in
+  let ef_a = fix.encode_func_with_fixups({ name: "fn_a", frame_size: 32, insts: fn_a_insts }) in
+  let ef_b = fix.encode_func_with_fixups({ name: "fn_b", frame_size: 32, insts: fn_b_insts }) in
+  fix.encode_module_with_fixups(omir.module("fn_b", [
+    { name: "fn_a", frame_size: 32, insts: fn_a_insts },
+    { name: "fn_b", frame_size: 32, insts: fn_b_insts }
+  ]))
+}
+
+test "layout assigns base 0 to first function" {
+  let ef_a = fix.encode_func_with_fixups({ name: "fn_a", frame_size: 32, insts: [omir.prologue(32), omir.bind_label(omir.label(0)), omir.ret_i64(omir.reg("rax"))] }) in
+  let ef_b = fix.encode_func_with_fixups({ name: "fn_b", frame_size: 32, insts: [omir.prologue(32), omir.bind_label(omir.label(0)), omir.ret_i64(omir.reg("rax"))] }) in
+  let laid = link.layout_funcs([ef_a, ef_b]) in
+  list.get(laid, 0).base == 0
+}
+
+test "layout assigns base equal to first function text length for second function" {
+  let ef_a = fix.encode_func_with_fixups({ name: "fn_a", frame_size: 32, insts: [omir.prologue(32), omir.bind_label(omir.label(0)), omir.ret_i64(omir.reg("rax"))] }) in
+  let ef_b = fix.encode_func_with_fixups({ name: "fn_b", frame_size: 32, insts: [omir.prologue(32), omir.bind_label(omir.label(0)), omir.ret_i64(omir.reg("rax"))] }) in
+  let laid = link.layout_funcs([ef_a, ef_b]) in
+  let a_len = list.len(ef_a.text) in
+  list.get(laid, 1).base == a_len
+}
+
+test "symbol table maps function name to base plus label 0 offset" {
+  let ef_a = fix.encode_func_with_fixups({ name: "fn_a", frame_size: 32, insts: [omir.prologue(32), omir.bind_label(omir.label(0)), omir.ret_i64(omir.reg("rax"))] }) in
+  let laid = link.layout_funcs([ef_a]) in
+  let sym = link.build_symbol_table(laid) in
+  rec.has(sym, "fn_a")
+}
+
+test "call reloc to known symbol is resolved" {
+  let fn_a_insts = [omir.prologue(32), omir.bind_label(omir.label(0)), omir.ret_i64(omir.reg("rax"))] in
+  let fn_b_insts = [omir.prologue(32), omir.bind_label(omir.label(0)), omir.call_reloc("fn_a"), omir.ret_i64(omir.reg("rax"))] in
+  let ef_a = fix.encode_func_with_fixups({ name: "fn_a", frame_size: 32, insts: fn_a_insts }) in
+  let ef_b = fix.encode_func_with_fixups({ name: "fn_b", frame_size: 32, insts: fn_b_insts }) in
+  let linked = link.link_module({ entry: "fn_b", funcs: [ef_a, ef_b] }) in
+  list.len(linked.unresolved_relocs) == 0
+}
+
+test "call reloc to unknown symbol remains unresolved" {
+  let fn_b_insts = [omir.prologue(32), omir.bind_label(omir.label(0)), omir.call_reloc("does_not_exist"), omir.ret_i64(omir.reg("rax"))] in
+  let ef_b = fix.encode_func_with_fixups({ name: "fn_b", frame_size: 32, insts: fn_b_insts }) in
+  let linked = link.link_module({ entry: "fn_b", funcs: [ef_b] }) in
+  list.len(linked.unresolved_relocs) == 1 &&
+  list.get(linked.unresolved_relocs, 0).symbol == "does_not_exist"
+}
+
+test "linked module text is concatenation of all function texts" {
+  let fn_a_insts = [omir.prologue(32), omir.bind_label(omir.label(0)), omir.ret_i64(omir.reg("rax"))] in
+  let fn_b_insts = [omir.prologue(32), omir.bind_label(omir.label(0)), omir.ret_i64(omir.reg("rax"))] in
+  let ef_a = fix.encode_func_with_fixups({ name: "fn_a", frame_size: 32, insts: fn_a_insts }) in
+  let ef_b = fix.encode_func_with_fixups({ name: "fn_b", frame_size: 32, insts: fn_b_insts }) in
+  let linked = link.link_module({ entry: "fn_b", funcs: [ef_a, ef_b] }) in
+  list.len(linked.text) == list.len(ef_a.text) + list.len(ef_b.text)
+}
+
+test "branch gate links with no unresolved relocs" {
+  let ocir = gate.branch_gate_module(true) in
+  let om = lower.lower_module(ocir) in
+  let encoded = fix.encode_module_with_fixups(om) in
+  let linked = link.link_module(encoded) in
+  list.len(linked.unresolved_relocs) == 0
+}
