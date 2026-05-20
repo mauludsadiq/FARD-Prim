@@ -7,57 +7,114 @@ machine at any time.
 
 FARD Prim is the x86-64 native backend — written entirely in FARD. It takes
 the compiler from producing verified receipts to producing native machine code.
-1,125 lines of pure FARD across 16 files.
+2,356 lines of pure FARD across 19 files. The full pipeline is end-to-end:
 
-## What it does
+   OCIR -> lower -> OMIR -> encode -> fixups -> link -> Mach-O .o -> native binary
 
-Three-stage pipeline from typed IR to native bytes:
+The branch gate compiles, links, and executes correctly. fard_main() returns 2.
 
-   OCIR  ->  lower_ocir_to_omir  ->  OMIR  ->  x86_64_encode  ->  x86_64_fixups  ->  native x86-64
+## Pipeline
 
-- Stage 1: slot assignment, frame sizing, branch lowering (174 lines)
-- Stage 2: instruction encoding, rel32 placeholders (200 lines)
-- Stage 3: label scanning, forward branch patching, reloc tracking (123 lines)
+Five stages, all in FARD:
+
+   Stage 1: lower_ocir_to_omir  — slot assignment, frame sizing, branch lowering (188 lines)
+   Stage 2: x86_64_encode       — instruction encoding, rel32 placeholders (239 lines)
+   Stage 3: x86_64_fixups       — label scanning, forward branch patching (123 lines)
+   Stage 4: x86_64_link         — symbol table, call reloc resolution (99 lines)
+   Stage 5: macho_emit          — Mach-O x86_64 MH_OBJECT emitter (469 lines)
+
+## Source
+
+   src/orgntr_prim/
+     ocir.fard               typed IR definitions (41 lines)
+     omir.fard               machine IR definitions (122 lines)
+     lower_ocir_to_omir.fard stage 1 lowering (188 lines)
+     x86_64_encode.fard      stage 2 encoding — SysV AMD64 ABI (239 lines)
+     x86_64_fixups.fard      stage 3 branch fixups (123 lines)
+     x86_64_link.fard        stage 4 linker (99 lines)
+     macho_emit.fard         stage 5 Mach-O object emitter (469 lines)
+     asc7_profile.fard       ASC7 code_safe collapse kernel (206 lines)
+     verify.fard             OCIR type verifier (104 lines)
+     run_gate.fard           branch gate driver + trust record (55 lines)
+     hash.fard               trust record construction (20 lines)
+     target.fard             target triple (18 lines)
+
+## Tests
+
+68 tests across 7 suites, all passing.
+
+   fardrun test --program tests/test_lower_ocir_to_omir.fard   # 5
+   fardrun test --program tests/test_x86_64_encode.fard        # 12
+   fardrun test --program tests/test_x86_64_fixups.fard        # 5
+   fardrun test --program tests/test_x86_64_link.fard          # 7
+   fardrun test --program tests/test_asc7_profile.fard         # 10
+   fardrun test --program tests/test_x86_64_cc.fard            # 9
+   fardrun test --program tests/test_macho_emit.fard           # 20
 
 ## Run
 
    fardrun run --program programs/branch_gate.fard --out out/branch_gate
    cat out/branch_gate/result.json
 
-The result includes the encoded function, verified execution proof, OCIR hash,
-and trust record — all content-addressed.
+The result includes the encoded function, OCIR hash, and a full trust record
+committing to the ASC7 code_safe graph hash, FARD version, and target triple.
 
-## Test
+## Trust Record
 
-   fardrun test --program tests/test_lower_ocir_to_omir.fard
-   fardrun test --program tests/test_x86_64_encode.fard
-   fardrun test --program tests/test_x86_64_fixups.fard
+Every run produces a cryptographically committed trust record:
 
-22 tests. All pass.
+   {
+     fard_version:    "0.5.0",
+     asc7_graph_hash: "sha256:ee0f3eca49ca0c79d348c6d1993eb384928f6b14...",
+     ocir_hash:       "sha256:5f5a22b97ab563a38f6a8e9e27eb47c34adcc178...",
+     h_sem_bits:      0,
+     delta:           0,
+     target:          "x86_64-apple-darwin"
+   }
 
-## Source
+asc7_graph_hash commits to the DSU collapse kernel used to normalize source
+before parsing — 95 printable ASCII chars, three glyph classes ({0,O,o},
+{1,l,I,|}, {',`}), syntax_strict role enforcement, 89-char witness alphabet.
 
-   src/orgntr_prim/
-     ocir.fard               typed IR definitions (41 lines)
-     omir.fard               machine IR definitions (97 lines)
-     lower_ocir_to_omir.fard stage 1 lowering (174 lines)
-     x86_64_encode.fard      stage 2 encoding (200 lines)
-     x86_64_fixups.fard      stage 3 fixups (123 lines)
-     verify.fard             execution verification (104 lines)
-     run_gate.fard           branch gate driver (52 lines)
-     hash.fard               trust record construction (20 lines)
-     target.fard             target triple (18 lines)
+## Calling Convention
+
+External runtime calls follow SysV AMD64:
+
+   fard_add_boxed_out(out: *mut FardVal, a: FardVal, b: FardVal)
+
+   rdi = &dst (lea from stack slot)
+   rsi = lhs.tag+pad  (qword [rbp + lhs_slot + 0])
+   rdx = lhs.payload  (qword [rbp + lhs_slot + 8])
+   rcx = rhs.tag+pad  (qword [rbp + rhs_slot + 0])
+   r8  = rhs.payload  (qword [rbp + rhs_slot + 8])
+
+## Mach-O Output
+
+The emitter produces a valid x86_64 MH_OBJECT file:
+
+   LC_SEGMENT_64     __TEXT,__text — one section, verified by otool
+   LC_BUILD_VERSION  platform=MACOS minos=11.0
+   LC_SYMTAB         nlist_64 entries, underscore-prefixed names
+   LC_DYSYMTAB       external defined / undefined split
+
+Unresolved external call relocs are emitted as X86_64_RELOC_BRANCH entries
+(pcrel=1, len=4, type=2) for the downstream linker to patch.
+
+## Status
+
+- FARD v0.5.0, fardrun v1.7.1, target x86_64-apple-darwin
+- Final link step still uses clang — direct executable emission not yet implemented
+- call relocs to external symbols (fard_add_boxed_out etc.) are tracked and
+ emitted correctly; resolution requires linking against liborgntr_rt.a
 
 ## Context
 
-FARD is currently in Stage 8 of self-hosting: 15 stdlib modules rewritten in
-pure FARD, fard_eval.fard running as a pure FARD evaluator. The full compiler
-pipeline (fardlex, fardparse, fard_lower, fard_codegen, fard_elf, fard_link)
-compiles to native ELF. Stage 7 is complete: cross-module calls resolve through
-the native linker with no Rust at runtime.
+FARD is in Stage 8 of self-hosting: 15 stdlib modules in pure FARD,
+fard_eval.fard running as a pure FARD evaluator. Stage 7 complete: native
+linker resolves cross-module calls with no Rust at runtime.
 
-FARD Prim is the bridge from that pipeline to the language running itself end
-to end on native x86-64.
+FARD Prim is the bridge from that pipeline to the language compiling itself
+to native x86-64 and executing correctly.
 
    https://github.com/mauludsadiq/FARD
 
