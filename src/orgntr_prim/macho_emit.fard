@@ -291,7 +291,7 @@ fn lc_symtab(symoff, nsyms, stroff, strsize) {
 
 // ── LC_DYSYMTAB (80 bytes) ───────────────────────────────────────────────────
 
-fn lc_dysymtab(nextdefsym) {
+fn lc_dysymtab(nextdefsym, nundefsym) {
   list.concat([
     le32(11),          // LC_DYSYMTAB
     le32(80),          // cmdsize
@@ -300,7 +300,7 @@ fn lc_dysymtab(nextdefsym) {
     le32(0),           // iextdefsym
     le32(nextdefsym),  // nextdefsym
     le32(nextdefsym),  // iundefsym
-    le32(0),           // nundefsym
+    le32(nundefsym),   // nundefsym
     le32(0),           // tocoff
     le32(0),           // ntoc
     le32(0),           // modtaboff
@@ -403,7 +403,7 @@ fn emit_macho(linked) {
   let lc_seg  = lc_segment_64(text_len, text_offset, reloc_offset, nrelocs) in
   let lc_bv   = lc_build_version() in
   let lc_sym  = lc_symtab(symoff, nsyms, stroff, strsize) in
-  let lc_dys  = lc_dysymtab(list.len(def_syms)) in
+  let lc_dys  = lc_dysymtab(list.len(def_syms), list.len(undef_syms)) in
 
   let hdr = macho_header(4, lc_total) in
 
@@ -452,6 +452,7 @@ fn sym_index(syms, name) {
 }
 
 export {
+  emit_entry_stub,
   char_to_byte,
   str_to_bytes,
   name16,
@@ -466,4 +467,78 @@ export {
   build_strtab_simple,
   strtab_indices,
   emit_macho
+}
+
+// ── entry stub emitter ───────────────────────────────────────────────────────
+// Emits a Mach-O object containing _main which calls _fard_main then _exit.
+// 17 bytes:
+//   55             push rbp
+//   48 89 e5       mov rbp, rsp
+//   e8 00 00 00 00 call _fard_main  (X86_64_RELOC_BRANCH at offset 4)
+//   48 89 c7       mov rdi, rax
+//   e8 00 00 00 00 call _exit       (X86_64_RELOC_BRANCH at offset 13)
+//
+// Symbol table:
+//   [0] _main      N_EXT|N_SECT  sect=1  value=0  (defined)
+//   [1] _fard_main N_EXT|N_UNDEF sect=0  value=0  (undefined)
+//   [2] _exit      N_EXT|N_UNDEF sect=0  value=0  (undefined)
+
+fn emit_entry_stub() {
+  let text = [85, 72, 137, 229, 232, 0, 0, 0, 0, 72, 137, 199, 232, 0, 0, 0, 0] in
+  let text_len = 17 in
+  let text_offset = 320 in
+
+  // Two reloc entries for the two calls
+  // clang ordering: reloc addr points to rel32 operand (opcode+1), not opcode
+  // symbols: [0]=_main, [1]=_exit, [2]=_fard_main
+  // call _exit:      addr=13 (byte 13 is rel32 field of second call)
+  // call _fard_main: addr=5  (byte 5  is rel32 field of first call)
+  let reloc0 = reloc_entry(13, 1) in
+  let reloc1 = reloc_entry(5, 2) in
+  let reloc_bytes = list.concat([reloc0, reloc1]) in
+  let nrelocs = 2 in
+
+  // String table: \x00 + _main\x00 + _exit\x00 + _fard_main\x00
+  let strtab = build_strtab_simple(["main", "exit", "fard_main"]) in
+  let str_idx = strtab_indices(["main", "exit", "fard_main"]) in
+  let strsize = list.len(strtab) in
+
+  // nlist_64 entries
+  // [0] _main: defined, N_EXT|N_SECT=0x0f, sect=1, value=0
+  let nl0 = nlist64(list.get(str_idx, 0), 1, 0) in
+  // [1] _fard_main: undefined, N_EXT=0x01, sect=0, value=0
+  let nl1 = list.concat([le32(list.get(str_idx, 1)), [1], [0], le16(0), le64(0)]) in
+  // [2] _exit: undefined, N_EXT=0x01, sect=0, value=0
+  let nl2 = list.concat([le32(list.get(str_idx, 2)), [1], [0], le16(0), le64(0)]) in
+  let nlist_bytes = list.concat([nl0, nl1, nl2]) in
+  let nsyms = 3 in
+
+  let lc_total = 280 in
+  let text_end = text_offset + text_len in
+  let reloc_offset = align_up(text_end, 8) in
+  let reloc_size = nrelocs * 8 in
+  let symoff = align_up(reloc_offset + reloc_size, 8) in
+  let stroff = symoff + nsyms * 16 in
+
+  let lc_seg = lc_segment_64(text_len, text_offset, reloc_offset, nrelocs) in
+  let lc_bv  = lc_build_version() in
+  let lc_sym = lc_symtab(symoff, nsyms, stroff, strsize) in
+  let lc_dys = lc_dysymtab(1, 2) in  // 1 defined (_main), 2 undefined (_fard_main, _exit)
+
+  let hdr = macho_header(4, lc_total) in
+  let hdr_and_lc = list.concat([hdr, lc_seg, lc_bv, lc_sym, lc_dys]) in
+  let after_lc_pad = zeros(text_offset - list.len(hdr_and_lc)) in
+  let after_text_pad = zeros(reloc_offset - text_end) in
+  let after_reloc_pad = zeros(symoff - (reloc_offset + reloc_size)) in
+
+  list.concat([
+    hdr_and_lc,
+    after_lc_pad,
+    text,
+    after_text_pad,
+    reloc_bytes,
+    after_reloc_pad,
+    nlist_bytes,
+    strtab
+  ])
 }
