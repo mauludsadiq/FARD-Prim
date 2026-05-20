@@ -1,0 +1,82 @@
+import("../src/orgntr_prim/ocir") as ocir
+import("../src/orgntr_prim/lower_ocir_to_omir") as lower
+import("std/list") as list
+
+fn branch_gate_module(cond_value) {
+  let entry = ocir.block(
+    0,
+    [ocir.inst_imm_bool(0, cond_value)],
+    ocir.term_br_cond(0, 10, 20)
+  )
+
+  let then_block = ocir.block(
+    10,
+    [ocir.inst_imm_i64(1, 2)],
+    ocir.term_ret_i64(1)
+  )
+
+  let else_block = ocir.block(
+    20,
+    [ocir.inst_imm_i64(2, 3)],
+    ocir.term_ret_i64(2)
+  )
+
+  ocir.module("fard_main", [ocir.func("fard_main", [entry, then_block, else_block])])
+}
+
+test "assign slots gives 3 i64 slots and 32 byte frame" {
+  let m = branch_gate_module(true)
+  let f = list.get(m.funcs, 0)
+  let layout = lower.assign_slots(f)
+
+  layout.frame_size == 32
+}
+
+test "lower branch gate emits one function" {
+  let m = branch_gate_module(true)
+  let om = lower.lower_module(m)
+
+  list.len(om.funcs) == 1 && om.entry == "fard_main"
+}
+
+test "lower branch gate emits branch operations" {
+  let m = branch_gate_module(true)
+  let om = lower.lower_module(m)
+  let f = list.get(om.funcs, 0)
+  let ops = list.map(f.insts, fn(i) { i.op })
+
+  list.any(ops, fn(op) { op == "CmpStackZero" }) &&
+  list.any(ops, fn(op) { op == "Jne" }) &&
+  list.any(ops, fn(op) { op == "Jmp" })
+}
+
+test "lower branch gate emits labels 0 10 20" {
+  let m = branch_gate_module(true)
+  let om = lower.lower_module(m)
+  let f = list.get(om.funcs, 0)
+  let labels = list.filter(f.insts, fn(i) { i.op == "Label" })
+
+  list.len(labels) == 3 &&
+  list.get(labels, 0).target.id == 0 &&
+  list.get(labels, 1).target.id == 10 &&
+  list.get(labels, 2).target.id == 20
+}
+
+test "lower add emits stack arithmetic" {
+  let b = ocir.block(
+    0,
+    [
+      ocir.inst_imm_i64(0, 40),
+      ocir.inst_imm_i64(1, 2),
+      ocir.inst_add_i64(2, 0, 1)
+    ],
+    ocir.term_ret_i64(2)
+  )
+
+  let m = ocir.module("fard_main", [ocir.func("fard_main", [b])])
+  let om = lower.lower_module(m)
+  let f = list.get(om.funcs, 0)
+  let ops = list.map(f.insts, fn(i) { i.op })
+
+  list.any(ops, fn(op) { op == "AddRegStack" })
+}

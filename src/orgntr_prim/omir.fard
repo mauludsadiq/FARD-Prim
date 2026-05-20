@@ -1,0 +1,97 @@
+fn reg(name) {
+  { k: "reg", name: name }
+}
+
+fn stack(slot) {
+  { k: "stack", slot: slot }
+}
+
+fn label(id) {
+  { k: "label", id: id }
+}
+
+fn sym(name) {
+  { k: "sym", name: name }
+}
+
+fn module(entry, funcs) {
+  { entry: entry, funcs: funcs }
+}
+
+fn func(name, frame_size, insts) {
+  { name: name, frame_size: frame_size, insts: insts }
+}
+
+fn mov_imm64(dst, val) {
+  { op: "MovImm64", dst: dst, val: val }
+}
+
+fn mov_stack_to_reg(dst, src) {
+  { op: "MovStackToReg", dst: dst, src: src }
+}
+
+fn mov_reg_to_stack(dst, src) {
+  { op: "MovRegToStack", dst: dst, src: src }
+}
+
+fn add_reg_stack(dst, src) {
+  { op: "AddRegStack", dst: dst, src: src }
+}
+
+fn write_fval_int(dst, src_i64) {
+  { op: "WriteFvalInt", dst: dst, src_i64: src_i64 }
+}
+
+fn cmp_stack_zero(src) {
+  { op: "CmpStackZero", src: src }
+}
+
+fn jne(target) {
+  { op: "Jne", target: target }
+}
+
+fn jmp(target) {
+  { op: "Jmp", target: target }
+}
+
+fn bind_label(target) {
+  { op: "Label", target: target }
+}
+
+fn call_reloc(name) {
+  { op: "CallReloc", name: name }
+}
+
+fn ret_i64(src) {
+  { op: "RetI64", src: src }
+}
+
+fn prologue(frame_size) {
+  { op: "Prologue", frame_size: frame_size }
+}
+
+fn epilogue(frame_size) {
+  { op: "Epilogue", frame_size: frame_size }
+}
+
+export {
+  reg,
+  stack,
+  label,
+  sym,
+  module,
+  func,
+  mov_imm64,
+  mov_stack_to_reg,
+  mov_reg_to_stack,
+  add_reg_stack,
+  write_fval_int,
+  cmp_stack_zero,
+  jne,
+  jmp,
+  bind_label,
+  call_reloc,
+  ret_i64,
+  prologue,
+  epilogue,
+}

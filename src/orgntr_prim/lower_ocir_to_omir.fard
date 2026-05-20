@@ -1,0 +1,174 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("std/int") as int
+import("../orgntr_prim/omir") as omir
+
+fn reg_key(r) {
+  "r" |> str_concat(str_from(r))
+}
+
+fn str_from(x) {
+    str.from(x)
+}
+
+fn str_concat(a, b) {
+    str.concat(a, b)
+}
+
+fn slot_size(ty) {
+  if ty == "FardVal" then 16 else 8
+}
+
+fn align16(n) {
+  let rem = n % 16 in
+  if rem == 0 then n else n + (16 - rem)
+}
+
+fn collect_inst_dst(acc, inst) {
+  if inst.op == "ImmI64" then rec.set(acc, str.from(inst.dst), "I64")
+  else if inst.op == "ImmBool" then rec.set(acc, str.from(inst.dst), "I64")
+  else if inst.op == "AddI64" then rec.set(acc, str.from(inst.dst), "I64")
+  else if inst.op == "BoxInt" then rec.set(acc, str.from(inst.dst), "FardVal")
+  else if inst.op == "CallAddBoxed" then rec.set(acc, str.from(inst.dst_fval), "FardVal")
+  else if inst.op == "CallMulBoxed" then rec.set(acc, str.from(inst.dst_fval), "FardVal")
+  else acc
+}
+
+fn collect_block_slots(acc, block) {
+  list.fold(block.insts, acc, fn(a, inst) { collect_inst_dst(a, inst) })
+}
+
+fn collect_func_slots(f) {
+  list.fold(f.blocks, {}, fn(acc, block) { collect_block_slots(acc, block) })
+}
+
+fn sorted_reg_keys(slot_types) {
+  list.sort_int(list.map(rec.keys(slot_types), fn(k) {
+    int.parse(k)?.v
+  }))
+}
+
+fn reg_string(k) {
+  str.from(k)
+}
+
+fn assign_slots_from_keys(keys, slot_types) {
+  let folded = list.fold(keys, { offset: 0, slots: {} }, fn(acc, k) {
+    let ty = rec.get(slot_types, reg_string(k)) in
+    let next = acc.offset + slot_size(ty) in
+    {
+      offset: next,
+      slots: rec.set(acc.slots, reg_string(k), { offset: 0 - next, ty: ty })
+    }
+  }) in
+  {
+    frame_size: align16(folded.offset),
+    slots: folded.slots
+  }
+}
+
+fn assign_slots(f) {
+  let slot_types = collect_func_slots(f) in
+  let keys = sorted_reg_keys(slot_types) in
+  assign_slots_from_keys(keys, slot_types)
+}
+
+fn stack_for(layout, r) {
+  let s = rec.get(layout.slots, str.from(r)) in
+  omir.stack(s.offset)
+}
+
+fn lower_inst(layout, inst) {
+  if inst.op == "ImmI64" then
+    [
+      omir.mov_imm64(omir.reg("rax"), inst.val),
+      omir.mov_reg_to_stack(stack_for(layout, inst.dst), omir.reg("rax"))
+    ]
+  else if inst.op == "ImmBool" then
+    [
+      omir.mov_imm64(omir.reg("rax"), if inst.val then 1 else 0),
+      omir.mov_reg_to_stack(stack_for(layout, inst.dst), omir.reg("rax"))
+    ]
+  else if inst.op == "AddI64" then
+    [
+      omir.mov_stack_to_reg(omir.reg("rax"), stack_for(layout, inst.lhs)),
+      omir.add_reg_stack(omir.reg("rax"), stack_for(layout, inst.rhs)),
+      omir.mov_reg_to_stack(stack_for(layout, inst.dst), omir.reg("rax"))
+    ]
+  else if inst.op == "BoxInt" then
+    [
+      omir.write_fval_int(stack_for(layout, inst.dst), stack_for(layout, inst.src_i64))
+    ]
+  else if inst.op == "CallAddBoxed" then
+    [
+      { op: "PrepareBoxed2", dst: stack_for(layout, inst.dst_fval), lhs: stack_for(layout, inst.lhs_fval), rhs: stack_for(layout, inst.rhs_fval) },
+      omir.call_reloc("fard_add_boxed_out")
+    ]
+  else if inst.op == "CallMulBoxed" then
+    [
+      { op: "PrepareBoxed2", dst: stack_for(layout, inst.dst_fval), lhs: stack_for(layout, inst.lhs_fval), rhs: stack_for(layout, inst.rhs_fval) },
+      omir.call_reloc("fard_mul_boxed_out")
+    ]
+  else
+    [{ op: "LowerError", message: "unknown inst", inst: inst }]
+}
+
+fn lower_insts(layout, insts) {
+  list.flatten(list.map(insts, fn(inst) { lower_inst(layout, inst) }))
+}
+
+fn lower_term(layout, term) {
+  if term.op == "RetI64" then
+    [
+      omir.mov_stack_to_reg(omir.reg("rax"), stack_for(layout, term.src)),
+      omir.epilogue(layout.frame_size),
+      { op: "Ret" }
+    ]
+  else if term.op == "Br" then
+    [omir.jmp(omir.label(term.to))]
+  else if term.op == "BrCond" then
+    [
+      omir.cmp_stack_zero(stack_for(layout, term.cond)),
+      omir.jne(omir.label(term.then_blk)),
+      omir.jmp(omir.label(term.else_blk))
+    ]
+  else
+    [{ op: "LowerError", message: "unknown term", term: term }]
+}
+
+fn lower_block(layout, block) {
+  list.concat([
+    [omir.bind_label(omir.label(block.label))],
+    lower_insts(layout, block.insts),
+    lower_term(layout, block.term)
+  ])
+}
+
+fn lower_func(f) {
+  let layout = assign_slots(f) in
+  let body = list.flatten(list.map(f.blocks, fn(block) { lower_block(layout, block) })) in
+  omir.func(
+    f.name,
+    layout.frame_size,
+    list.concat([[omir.prologue(layout.frame_size)], body])
+  )
+}
+
+fn lower_module(m) {
+  omir.module(
+    m.entry,
+    list.map(m.funcs, fn(f) { lower_func(f) })
+  )
+}
+
+export {
+  slot_size,
+  align16,
+  assign_slots,
+  lower_inst,
+  lower_term,
+  lower_block,
+  lower_func,
+  lower_module,
+}
