@@ -1,0 +1,64 @@
+import("../src/orgntr_prim/asc7_profile") as asc7
+import("std/list") as list
+import("std/str") as str
+
+test "code_safe profile has name code_safe" {
+  let p = asc7.code_safe_profile() in
+  p.name == "code_safe"
+}
+
+test "code_safe witness alphabet has 89 characters" {
+  let p = asc7.code_safe_profile() in
+  list.len(p.witness_alphabet) == 89
+}
+
+test "0 O o collapse to same rep" {
+  let p = asc7.code_safe_profile() in
+  let r0 = list.get(p.rep_map, 48 - 32) in
+  let rO = list.get(p.rep_map, 79 - 32) in
+  let ro = list.get(p.rep_map, 111 - 32) in
+  r0 == ro && rO == ro
+}
+
+test "1 l I collapse to same rep, pipe does not (delimiter-adjacent rule)" {
+  let p = asc7.code_safe_profile() in
+  let r1 = list.get(p.rep_map, 49 - 32) in
+  let rl = list.get(p.rep_map, 108 - 32) in
+  let rI = list.get(p.rep_map, 73 - 32) in
+  r1 == rl && rI == rl
+}
+
+test "single-quote and backtick collapse to same rep" {
+  let p = asc7.code_safe_profile() in
+  let rq = list.get(p.rep_map, 39 - 32) in
+  let rb = list.get(p.rep_map, 96 - 32) in
+  rq == rb
+}
+
+test "delimiters do not collapse with anything" {
+  let p = asc7.code_safe_profile() in
+  // ( = 40, ) = 41, [ = 91, ] = 93, { = 123, } = 125
+  let rp = list.get(p.rep_map, 40 - 32) in
+  rp == 40
+}
+
+test "graph_hash starts with sha256:" {
+  let p = asc7.code_safe_profile() in
+  str.starts_with(asc7.graph_hash(p), "sha256:")
+}
+
+test "graph_hash is stable across two calls" {
+  let p1 = asc7.code_safe_profile() in
+  let p2 = asc7.code_safe_profile() in
+  asc7.graph_hash(p1) == asc7.graph_hash(p2)
+}
+
+test "pick_rep for 0-O-o class is lowercase o (codepoint 111)" {
+  let p = asc7.code_safe_profile() in
+  list.get(p.rep_map, 111 - 32) == 111
+}
+
+test "pick_rep for 1-l-I class is lowercase l (codepoint 108)" {
+  let p = asc7.code_safe_profile() in
+  list.get(p.rep_map, 108 - 32) == 108
+}

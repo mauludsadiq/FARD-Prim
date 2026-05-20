@@ -2,6 +2,7 @@ import("../orgntr_prim/ocir") as ocir
 import("../orgntr_prim/verify") as verify
 import("../orgntr_prim/hash") as h
 import("../orgntr_prim/target") as target
+import("../orgntr_prim/asc7_profile") as asc7
 
 fn branch_gate_module(cond_value) {
   let entry = ocir.block(
@@ -30,7 +31,9 @@ fn branch_gate_report(cond_value) {
   let v = verify.verify_module(m) in
   let ocir_hash = ocir.digest(m) in
   let t = target.x86_64_apple_darwin() in
-  let trust = h.trust_record("0.5.0", "sha256:dev", ocir_hash, 0.0, 0, t.triple) in
+  let profile = asc7.code_safe_profile() in
+  let asc7_hash = asc7.graph_hash(profile) in
+  let trust = h.trust_record("0.5.0", asc7_hash, ocir_hash, 0.0, 0, t.triple) in
 
   {
     verified: v.t == "ok",

@@ -1,0 +1,206 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("std/hash") as hash
+import("std/json") as json
+
+// Universe: printable ASCII 0x20..0x7E (95 chars)
+fn universe() {
+  list.build(95, fn(i) { i + 32 })
+}
+
+fn char_at(i) { i + 32 }
+fn index_of(cp) { cp - 32 }
+
+// Role classification per ASC7 spec
+fn role(cp) {
+  if cp >= 97 && cp <= 122 then "letter"       // a-z
+  else if cp >= 65 && cp <= 90 then "letter"   // A-Z
+  else if cp >= 48 && cp <= 57 then "digit"    // 0-9
+  else if cp == 40 || cp == 41 || cp == 91 || cp == 93 || cp == 123 || cp == 125 then "delimiter"
+  else if cp == 32 || cp == 9 then "space"
+  else "punctuation"
+}
+
+fn can_merge(cp1, cp2) {
+  let r1 = role(cp1) in
+  let r2 = role(cp2) in
+  if r1 == "delimiter" || r2 == "delimiter" then false
+  else true
+}
+
+// DSU over list indices — represented as a flat list of parent indices
+fn dsu_new() {
+  list.build(95, fn(i) { i })
+}
+
+fn dsu_find(parent, x) {
+  if list.get(parent, x) == x then x
+  else dsu_find(parent, list.get(parent, x))
+}
+
+fn dsu_union(parent, x, y) {
+  let rx = dsu_find(parent, x) in
+  let ry = dsu_find(parent, y) in
+  if rx == ry then parent
+  else list.set(parent, ry, rx)
+}
+
+fn try_union(parent, cp1, cp2) {
+  if can_merge(cp1, cp2) then
+    dsu_union(parent, index_of(cp1), index_of(cp2))
+  else
+    parent
+}
+
+// Apply all pairs within a glyph class
+fn union_class(parent, class) {
+  list.fold(class, parent, fn(p, cp1) {
+    list.fold(class, p, fn(p2, cp2) {
+      if cp1 == cp2 then p2
+      else try_union(p2, cp1, cp2)
+    })
+  })
+}
+
+// code_safe glyph classes as codepoints
+// {0,O,o} = {48,79,111}
+// {1,l,I,|} = {49,108,73,124}
+// {',`} = {39,96}
+fn code_safe_classes() {
+  [
+    [48, 79, 111],
+    [49, 108, 73, 124],
+    [39, 96]
+  ]
+}
+
+// Build DSU from glyph classes
+fn build_dsu(classes) {
+  let parent = dsu_new() in
+  list.fold(classes, parent, fn(p, class) {
+    union_class(p, class)
+  })
+}
+
+// pick_rep: lowercase > digit > min codepoint
+fn pick_rep(class) {
+  let lower = list.find(class, fn(cp) { cp >= 97 && cp <= 122 }) in
+  if lower != null && rec.has(lower, "some") then lower.some
+  else
+    let digit = list.find(class, fn(cp) { cp >= 48 && cp <= 57 }) in
+    if digit != null && rec.has(digit, "some") then digit.some
+    else list.fold(class, list.get(class, 0), fn(m, cp) { if cp < m then cp else m })
+}
+
+// Build rep_map and witness alphabet from DSU
+fn build_rep_map(parent) {
+  // Group indices by root
+  let roots = list.build(95, fn(i) { dsu_find(parent, i) }) in
+
+  // For each root, collect members
+  let classes = list.build(95, fn(root) {
+    list.build(95, fn(i) {
+      if list.get(roots, i) == root then char_at(i) else null
+    })
+    |> list.filter(fn(x) { x != null })
+  })
+  |> list.filter(fn(cls) { list.len(cls) > 0 }) in
+
+  // Dedupe classes by their rep
+  let rep_map = list.build(95, fn(i) {
+    let root = list.get(roots, i) in
+    let members = list.build(95, fn(j) {
+      if list.get(roots, j) == root then char_at(j) else null
+    })
+    |> list.filter(fn(x) { x != null }) in
+    pick_rep(members)
+  }) in
+
+  rep_map
+}
+
+fn build_witness(rep_map) {
+  list.fold(rep_map, [], fn(acc, cp) {
+    if list.any(acc, fn(x) { x == cp }) then acc
+    else list.append(acc, cp)
+  })
+  |> list.sort_int()
+}
+
+// Canonical serialization for hashing per spec:
+// hash over: universe bytes, then per-class (0x00 separator + sorted members), then 0x01 + witness
+fn canonical_hash_input(rep_map) {
+  let u = universe() in
+  let roots = list.build(95, fn(i) {
+    pick_rep(
+      list.build(95, fn(j) {
+        if list.get(rep_map, j) == list.get(rep_map, i) then char_at(j) else null
+      })
+      |> list.filter(fn(x) { x != null })
+    )
+  }) in
+
+  // Collect unique classes sorted by rep
+  let witness = build_witness(rep_map) in
+  let classes = list.map(witness, fn(rep) {
+    list.build(95, fn(i) {
+      if list.get(rep_map, i) == rep then char_at(i) else null
+    })
+    |> list.filter(fn(x) { x != null })
+    |> list.sort_int()
+  }) in
+
+  // Serialize: profile name + universe + classes + witness
+  let profile_part = "code_safe|syntax_strict=true|" in
+  let universe_part = str.join(list.map(u, fn(cp) { str.from(cp) }), ",") in
+  let classes_part = str.join(list.map(classes, fn(cls) {
+    str.join(list.map(cls, fn(cp) { str.from(cp) }), ":")
+  }), "|") in
+  let witness_part = str.join(list.map(witness, fn(cp) { str.from(cp) }), ",") in
+
+  str.concat([profile_part, universe_part, "|", classes_part, "|", witness_part])
+}
+
+// Public API
+
+fn code_safe_profile() {
+  let classes = code_safe_classes() in
+  let parent = build_dsu(classes) in
+  let rep_map = build_rep_map(parent) in
+  let witness = build_witness(rep_map) in
+  {
+    name: "code_safe",
+    syntax_strict: true,
+    glyph_classes: classes,
+    rep_map: rep_map,
+    witness_alphabet: witness
+  }
+}
+
+fn canonical_profile_text(profile) {
+  canonical_hash_input(profile.rep_map)
+}
+
+fn graph_hash(profile) {
+  hash.sha256_text(canonical_profile_text(profile))
+}
+
+fn normalize_text(profile, source) {
+  let cps = list.map(str.chars(source), fn(ch) {
+    let b = list.get(bytes.of_str(ch), 0) in
+    b
+  }) in
+  str.join(
+    list.map(cps, fn(cp) {
+      if cp >= 32 && cp <= 126 then
+        let rep = list.get(profile.rep_map, index_of(cp)) in
+        str.from_int(rep)
+      else
+        str.from_int(cp)
+    }),
+    ""
+  )
+}
+
+export { code_safe_profile, canonical_profile_text, graph_hash, normalize_text }
