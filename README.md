@@ -130,3 +130,7 @@ FARD Prim is the bridge from that pipeline to the language compiling itself
 to native x86-64 and executing correctly.
 
     https://github.com/mauludsadiq/FARD
+
+## License
+
+MUI
