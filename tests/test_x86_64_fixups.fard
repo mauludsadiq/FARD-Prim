@@ -1,0 +1,73 @@
+import("../src/orgntr_prim/omir") as omir
+import("../src/orgntr_prim/x86_64_fixups") as fix
+import("../src/orgntr_prim/run_gate") as gate
+import("../src/orgntr_prim/lower_ocir_to_omir") as lower
+import("std/list") as list
+import("std/rec") as rec
+
+test "scan records labels and branch patches" {
+  let insts = [
+    omir.bind_label(omir.label(0)),
+    omir.cmp_stack_zero(omir.stack(0 - 8)),
+    omir.jne(omir.label(10)),
+    omir.jmp(omir.label(20)),
+    omir.bind_label(omir.label(10)),
+    omir.ret_i64(omir.stack(0 - 16)),
+    omir.bind_label(omir.label(20)),
+    omir.ret_i64(omir.stack(0 - 24))
+  ]
+
+  let s = fix.scan_labels_and_patches(insts)
+
+  rec.get(s.labels, "0") == 0 &&
+  rec.get(s.labels, "10") == 16 &&
+  rec.get(s.labels, "20") == 16 &&
+  list.len(s.patches) == 2
+}
+
+test "replace4 patches four bytes" {
+  fix.replace4([1,2,3,4,5,6], 1, 305419896) == [1,120,86,52,18,6]
+}
+
+test "encode with fixups patches forward jne and jmp" {
+  let insts = [
+    omir.bind_label(omir.label(0)),
+    omir.cmp_stack_zero(omir.stack(0 - 8)),
+    omir.jne(omir.label(10)),
+    omir.jmp(omir.label(20)),
+    omir.bind_label(omir.label(10)),
+    { op: "Ret" },
+    omir.bind_label(omir.label(20)),
+    { op: "Ret" }
+  ]
+
+  let e = fix.encode_with_fixups(insts)
+
+  list.get(e.text, 7) == 5 &&
+  list.get(e.text, 12) == 1
+}
+
+test "call reloc remains unresolved" {
+  let insts = [
+    omir.call_reloc("fard_add_boxed_out")
+  ]
+
+  let e = fix.encode_with_fixups(insts)
+
+  list.len(e.relocs) == 1 &&
+  list.get(e.relocs, 0).symbol == "fard_add_boxed_out"
+}
+
+test "branch gate encodes with fixups and has no call relocs" {
+  let ocir = gate.branch_gate_module(true)
+  let om = lower.lower_module(ocir)
+  let fixed = fix.encode_module_with_fixups(om)
+  let f = list.get(fixed.funcs, 0)
+
+  list.len(f.text) == 84 &&
+  list.len(f.relocs) == 0 &&
+  f.text == [85,72,137,229,72,131,236,32,72,184,1,0,0,0,0,0,0,0,72,137,69,248,72,131,125,248,0,15,133,5,0,0,0,233,23,0,0,0,72,184,2,0,0,0,0,0,0,0,72,137,69,240,72,139,69,240,72,131,196,32,195,72,184,3,0,0,0,0,0,0,0,72,137,69,232,72,139,69,232,72,131,196,32,195] &&
+  rec.get(f.labels, "0") == 8 &&
+  rec.get(f.labels, "10") == 38 &&
+  rec.get(f.labels, "20") == 61
+}

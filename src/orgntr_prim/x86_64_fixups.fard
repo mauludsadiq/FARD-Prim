@@ -1,0 +1,123 @@
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("../orgntr_prim/x86_64_encode") as enc
+
+fn key_label(id) {
+  str.from(id)
+}
+
+fn size_of_inst(inst) {
+  list.len(enc.encode_inst(inst))
+}
+
+fn scan_labels_and_patches(insts) {
+  list.fold(insts, { pc: 0, labels: {}, patches: [] }, fn(acc, inst) {
+    if inst.op == "Label" then
+      {
+        pc: acc.pc,
+        labels: rec.set(acc.labels, key_label(inst.target.id), acc.pc),
+        patches: acc.patches
+      }
+    else if inst.op == "Jne" then
+      {
+        pc: acc.pc + size_of_inst(inst),
+        labels: acc.labels,
+        patches: list.append(acc.patches, { kind: "Jne", at: acc.pc + 2, next_ip: acc.pc + 6, target: inst.target.id })
+      }
+    else if inst.op == "Jmp" then
+      {
+        pc: acc.pc + size_of_inst(inst),
+        labels: acc.labels,
+        patches: list.append(acc.patches, { kind: "Jmp", at: acc.pc + 1, next_ip: acc.pc + 5, target: inst.target.id })
+      }
+    else if inst.op == "CallReloc" then
+      {
+        pc: acc.pc + size_of_inst(inst),
+        labels: acc.labels,
+        patches: list.append(acc.patches, { kind: "CallReloc", at: acc.pc + 1, next_ip: acc.pc + 5, symbol: inst.name })
+      }
+    else
+      {
+        pc: acc.pc + size_of_inst(inst),
+        labels: acc.labels,
+        patches: acc.patches
+      }
+  })
+}
+
+fn byte_at(bs, i) {
+  list.get(bs, i)
+}
+
+fn replace4(bs, at, value) {
+  let le = enc.le32(value) in
+  list.build(list.len(bs), fn(i) {
+    if i == at then list.get(le, 0)
+    else if i == at + 1 then list.get(le, 1)
+    else if i == at + 2 then list.get(le, 2)
+    else if i == at + 3 then list.get(le, 3)
+    else byte_at(bs, i)
+  })
+}
+
+fn patch_one(bs, labels, patch) {
+  if patch.kind == "Jne" || patch.kind == "Jmp" then
+    let target_pc = rec.get(labels, key_label(patch.target)) in
+    let rel = target_pc - patch.next_ip in
+    replace4(bs, patch.at, rel)
+  else
+    bs
+}
+
+fn apply_label_patches(bs, labels, patches) {
+  list.fold(patches, bs, fn(acc, p) { patch_one(acc, labels, p) })
+}
+
+fn unresolved_relocs(patches) {
+  list.filter(patches, fn(p) { p.kind == "CallReloc" })
+}
+
+fn encode_with_fixups(insts) {
+  let scan = scan_labels_and_patches(insts) in
+  let raw = enc.encode_insts(insts) in
+  {
+    text: apply_label_patches(raw, scan.labels, scan.patches),
+    raw_text: raw,
+    labels: scan.labels,
+    patches: scan.patches,
+    relocs: unresolved_relocs(scan.patches)
+  }
+}
+
+fn encode_func_with_fixups(f) {
+  let e = encode_with_fixups(f.insts) in
+  {
+    name: f.name,
+    frame_size: f.frame_size,
+    text: e.text,
+    raw_text: e.raw_text,
+    labels: e.labels,
+    patches: e.patches,
+    relocs: e.relocs
+  }
+}
+
+fn encode_module_with_fixups(m) {
+  {
+    entry: m.entry,
+    funcs: list.map(m.funcs, fn(f) { encode_func_with_fixups(f) })
+  }
+}
+
+export {
+  key_label,
+  size_of_inst,
+  scan_labels_and_patches,
+  replace4,
+  apply_label_patches,
+  unresolved_relocs,
+  encode_with_fixups,
+  encode_func_with_fixups,
+  encode_module_with_fixups,
+}
