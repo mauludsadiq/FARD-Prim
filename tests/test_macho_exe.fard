@@ -1,0 +1,63 @@
+import("../src/orgntr_prim/macho_exe") as exe
+import("../src/orgntr_prim/run_gate") as gate
+import("../src/orgntr_prim/lower_ocir_to_omir") as lower
+import("../src/orgntr_prim/x86_64_fixups") as fix
+import("../src/orgntr_prim/x86_64_link") as link
+import("std/list") as list
+
+fn u32le(bs, off) {
+  list.get(bs, off) +
+  list.get(bs, off+1) * 256 +
+  list.get(bs, off+2) * 65536 +
+  list.get(bs, off+3) * 16777216
+}
+
+fn branch_gate_exe() {
+  let ocir = gate.branch_gate_module(true) in
+  let om = lower.lower_module(ocir) in
+  let encoded = fix.encode_module_with_fixups(om) in
+  let linked = link.link_module(encoded) in
+  exe.emit_exe(linked, "fard_main")
+}
+
+test "exe magic is 0xFEEDFACF" {
+  u32le(branch_gate_exe(), 0) == 4277009103
+}
+
+test "exe filetype is MH_EXECUTE" {
+  u32le(branch_gate_exe(), 12) == 2
+}
+
+test "exe ncmds is 7" {
+  u32le(branch_gate_exe(), 16) == 7
+}
+
+test "exe sizeofcmds is 544" {
+  u32le(branch_gate_exe(), 20) == 544
+}
+
+test "exe flags is MH_NOUNDEFS" {
+  u32le(branch_gate_exe(), 24) == 1
+}
+
+test "exe text starts at file offset 4096" {
+  // __text section offset field at: 32(hdr)+72(pagezero)+8(cmd+size)+16(segname)+8+8+8+8+4+4+4+4=32+72+72=176 for seg
+  // then section header at 176+72=248: sectname(16)+segname(16)+addr(8)+size(8)+offset(4)
+  // offset field at 248+16+16+8+8 = 296
+  list.find_index(list.build(400, fn(i) { u32le(branch_gate_exe(), i) == 4096 }), fn(x) { x == true }) == 208
+}
+
+test "entry stub starts with push rbp" {
+  let bs = branch_gate_exe() in
+  list.get(bs, 4096) == 85
+}
+
+test "entry stub has syscall at end" {
+  let bs = branch_gate_exe() in
+  list.get(bs, 4118) == 15 &&
+  list.get(bs, 4119) == 5
+}
+
+test "exe file size is 8192 plus linkedit" {
+  list.len(branch_gate_exe()) > 8192
+}

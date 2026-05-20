@@ -1,0 +1,305 @@
+import("std/list") as list
+import("std/str") as str
+import("std/bits") as bits
+import("../orgntr_prim/x86_64_encode") as enc
+import("../orgntr_prim/macho_emit") as obj
+
+// Re-use helpers from macho_emit
+fn le16(n) {
+  let u8 = fn(x) { bits.band(x, 255) } in
+  [u8(n), u8(bits.bshr(n, 8))]
+}
+fn le32(n) { enc.le32(n) }
+fn le64(n) { enc.le64(n) }
+fn zeros(n) { list.build(n, fn(_) { 0 }) }
+fn name16(s) { obj.name16(s) }
+fn str_to_bytes(s) { obj.str_to_bytes(s) }
+
+// ── constants ────────────────────────────────────────────────────────────────
+
+fn text_file_offset()    { 4096 }
+fn text_vmaddr()         { 4294971392 }  // 0x100001000
+fn linkedit_file_offset() { 8192 }
+fn linkedit_vmaddr()     { 4294975488 }  // 0x100002000
+fn image_base()          { 4294967296 }  // 0x100000000
+fn pagezero_size()       { 4294967296 }  // 0x100000000
+
+// ── Mach-O header ────────────────────────────────────────────────────────────
+// filetype=2 (MH_EXECUTE), flags=1 (MH_NOUNDEFS)
+
+fn exe_header(ncmds, sizeofcmds) {
+  list.concat([
+    [207, 250, 237, 254],  // magic 0xFEEDFACF
+    le32(16777223),        // cputype x86_64
+    le32(3),               // cpusubtype
+    le32(2),               // filetype MH_EXECUTE
+    le32(ncmds),
+    le32(sizeofcmds),
+    le32(1),               // flags MH_NOUNDEFS
+    le32(0)                // reserved
+  ])
+}
+
+// ── LC_SEGMENT_64 helpers ────────────────────────────────────────────────────
+
+fn lc_seg64(segname, vmaddr, vmsize, fileoff, filesize, maxprot, initprot, nsects, flags, sections) {
+  let cmdsize = 72 + nsects * 80 in
+  let hdr = list.concat([
+    le32(25),
+    le32(cmdsize),
+    name16(segname),
+    le64(vmaddr),
+    le64(vmsize),
+    le64(fileoff),
+    le64(filesize),
+    le32(maxprot),
+    le32(initprot),
+    le32(nsects),
+    le32(flags)
+  ]) in
+  list.concat([hdr, sections])
+}
+
+fn sect64(sectname, segname, addr, size, offset, align, reloff, nreloc, flags) {
+  list.concat([
+    name16(sectname),
+    name16(segname),
+    le64(addr),
+    le64(size),
+    le32(offset),
+    le32(align),
+    le32(reloff),
+    le32(nreloc),
+    le32(flags),
+    le32(0), le32(0), le32(0)  // reserved
+  ])
+}
+
+// ── Load commands ─────────────────────────────────────────────────────────────
+
+fn lc_pagezero() {
+  lc_seg64("__PAGEZERO", 0, pagezero_size(), 0, 0, 0, 0, 0, 0, [])
+}
+
+fn lc_text(text_len) {
+  let sect = sect64(
+    "__text", "__TEXT",
+    text_vmaddr(), text_len,
+    text_file_offset(),
+    4,             // align 2^4=16
+    0, 0,
+    2147484672     // S_REGULAR|S_ATTR_PURE_INSTRUCTIONS|S_ATTR_SOME_INSTRUCTIONS
+  ) in
+  lc_seg64(
+    "__TEXT",
+    image_base(),
+    8192,                   // vmsize covers two pages
+    0,                      // fileoff=0 (first page contains header+lc)
+    8192,                   // filesize
+    5,                      // maxprot r-x
+    5,                      // initprot r-x
+    1, 0,
+    sect
+  )
+}
+
+fn lc_linkedit(linkedit_size) {
+  lc_seg64(
+    "__LINKEDIT",
+    linkedit_vmaddr(),
+    4096,
+    linkedit_file_offset(),
+    linkedit_size,
+    1,   // maxprot r
+    1,   // initprot r
+    0, 0,
+    []
+  )
+}
+
+fn lc_symtab(symoff, nsyms, stroff, strsize) {
+  list.concat([
+    le32(2), le32(24),
+    le32(symoff), le32(nsyms),
+    le32(stroff), le32(strsize)
+  ])
+}
+
+fn lc_dysymtab_minimal() {
+  // 0x1b = LC_DYSYMTAB, cmdsize=24, all zeros except cmd+size
+  // We emit it as all-zero LC_DYSYMTAB (ilocalsym=0 etc.)
+  list.concat([list.concat([le32(27), le32(24)]), zeros(16)])
+}
+
+fn lc_code_sig_stub() {
+  // 0x2a = LC_CODE_SIGNATURE stub, cmdsize=16, dataoff=0 datasize=0
+  list.concat([le32(42), le32(16), le32(0), le32(0)])
+}
+
+fn lc_unixthread(entry_vmaddr) {
+  // LC_UNIXTHREAD cmd=5, cmdsize=184
+  // flavor=4 (x86_THREAD_STATE64), count=42
+  // 168 bytes of thread state, all zero except rip
+  // Register order: rax rbx rcx rdx rdi rsi rbp rsp r8 r9 r10 r11 r12 r13 r14 r15 rip rflags cs fs gs
+  // rip is at index 16 (0-based) = offset 16*8=128 bytes into state
+  let state_before_rip = zeros(128) in
+  let rip = le64(entry_vmaddr) in
+  let state_after_rip = zeros(168 - 128 - 8) in  // 32 bytes after rip
+  list.concat([
+    list.concat([le32(5), le32(184), le32(4), le32(42)]),
+    state_before_rip,
+    rip,
+    state_after_rip
+  ])
+}
+
+// ── Symbol table ─────────────────────────────────────────────────────────────
+
+fn mh_execute_header_sym(strx) {
+  // type=0x03 (N_SECT|N_ABS? actually N_SECT=0x0e|N_EXT=0x01? no...)
+  // From observed: type=0x3, sect=1, desc=16, val=0x100000000
+  // 0x3 = N_ABS|N_EXT? Let's match exactly what ld emits
+  list.concat([le32(strx), [3, 1], le16(16), le64(image_base())])
+}
+
+fn defined_sym(strx, sect, vmaddr) {
+  list.concat([le32(strx), [15, sect], le16(0), le64(vmaddr)])
+}
+
+// ── String table ─────────────────────────────────────────────────────────────
+
+fn exe_strtab(func_names) {
+  // Fixed prefix: null byte + __mh_execute_header + _main
+  let prefix = list.concat([
+    [0],
+    str_to_bytes("__mh_execute_header"), [0],
+    str_to_bytes("_main"), [0]
+  ]) in
+  let body = list.fold(func_names, prefix, fn(acc, name) {
+    list.concat([acc, str_to_bytes("_"), str_to_bytes(name), [0]])
+  }) in
+  // pad to 4
+  let r = list.len(body) % 4 in
+  if r == 0 then body
+  else list.concat([body, zeros(4 - r)])
+}
+
+fn exe_strtab_indices(func_names) {
+  // Returns list of strx for each func_name in order
+  // prefix: [0] __mh_execute_header\0 _main\0
+  // = 1 + 20 + 6 = 27 bytes before first func name
+  let prefix_len = 1 + list.len(str_to_bytes("__mh_execute_header")) + 1 +
+                   list.len(str_to_bytes("_main")) + 1 in
+  let result = list.fold(func_names, { off: prefix_len, indices: [] }, fn(acc, name) {
+    let len = 1 + list.len(str_to_bytes(name)) + 1 in  // "_" + name + null
+    {
+      off: acc.off + len,
+      indices: list.append(acc.indices, acc.off)
+    }
+  }) in
+  result.indices
+}
+
+// ── Entry stub text ──────────────────────────────────────────────────────────
+// push rbp; mov rbp rsp; call _fard_main; mov rdi rax; mov rax 0x2000001; syscall
+// call rel32 = fard_main_vmaddr - (stub_vmaddr + 9)
+// stub_vmaddr = text_vmaddr() (entry is first in text)
+// fard_main follows entry stub in text
+
+fn entry_stub_text(fard_main_offset) {
+  // fard_main_offset = byte offset of _fard_main within text section
+  // call rel32 = fard_main_offset - 9 (next_ip after call is at byte 9)
+  let rel = fard_main_offset - 9 in
+  list.concat([
+    [85, 72, 137, 229],          // push rbp; mov rbp, rsp
+    [232], enc.le32(rel),        // call _fard_main
+    [72, 137, 199],              // mov rdi, rax
+    [72, 184, 1, 0, 0, 2, 0, 0, 0, 0],  // mov rax, 0x2000001
+    [15, 5]                      // syscall
+  ])
+}
+
+// ── Main emitter ─────────────────────────────────────────────────────────────
+// linked: output of x86_64_link.link_module
+// entry_func: name of entry function (e.g. "fard_main")
+
+fn build_text(linked) {
+  let stub = entry_stub_text(24) in
+  list.concat([stub, linked.text])
+}
+
+fn build_symtab(linked) {
+  let stub_size = 24 in
+  let func_names = list.map(linked.funcs, fn(f) { f.name }) in
+  let func_strx = exe_strtab_indices(func_names) in
+  let mh_sym = mh_execute_header_sym(1) in
+  let main_strx = 1 + list.len(str_to_bytes("__mh_execute_header")) + 1 in
+  let main_sym = defined_sym(main_strx, 1, text_vmaddr()) in
+  let func_syms = list.concat(list.build(list.len(linked.funcs), fn(i) {
+    let f = list.get(linked.funcs, i) in
+    let strx = list.get(func_strx, i) in
+    let vmaddr = text_vmaddr() + stub_size + f.base in
+    defined_sym(strx, 1, vmaddr)
+  })) in
+  list.concat([mh_sym, main_sym, func_syms])
+}
+
+fn build_load_cmds(total_text_len, linkedit_size, symoff, nsyms, stroff, strsize) {
+  let lc_pz = lc_pagezero() in
+  let lc_tx = lc_text(total_text_len) in
+  let lc_le = lc_linkedit(linkedit_size) in
+  let lc_st = lc_symtab(symoff, nsyms, stroff, strsize) in
+  let lc_dy = lc_dysymtab_minimal() in
+  let lc_cs = lc_code_sig_stub() in
+  let lc_ut = lc_unixthread(text_vmaddr()) in
+  list.concat([lc_pz, lc_tx, lc_le, lc_st, lc_dy, lc_cs, lc_ut])
+}
+
+fn emit_exe(linked, entry_func) {
+  let total_text = build_text(linked) in
+  let total_text_len = list.len(total_text) in
+  let nlist_bytes = build_symtab(linked) in
+  let func_names = list.map(linked.funcs, fn(f) { f.name }) in
+  let strtab = exe_strtab(func_names) in
+  let strsize = list.len(strtab) in
+  let nsyms = 2 + list.len(linked.funcs) in
+  let symoff = linkedit_file_offset() in
+  let stroff = symoff + nsyms * 16 in
+  let linkedit_size = nsyms * 16 + strsize in
+  let load_cmds = build_load_cmds(total_text_len, linkedit_size, symoff, nsyms, stroff, strsize) in
+  let hdr = exe_header(7, 544) in
+  let header_and_lc = list.concat([hdr, load_cmds]) in
+  let pad_to_text = zeros(text_file_offset() - list.len(header_and_lc)) in
+  let pad_to_linkedit = zeros(linkedit_file_offset() - text_file_offset() - total_text_len) in
+  list.concat([
+    header_and_lc,
+    pad_to_text,
+    total_text,
+    pad_to_linkedit,
+    nlist_bytes,
+    strtab
+  ])
+}
+
+export {
+  emit_exe,
+  lc_pagezero,
+  lc_text,
+  lc_linkedit,
+  lc_symtab,
+  lc_dysymtab_minimal,
+  lc_code_sig_stub,
+  lc_unixthread,
+  defined_sym,
+  mh_execute_header_sym,
+  text_file_offset,
+  linkedit_file_offset,
+  str_to_bytes,
+  exe_header,
+  entry_stub_text,
+  exe_strtab,
+  exe_strtab_indices,
+  lc_unixthread,
+  text_vmaddr,
+  image_base
+}
