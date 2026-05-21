@@ -1,0 +1,65 @@
+import("../src/orgntr_prim/ocir") as ocir
+import("../src/orgntr_prim/lower_ocir_to_omir") as lower
+import("../src/orgntr_prim/x86_64_fixups") as fix
+import("../src/orgntr_prim/x86_64_link") as link
+import("std/list") as list
+import("std/rec") as rec
+
+fn mul_boxed_module() {
+  let insts = [
+    ocir.inst_imm_i64(0, 6),
+    ocir.inst_imm_i64(1, 7),
+    ocir.inst_box_int(2, 0),
+    ocir.inst_box_int(3, 1),
+    ocir.inst_call_mul_boxed(4, 2, 3),
+    ocir.inst_unbox_int(5, 4)
+  ] in
+  let blk = ocir.block(0, insts, ocir.term_ret_i64(5)) in
+  let blks = [blk] in
+  let params = [] in
+  let f = ocir.func_with_params("fard_main", params, blks) in
+  let funcs = [f] in
+  ocir.module("fard_main", funcs)
+}
+
+test "mul boxed module has one function" {
+  list.len(mul_boxed_module().funcs) == 1
+}
+
+test "lower mul boxed emits call_reloc fard_mul_boxed_out" {
+  let om = lower.lower_module(mul_boxed_module()) in
+  let f = list.get(om.funcs, 0) in
+  let found = list.find(f.insts, fn(i) {
+    i.op == "CallReloc" && i.name == "fard_mul_boxed_out"
+  }) in
+  rec.has(found, "some")
+}
+
+test "lower mul boxed emits WriteFvalIntOps" {
+  let om = lower.lower_module(mul_boxed_module()) in
+  let f = list.get(om.funcs, 0) in
+  let found = list.find(f.insts, fn(i) { i.op == "WriteFvalIntOps" }) in
+  rec.has(found, "some")
+}
+
+test "lower mul boxed emits UnboxInt" {
+  let om = lower.lower_module(mul_boxed_module()) in
+  let f = list.get(om.funcs, 0) in
+  let found = list.find(f.insts, fn(i) { i.op == "UnboxInt" }) in
+  rec.has(found, "some")
+}
+
+test "link leaves fard_mul_boxed_out unresolved" {
+  let om = lower.lower_module(mul_boxed_module()) in
+  let encoded = fix.encode_module_with_fixups(om) in
+  let linked = link.link_module(encoded) in
+  list.len(linked.unresolved_relocs) == 1 &&
+  list.get(linked.unresolved_relocs, 0).symbol == "fard_mul_boxed_out"
+}
+
+test "sym_table has fard_main" {
+  let om = lower.lower_module(mul_boxed_module()) in
+  let encoded = fix.encode_module_with_fixups(om) in
+  let linked = link.link_module(encoded) in
+  rec.has(linked.sym_table, "fard_main")
+}
