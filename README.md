@@ -7,7 +7,7 @@ machine at any time.
 
 FARD Prim is the x86-64 native backend — written entirely in FARD. It takes
 the compiler from producing verified receipts to producing native machine code.
-3,156 lines of pure FARD across 25 files.
+3,221 lines of pure FARD across 25 files.
 
 ## ld is gone
 
