@@ -25,6 +25,9 @@ is the entire pipeline. Pure FARD end to end.
     exit: 42  — add2(40, 2), two FARD functions, internal call, SysV ABI
     exit: 42  — box 40, box 2, fard_add_boxed_out, unbox (40 + 2 = 42)
     exit: 42  — box 6, box 7, fard_mul_boxed_out, unbox (6 * 7 = 42)
+    exit: 42  — add(10, 32) compiled from FARD source via full pipeline:
+                FARD source -> fardlex -> fardparse -> fard_lower ->
+                fard_ir_to_ocir -> verify -> OMIR -> x86-64 -> MH_EXECUTE
 
 ## Pipeline
 
@@ -149,6 +152,34 @@ Every run produces a cryptographically committed trust record:
 asc7_graph_hash commits to the DSU collapse kernel — 95 printable ASCII chars,
 three glyph classes ({0,O,o}, {1,l,I,|}, {',`}), syntax_strict, 89-char
 witness alphabet.
+
+## Connected to FARD v0.5
+
+FARD Prim is now connected to the FARD v0.5 compiler pipeline.
+
+    src/orgntr_prim/
+      fard_ir_to_ocir.fard      bridges v0.5 IR to OCIR (new)
+      fard_source_to_native.fard  end-to-end driver: source -> binary (new)
+
+Full pipeline:
+
+    FARD source
+      -> fardlex (tokenize)
+      -> fardparse (AST)
+      -> fard_lower (v0.5 IR)
+      -> fard_ir_to_ocir (bridge)
+      -> verify (OCIR type check)
+      -> lower_ocir_to_omir (OMIR)
+      -> x86_64_encode + fixups (bytes)
+      -> x86_64_link (reloc resolution)
+      -> macho_exe (MH_EXECUTE)
+      -> binary
+
+Usage:
+
+    fardrun run --program programs/test_pipeline_simple.fard --out out/
+    chmod +x out/fard_pipeline_test && out/fard_pipeline_test
+    echo $?   # 42
 
 ## Status
 
