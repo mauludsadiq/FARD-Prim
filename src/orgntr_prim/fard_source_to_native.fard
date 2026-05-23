@@ -14,6 +14,7 @@ import("../orgntr_prim/x86_64_link")     as link
 import("../orgntr_prim/macho_exe")       as exe
 import("std/fs")  as fs
 import("std/bytes") as bytes
+import("std/list")  as list
 import("std/str") as str
 
 fn compile_and_emit(src, out_path) {
@@ -30,7 +31,7 @@ fn compile_and_emit(src, out_path) {
 
   // Stage 4: verify OCIR
   let v = verify.verify_module(ocir_mod) in
-  if v.t != "ok" then { ok: false, err: str.concat(["ocir verify failed: ", str.from(v)]) } else
+  if v.t != "ok" then { ok: false, err: v } else
 
   // Stage 5: lower OCIR to OMIR
   let omir_mod = omir_lower.lower_module(ocir_mod) in

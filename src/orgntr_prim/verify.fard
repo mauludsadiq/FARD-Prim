@@ -84,7 +84,13 @@ fn verify_func(f) {
   else
     let labels = label_record(f.blocks) in
     if rec.has(labels, "__duplicate__") then err("DUPLICATE_BLOCK_LABEL", { func: f.name, label: rec.get(labels, "__duplicate__") })
-    else list.fold(f.blocks, ok({}), fn(state, b) { verify_block(b, state, labels, f.name) })
+    else
+      // Seed type env with param types if func_with_params
+      let init_env = if rec.has(f, "params")
+        then list.fold(f.params, {}, fn(env, p) { put_ty(env, p.reg, p.ty) })
+        else {}
+      in
+      list.fold(f.blocks, ok(init_env), fn(state, b) { verify_block(b, state, labels, f.name) })
 }
 
 fn duplicate_func_name(funcs) {

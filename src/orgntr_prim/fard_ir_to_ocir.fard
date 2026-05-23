@@ -7,6 +7,7 @@
 /// Output: OCIR module record
 
 import("std/list") as list
+import("std/rec")  as rec
 import("std/str")  as str
 import("../orgntr_prim/ocir") as ocir
 
@@ -84,28 +85,75 @@ fn lower_block(label, instrs, fn_names) {
 
 // ── Function lowering ─────────────────────────────────────────────────────────
 
+fn build_subst(instrs, arity) {
+  // Build substitution map: for param loads (load dst src where src < arity)
+  // map dst -> src so we can substitute dst with the param reg throughout
+  list.fold(instrs, {}, fn(acc, i) {
+    if i.op == "load" && rec.has(i, "src") && i.src < arity
+      then rec.set(acc, str.from(i.dst), i.src)
+      else acc
+  })
+}
+
+fn subst_reg(reg, subst) {
+  let key = str.from(reg) in
+  if rec.has(subst, key) then rec.get(subst, key) else reg
+}
+
+fn subst_instr(instr, subst) {
+  let op = instr.op in
+  if op == "AddI64" then
+    ocir.inst_add_i64(instr.dst, subst_reg(instr.lhs, subst), subst_reg(instr.rhs, subst))
+  else if op == "CallI64" then
+    ocir.inst_call_i64(instr.dst, instr.callee, list.map(instr.args, fn(a) { subst_reg(a, subst) }))
+  else if op == "ImmI64" then instr
+  else if op == "ImmBool" then instr
+  else instr
+}
+
 fn lower_fn(f, fn_names) {
-  // v0.5 IR has flat code list — split into blocks by label
-  // Each jump/branch target starts a new block
-  // For now: treat entire fn body as a single block (label 0)
+  let arity = f.arity in
   let all_instrs = f.code in
-  let body = list.filter(all_instrs, fn(i) { !is_term(i) }) in
-  let terms = list.filter(all_instrs, fn(i) { is_term(i) }) in
-  let term = if list.len(terms) == 0
+  let subst = build_subst(all_instrs, arity) in
+  // Skip param load instructions — substituted throughout
+  let non_param = list.filter(all_instrs, fn(i) {
+    !(i.op == "load" && rec.has(i, "src") && i.src < arity)
+  }) in
+  let body = list.filter(non_param, fn(i) { !is_term(i) }) in
+  let terms = list.filter(non_param, fn(i) { is_term(i) }) in
+  let term_raw = if list.len(terms) == 0
     then ocir.term_ret_i64(0)
     else lower_term(list.get(terms, 0), fn_names)
   in
-  let block0 = ocir.block(0, list.map(body, fn(i) { lower_instr(i, fn_names) }), term) in
-  ocir.func(f.name, [block0])
+  // Apply substitution to return register
+  let term = if term_raw.op == "RetI64"
+    then ocir.term_ret_i64(subst_reg(term_raw.src, subst))
+    else term_raw
+  in
+  let params = list.build(arity, fn(i) { ocir.param(i, "I64") }) in
+  let body_insts = list.map(
+    list.map(body, fn(i) { lower_instr(i, fn_names) }),
+    fn(i) { subst_instr(i, subst) }
+  ) in
+  let block0 = ocir.block(0, body_insts, term) in
+  ocir.func_with_params(f.name, params, [block0])
 }
 
 // ── Module lowering ───────────────────────────────────────────────────────────
 
+fn rename_entry(name) {
+  if name == "__main__" then "fard_main" else name
+}
+
 fn lower_module(ir) {
-  let fn_names = list.map(ir.fns, fn(f) { f.name }) in
-  let ocir_fns = list.map(ir.fns, fn(f) { lower_fn(f, fn_names) }) in
-  let entry_fn = list.get(ir.fns, ir.entry) in
-  ocir.module(entry_fn.name, ocir_fns)
+  let fn_names = list.map(ir.fns, fn(f) { rename_entry(f.name) }) in
+  let ocir_fns = list.map(ir.fns, fn(f) {
+    let renamed = { name: rename_entry(f.name), arity: f.arity,
+                    locals: f.locals, code: f.code } in
+    lower_fn(renamed, fn_names)
+  }) in
+  let entry_name = rename_entry(list.get(ir.fns, ir.entry).name) in
+  ocir.module(entry_name, ocir_fns)
 }
 
 import("std/type") as type

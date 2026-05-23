@@ -1,4 +1,5 @@
 import("std/list") as list
+import("std/rec") as rec
 import("std/str") as str
 import("std/bits") as bits
 import("../orgntr_prim/x86_64_encode") as enc
@@ -223,8 +224,18 @@ fn entry_stub_text(fard_main_offset) {
 // linked: output of x86_64_link.link_module
 // entry_func: name of entry function (e.g. "fard_main")
 
+fn find_func_offset(funcs, name) {
+  let found = list.find(funcs, fn(f) { f.name == name }) in
+  if rec.has(found, "some") then found.some.base else 0
+}
+
 fn build_text(linked) {
-  let stub = entry_stub_text(24) in
+  // Compute actual offset of fard_main within linked.text
+  // Add stub_size (24) since stub precedes all function code
+  let fard_main_base = find_func_offset(linked.funcs, "fard_main") in
+  let stub_size = 24 in
+  let fard_main_offset = stub_size + fard_main_base in
+  let stub = entry_stub_text(fard_main_offset) in
   list.concat([stub, linked.text])
 }
 
