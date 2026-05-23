@@ -20,6 +20,9 @@ fn lower_instr_one(instr, fn_names, field_order) {
     let v = instr.val in
     if type.of(v) == "int"  then ocir.inst_imm_i64(instr.dst, v)
     else if type.of(v) == "bool" then ocir.inst_imm_bool(instr.dst, v)
+    else if type.of(v) == "str" then
+      // Allocate string on heap: [len, char0, char1, ...]
+      { op: "ConstStr", dst: instr.dst, s: v }
     else { ok: false, err: str.concat(["fard_ir_to_ocir: unsupported const type: ", type.of(v)]) }
   else if op == "add" then ocir.inst_add_i64(instr.dst, instr.a, instr.b)
   else if op == "gt" then { op: "CmpI64", dst: instr.dst, lhs: instr.a, rhs: instr.b, cmp: "gt" }
@@ -84,7 +87,52 @@ fn lower_instr_one(instr, fn_names, field_order) {
 
 fn lower_instr(instr, fn_names, field_order) {
   let op = instr.op in
-  if op == "make_list" then
+  if op == "const" && type.of(instr.val) == "text" then
+    // String constant: allocate on heap [len, char0, char1, ...]
+    let s = instr.val in
+    let n = str.len(s) in
+    let size = (1 + n) * 8 in
+    let ptr_reg = 20000 + instr.dst in
+    let len_reg = 20001 + instr.dst in
+    let alloc = { op: "AllocHeap", dst: ptr_reg, size: size } in
+    let store_len = { op: "ImmI64", dst: len_reg, val: n } in
+    let store_len_heap = { op: "StoreHeap", ptr: ptr_reg, offset: 0, src: len_reg } in
+    let char_instrs = list.flatten(list.build(n, fn(i) {
+      let char_reg = 20002 + instr.dst * 1000 + i in
+      let ch = str.char_code(s, i) in
+      [
+        { op: "ImmI64", dst: char_reg, val: ch },
+        { op: "StoreHeap", ptr: ptr_reg, offset: 8 + i * 8, src: char_reg }
+      ]
+    })) in
+    let copy = { op: "MoveI64", dst: instr.dst, src: ptr_reg } in
+    list.concat([[alloc, store_len, store_len_heap], char_instrs, [copy]])
+  else if op == "ConstStr" then
+    // Allocate string on heap: [len, char0_i64, char1_i64, ...]
+    let s = instr.s in
+    let n = str.len(s) in
+    let size = (1 + n) * 8 in
+    let ptr_reg = 20000 + instr.dst in
+    let len_reg = 20001 + instr.dst in
+    let alloc = { op: "AllocHeap", dst: ptr_reg, size: size } in
+    let store_len = { op: "ImmI64", dst: len_reg, val: n } in
+    let store_len_heap = { op: "StoreHeap", ptr: ptr_reg, offset: 0, src: len_reg } in
+    let char_stores = list.build(n, fn(i) {
+      let char_reg = 20002 + instr.dst * 1000 + i in
+      let ch = str.char_code(s, i) in
+      // Store char as integer (ASCII/Unicode code point)
+      { op: "ConstStrChar", dst: char_reg, ptr: ptr_reg, offset: 8 + i * 8, ch: ch }
+    }) in
+    let copy = { op: "MoveI64", dst: instr.dst, src: ptr_reg } in
+    let flat_chars = list.flatten(list.map(char_stores, fn(cs) {
+      let cr = cs.dst in
+      [
+        { op: "ImmI64", dst: cr, val: cs.ch },
+        { op: "StoreHeap", ptr: cs.ptr, offset: cs.offset, src: cr }
+      ]
+    })) in
+    list.concat([[alloc, store_len, store_len_heap], flat_chars, [copy]])
+  else if op == "make_list" then
     // AllocHeap(ptr) + StoreHeap header + StoreHeap items + MoveI64(dst, ptr)
     let items = instr.items in
     let n = list.len(items) in

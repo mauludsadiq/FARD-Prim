@@ -39,6 +39,18 @@ fn collect_inst_dst(acc, inst) {
   else if inst.op == "SubI64" then rec.set(acc, str.from(inst.dst), "I64")
   else if inst.op == "MoveI64" then rec.set(acc, str.from(inst.dst), "I64")
   else if inst.op == "AllocHeap" then rec.set(acc, str.from(inst.dst), "I64")
+  else if inst.op == "ConstStr" then
+    // Reserve slots for ptr, len, and char temporaries
+    let s = inst.s in
+    let n = str.len(s) in
+    let base = list.fold(
+      list.build(n, fn(i) { 20002 + inst.dst * 1000 + i }),
+      rec.set(rec.set(acc,
+        str.from(20000 + inst.dst), "I64"),
+        str.from(20001 + inst.dst), "I64"),
+      fn(a, char_reg) { rec.set(a, str.from(char_reg), "I64") }
+    ) in
+    rec.set(base, str.from(inst.dst), "I64")
   else if inst.op == "LoadHeap" then rec.set(acc, str.from(inst.dst), "I64")
   else if inst.op == "LoadHeapDyn" then rec.set(acc, str.from(inst.dst), "I64")
   else if inst.op == "LoadHeapStaticIdx" then rec.set(acc, str.from(inst.dst), "I64")
@@ -176,6 +188,39 @@ fn lower_inst(layout, inst) {
       omir.mov_stack_to_reg(omir.reg("rax"), stack_for(layout, inst.src)),
       omir.mov_reg_to_stack(stack_for(layout, inst.dst), omir.reg("rax"))
     ]
+  else if inst.op == "ConstStr" then
+    // Expand string constant: alloc heap, store len, store chars
+    let s = inst.s in
+    let n = str.len(s) in
+    let size = (1 + n) * 8 in
+    let ptr_slot = stack_for(layout, 20000 + inst.dst) in
+    let len_slot = stack_for(layout, 20001 + inst.dst) in
+    let dst_slot = stack_for(layout, inst.dst) in
+    let char_slots = list.build(n, fn(i) { stack_for(layout, 20002 + inst.dst * 1000 + i) }) in
+    let alloc_ops = [
+      omir.mov_imm64(omir.reg("rdi"), size),
+      omir.call_reloc("fard_alloc"),
+      omir.mov_reg_to_stack(ptr_slot, omir.reg("rax"))
+    ] in
+    let len_ops = [
+      omir.mov_imm64(omir.reg("rax"), n),
+      omir.mov_reg_to_stack(len_slot, omir.reg("rax")),
+      { op: "StoreHeap", ptr: ptr_slot, offset: 0, src: len_slot }
+    ] in
+    let char_ops = list.flatten(list.build(n, fn(i) {
+      let ch = str.char_at(s, i) in
+      let cs = list.get(char_slots, i) in
+      [
+        omir.mov_imm64(omir.reg("rax"), ch),
+        omir.mov_reg_to_stack(cs, omir.reg("rax")),
+        { op: "StoreHeap", ptr: ptr_slot, offset: 8 + i * 8, src: cs }
+      ]
+    })) in
+    let copy_ops = [
+      omir.mov_stack_to_reg(omir.reg("rax"), ptr_slot),
+      omir.mov_reg_to_stack(dst_slot, omir.reg("rax"))
+    ] in
+    list.concat([alloc_ops, len_ops, char_ops, copy_ops])
   else if inst.op == "AllocHeap" then
     let dst_slot = stack_for(layout, inst.dst) in
     [
