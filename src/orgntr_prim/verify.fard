@@ -44,6 +44,10 @@ fn verify_inst(inst, env, func_name, block_label) {
     if a.t == "err" then a else
       let b = require_ty(a.v, inst.rhs_fval, "FardVal", "BOXED_CALL_RHS_TYPE", { func: func_name, block: block_label, reg: inst.rhs_fval, op: inst.op }) in
       if b.t == "err" then b else ok(put_ty(b.v, inst.dst_fval, "FardVal"))
+  else if inst.op == "CallI64" then
+    ok(put_ty(env, inst.dst, "I64"))
+  else if inst.op == "UnboxInt" then
+    ok(put_ty(env, inst.dst, "I64"))
   else
     err("UNKNOWN_INST", { func: func_name, block: block_label, op: inst.op })
 }

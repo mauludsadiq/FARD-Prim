@@ -1,0 +1,5 @@
+import("../src/orgntr_prim/fard_source_to_native") as pipeline
+
+let src = "fn add(a, b) { a + b }\nadd(10, 32)"
+let result = pipeline.compile_and_emit(src, "out/fard_pipeline_test")
+result

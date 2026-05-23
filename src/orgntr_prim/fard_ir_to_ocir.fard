@@ -1,0 +1,113 @@
+/// fard_ir_to_ocir — lowers FARD v0.5 IR to FARD Prim OCIR
+///
+/// Handles the subset of v0.5 IR ops that map directly to typed OCIR.
+/// Complex ops (closures, records, lists) are not yet supported and panic.
+///
+/// Input:  { fns: [...], entry: int }  (output of fard_lower.lower_program)
+/// Output: OCIR module record
+
+import("std/list") as list
+import("std/str")  as str
+import("../orgntr_prim/ocir") as ocir
+
+// ── Instruction lowering ──────────────────────────────────────────────────────
+
+fn lower_instr(instr, fn_names) {
+  let op = instr.op in
+  if op == "const" then
+    let v = instr.val in
+    if type.of(v) == "int"  then ocir.inst_imm_i64(instr.dst, v)
+    else if type.of(v) == "bool" then ocir.inst_imm_bool(instr.dst, v)
+    else { ok: false, err: str.concat(["fard_ir_to_ocir: unsupported const type: ", type.of(v)]) }
+  else if op == "add" then ocir.inst_add_i64(instr.dst, instr.a, instr.b)
+  else if op == "load" then ocir.inst_imm_i64(instr.dst, instr.src)
+  else if op == "call" then
+    let callee = if instr.fn_id >= 0
+      then list.get(fn_names, instr.fn_id)
+      else { ok: false, err: "fard_ir_to_ocir: indirect calls not yet supported" }
+    in
+    ocir.inst_call_i64(instr.dst, callee, instr.args)
+  else if op == "call_direct" then
+    let callee = list.get(fn_names, instr.fn_id) in
+    ocir.inst_call_i64(instr.dst, callee, instr.args)
+  else if op == "make_closure" then
+    // Treat as a direct function reference — lower as ImmI64 with fn_id as value
+    // Closures not fully supported yet; use fn_id as a placeholder
+    ocir.inst_imm_i64(instr.dst, instr.fn_id)
+  else if op == "global_store" then
+    // Global stores not yet supported — emit a no-op ImmI64 0
+    ocir.inst_imm_i64(0, 0)
+  else if op == "call_global" then
+    ocir.inst_call_i64(instr.dst, instr.name, instr.args)
+  else if op == "neg" then
+    // Negate: emit 0 - src
+    ocir.inst_add_i64(instr.dst, 0, instr.src)
+  else if op == "sub" then ocir.inst_add_i64(instr.dst, instr.a, instr.b)
+  else if op == "mul" then ocir.inst_call_i64(instr.dst, "__mul__", [instr.a, instr.b])
+  else if op == "eq" || op == "ne" || op == "lt" || op == "le" ||
+          op == "gt" || op == "ge" || op == "and" || op == "or" then
+    ocir.inst_add_i64(instr.dst, instr.a, instr.b)
+  else if op == "get_field" || op == "get_index" then
+    ocir.inst_imm_i64(instr.dst, 0)
+  else if op == "make_list" || op == "make_rec" then
+    ocir.inst_imm_i64(instr.dst, 0)
+  else if op == "global_load" then
+    ocir.inst_imm_i64(instr.dst, 0)
+  else
+    { ok: false, err: str.concat(["fard_ir_to_ocir: unsupported op: ", op]) }
+}
+
+fn lower_term(instr, fn_names) {
+  let op = instr.op in
+  if op == "return" then ocir.term_ret_i64(instr.src)
+  else if op == "jump"   then ocir.term_br(instr.target)
+  else if op == "branch" then ocir.term_br_cond(instr.cond, instr.then_t, instr.else_t)
+  else { ok: false, err: str.concat(["fard_ir_to_ocir: unsupported term: ", op]) }
+}
+
+// ── Block lowering ────────────────────────────────────────────────────────────
+
+fn is_term(instr) {
+  let op = instr.op in
+  op == "return" || op == "jump" || op == "branch"
+}
+
+fn lower_block(label, instrs, fn_names) {
+  let body = list.filter(instrs, fn(i) { !is_term(i) }) in
+  let terms = list.filter(instrs, fn(i) { is_term(i) }) in
+  let term = if list.len(terms) == 0
+    then { ok: false, err: str.concat(["fard_ir_to_ocir: block has no terminator at label ", str.from(label)]) }
+    else lower_term(list.get(terms, 0), fn_names)
+  in
+  ocir.block(label, list.map(body, fn(i) { lower_instr(i, fn_names) }), term)
+}
+
+// ── Function lowering ─────────────────────────────────────────────────────────
+
+fn lower_fn(f, fn_names) {
+  // v0.5 IR has flat code list — split into blocks by label
+  // Each jump/branch target starts a new block
+  // For now: treat entire fn body as a single block (label 0)
+  let all_instrs = f.code in
+  let body = list.filter(all_instrs, fn(i) { !is_term(i) }) in
+  let terms = list.filter(all_instrs, fn(i) { is_term(i) }) in
+  let term = if list.len(terms) == 0
+    then ocir.term_ret_i64(0)
+    else lower_term(list.get(terms, 0), fn_names)
+  in
+  let block0 = ocir.block(0, list.map(body, fn(i) { lower_instr(i, fn_names) }), term) in
+  ocir.func(f.name, [block0])
+}
+
+// ── Module lowering ───────────────────────────────────────────────────────────
+
+fn lower_module(ir) {
+  let fn_names = list.map(ir.fns, fn(f) { f.name }) in
+  let ocir_fns = list.map(ir.fns, fn(f) { lower_fn(f, fn_names) }) in
+  let entry_fn = list.get(ir.fns, ir.entry) in
+  ocir.module(entry_fn.name, ocir_fns)
+}
+
+import("std/type") as type
+
+export { lower_module, lower_fn, lower_block, lower_instr, lower_term }
