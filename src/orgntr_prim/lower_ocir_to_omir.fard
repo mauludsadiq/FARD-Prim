@@ -40,6 +40,8 @@ fn collect_inst_dst(acc, inst) {
   else if inst.op == "MoveI64" then rec.set(acc, str.from(inst.dst), "I64")
   else if inst.op == "AllocHeap" then rec.set(acc, str.from(inst.dst), "I64")
   else if inst.op == "LoadHeap" then rec.set(acc, str.from(inst.dst), "I64")
+  else if inst.op == "LoadHeapDyn" then rec.set(acc, str.from(inst.dst), "I64")
+  else if inst.op == "LoadHeapStaticIdx" then rec.set(acc, str.from(inst.dst), "I64")
   else if inst.op == "StoreHeap" then acc
   else if inst.op == "CmpI64" then rec.set(acc, str.from(inst.dst), "Bool")
   else if inst.op == "BoxInt" then rec.set(acc, str.from(inst.dst), "FardVal")
@@ -189,6 +191,18 @@ fn lower_inst(layout, inst) {
     let ptr_slot = stack_for(layout, inst.ptr) in
     let dst_slot = stack_for(layout, inst.dst) in
     [{ op: "LoadHeap", dst: dst_slot, ptr: ptr_slot, offset: inst.offset }]
+  else if inst.op == "LoadHeapStaticIdx" then
+    // dst = [ptr + 8 + field_idx*8] -- static field index
+    let ptr_slot = stack_for(layout, inst.ptr) in
+    let dst_slot = stack_for(layout, inst.dst) in
+    let byte_offset = 8 + inst.field_idx * 8 in
+    [{ op: "LoadHeap", dst: dst_slot, ptr: ptr_slot, offset: byte_offset }]
+  else if inst.op == "LoadHeapDyn" then
+    // dst = [ptr + 8 + idx*8]
+    let ptr_slot = stack_for(layout, inst.ptr) in
+    let idx_slot = stack_for(layout, inst.idx) in
+    let dst_slot = stack_for(layout, inst.dst) in
+    [{ op: "LoadHeapDyn", dst: dst_slot, ptr: ptr_slot, idx: idx_slot }]
   else if inst.op == "CmpI64" then
     // Compare two I64 registers, store Bool result
     // Use: cmp lhs, rhs; setcc al; movzx rax, al; mov [dst], rax

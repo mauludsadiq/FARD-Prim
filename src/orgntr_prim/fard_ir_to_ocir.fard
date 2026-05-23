@@ -7,13 +7,14 @@
 /// Output: OCIR module record
 
 import("std/list") as list
+import("std/type") as type
 import("std/rec")  as rec
 import("std/str")  as str
 import("../orgntr_prim/ocir") as ocir
 
 // ── Instruction lowering ──────────────────────────────────────────────────────
 
-fn lower_instr_one(instr, fn_names) {
+fn lower_instr_one(instr, fn_names, field_order) {
   let op = instr.op in
   if op == "const" then
     let v = instr.val in
@@ -55,8 +56,21 @@ fn lower_instr_one(instr, fn_names) {
   else if op == "eq" || op == "ne" || op == "lt" || op == "le" ||
           op == "gt" || op == "ge" || op == "and" || op == "or" then
     ocir.inst_add_i64(instr.dst, instr.a, instr.b)
-  else if op == "get_field" || op == "get_index" then
-    ocir.inst_imm_i64(instr.dst, 0)
+  else if op == "get_index" then
+    // dst = heap[obj + 8 + idx*8]
+    // obj is a ptr, idx is a register holding the index
+    // Emit: LoadHeapDyn(dst, ptr=obj, idx_reg=idx, base_offset=8)
+    { op: "LoadHeapDyn", dst: instr.dst, ptr: instr.obj, idx: instr.idx }
+  else if op == "get_field" then
+    // dst = heap[obj + 8 + field_idx*8]
+    // Look up field index from module-level field_order map
+    // field_order maps field_name -> index within its record type
+    let field_name = instr.field in
+    if rec.has(field_order, field_name) then
+      let idx = rec.get(field_order, field_name) in
+      { op: "LoadHeapStaticIdx", dst: instr.dst, ptr: instr.obj, field_idx: idx }
+    else
+      ocir.inst_imm_i64(instr.dst, 0)
   else if op == "make_list" then
     { op: "MakeList", dst: instr.dst, items: instr.items }
   else if op == "make_rec" then
@@ -68,7 +82,7 @@ fn lower_instr_one(instr, fn_names) {
     { ok: false, err: str.concat(["fard_ir_to_ocir: unsupported op: ", op]) }
 }
 
-fn lower_instr(instr, fn_names) {
+fn lower_instr(instr, fn_names, field_order) {
   let op = instr.op in
   if op == "make_list" then
     // AllocHeap(ptr) + StoreHeap header + StoreHeap items + MoveI64(dst, ptr)
@@ -101,7 +115,7 @@ fn lower_instr(instr, fn_names) {
     let copy = { op: "MoveI64", dst: instr.dst, src: ptr_reg } in
     list.concat([[alloc, store_hdr, store_hdr_heap], field_stores, [copy]])
   else
-    [lower_instr_one(instr, fn_names)]
+    [lower_instr_one(instr, fn_names, field_order)]
 }
 
 fn lower_term(instr, fn_names) {
@@ -119,14 +133,14 @@ fn is_term(instr) {
   op == "return" || op == "jump" || op == "branch"
 }
 
-fn lower_block(label, instrs, fn_names) {
+fn lower_block(label, instrs, fn_names, field_order) {
   let body = list.filter(instrs, fn(i) { !is_term(i) }) in
   let terms = list.filter(instrs, fn(i) { is_term(i) }) in
   let term = if list.len(terms) == 0
     then { ok: false, err: str.concat(["fard_ir_to_ocir: block has no terminator at label ", str.from(label)]) }
     else lower_term(list.get(terms, 0), fn_names)
   in
-  ocir.block(label, list.flatten(list.map(body, fn(i) { lower_instr(i, fn_names) })), term)
+  ocir.block(label, list.flatten(list.map(body, fn(i) { lower_instr(i, fn_names, field_order) })), term)
 }
 
 // ── Function lowering ─────────────────────────────────────────────────────────
@@ -190,7 +204,7 @@ fn split_into_blocks(code) {
   })
 }
 
-fn lower_block_from_flat(blk, fn_names, subst, arity, all_blocks, patches) {
+fn lower_block_from_flat(blk, fn_names, subst, arity, all_blocks, patches, field_order) {
   let code = blk.code in
   let label = blk.label in
   
@@ -239,7 +253,7 @@ fn lower_block_from_flat(blk, fn_names, subst, arity, all_blocks, patches) {
     else ocir.term_ret_i64(0)
   in
   
-  let body_insts = list.map(list.flatten(list.map(body, fn(i) { lower_instr(i, fn_names) })), fn(i) { subst_instr(i, subst) }) in
+  let body_insts = list.map(list.flatten(list.map(body, fn(i) { lower_instr(i, fn_names, field_order) })), fn(i) { subst_instr(i, subst) }) in
   
   ocir.block(label, body_insts, term)
 }
@@ -298,11 +312,37 @@ fn subst_instr(instr, subst) {
     { op: "SubI64", dst: instr.dst,
       lhs: subst_reg(instr.lhs, subst),
       rhs: subst_reg(instr.rhs, subst) }
+  else if op == "MoveI64" then
+    { op: "MoveI64", dst: instr.dst, src: subst_reg(instr.src, subst) }
+  else if op == "LoadHeapDyn" then
+    { op: "LoadHeapDyn", dst: instr.dst,
+      ptr: subst_reg(instr.ptr, subst),
+      idx: subst_reg(instr.idx, subst) }
+  else if op == "LoadHeapStaticIdx" then
+    { op: "LoadHeapStaticIdx", dst: instr.dst,
+      ptr: subst_reg(instr.ptr, subst),
+      field_idx: instr.field_idx }
+  else if op == "AllocHeap" then instr
+  else if op == "StoreHeap" then
+    { op: "StoreHeap", ptr: subst_reg(instr.ptr, subst),
+      offset: instr.offset, src: subst_reg(instr.src, subst) }
+  else if op == "LoadHeap" then
+    { op: "LoadHeap", dst: instr.dst,
+      ptr: subst_reg(instr.ptr, subst), offset: instr.offset }
   else instr
 }
 
 fn has_branches(code) {
   list.any(code, fn(i) { i.op == "branch" || i.op == "patch_branch" })
+}
+
+fn build_field_order(instrs) {
+  // Map register -> [field_names_in_order] from make_rec instructions
+  list.fold(instrs, {}, fn(acc, i) {
+    if i.op == "make_rec" && rec.has(i, "fields")
+      then rec.set(acc, str.from(i.dst), list.map(i.fields, fn(f) { f.key }))
+      else acc
+  })
 }
 
 fn build_name_map(instrs) {
@@ -314,11 +354,12 @@ fn build_name_map(instrs) {
   })
 }
 
-fn lower_fn(f, fn_names) {
+fn lower_fn(f, fn_names, mod_field_order) {
   let arity = f.arity in
   let all_instrs = f.code in
   let subst = build_subst(all_instrs, arity) in
   let name_map = build_name_map(all_instrs) in
+  let field_order = mod_field_order in
   let params = list.build(arity, fn(i) { ocir.param(i, "I64") }) in
   
   // Pre-pass: resolve indirect calls (fn_r != -1) using global_load names
@@ -342,7 +383,7 @@ fn lower_fn(f, fn_names) {
     ) in
     let flat_blocks = split_into_blocks(all_instrs) in
     let ocir_blocks = list.map(flat_blocks, fn(blk) {
-      lower_block_from_flat(blk, fn_names, subst, arity, flat_blocks, patches)
+      lower_block_from_flat(blk, fn_names, subst, arity, flat_blocks, patches, field_order)
     }) in
     ocir.func_with_params(f.name, params, ocir_blocks)
   else
@@ -362,7 +403,7 @@ fn lower_fn(f, fn_names) {
       then ocir.term_ret_i64(subst_reg(term_raw.src, subst))
       else term_raw
     in
-    let body_insts = list.map(list.flatten(list.map(body, fn(i) { lower_instr(i, fn_names) })), fn(i) { subst_instr(i, subst) }) in
+    let body_insts = list.map(list.flatten(list.map(body, fn(i) { lower_instr(i, fn_names, field_order) })), fn(i) { subst_instr(i, subst) }) in
     let block0 = ocir.block(0, body_insts, term) in
     ocir.func_with_params(f.name, params, [block0])
 }
@@ -373,17 +414,36 @@ fn rename_entry(name) {
   if name == "__main__" then "fard_main" else name
 }
 
+fn build_module_field_order(fns) {
+  // Collect all make_rec field orders across all functions
+  // Maps field_name -> index
+  list.fold(fns, {}, fn(acc, f) {
+    list.fold(f.code, acc, fn(a, i) {
+      if i.op == "make_rec" && rec.has(i, "fields")
+        then list.fold(
+          list.build(list.len(i.fields), fn(idx) { idx }),
+          a,
+          fn(b, idx) {
+            let fname = list.get(i.fields, idx).key in
+            if rec.has(b, fname) then b else rec.set(b, fname, idx)
+          }
+        )
+        else a
+    })
+  })
+}
+
 fn lower_module(ir) {
   let fn_names = list.map(ir.fns, fn(f) { rename_entry(f.name) }) in
+  let mod_field_order = build_module_field_order(ir.fns) in
   let ocir_fns = list.map(ir.fns, fn(f) {
     let renamed = { name: rename_entry(f.name), arity: f.arity,
                     locals: f.locals, code: f.code } in
-    lower_fn(renamed, fn_names)
+    lower_fn(renamed, fn_names, mod_field_order)
   }) in
   let entry_name = rename_entry(list.get(ir.fns, ir.entry).name) in
   ocir.module(entry_name, ocir_fns)
 }
 
-import("std/type") as type
 
 export { lower_module, lower_fn, lower_block, lower_instr, lower_instr_one, lower_term }

@@ -265,6 +265,25 @@ fn encode_inst(inst) {
       // mov [rax + offset], rcx: REX.W 89 /r ModRM(disp8) = 72 137 104 offset
       [72, 137, 72, inst.offset]
     ])
+  else if inst.op == "LoadHeapDyn" then
+    // dst = [ptr + 8 + idx*8]
+    // mov rax, [rbp+ptr]   -- load ptr
+    // mov rcx, [rbp+idx]   -- load idx
+    // imul rcx, 8          -- idx * 8
+    // add rax, rcx         -- ptr + idx*8
+    // mov rax, [rax+8]     -- load [ptr + idx*8 + 8]
+    // mov [rbp+dst], rax
+    let rax = { k: "reg", name: "rax" } in
+    let rcx = { k: "reg", name: "rcx" } in
+    list.concat([
+      mov_stack_to_reg(rax, inst.ptr),
+      mov_stack_to_reg(rcx, inst.idx),
+      // shl rcx, 3 (multiply index by 8)
+      [72, 193, 225, 3],             // shl rcx, 3
+      [72, 1, 200],                  // add rax, rcx
+      [72, 139, 64, 8],              // mov rax, [rax+8]
+      mov_reg_to_stack(inst.dst, rax)
+    ])
   else if inst.op == "LoadHeap" then
     // mov rax, [rbp+ptr]; mov rax, [rax+offset]; mov [rbp+dst], rax
     let rax = { k: "reg", name: "rax" } in
