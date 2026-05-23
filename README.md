@@ -220,14 +220,30 @@ FARD Prim is now connected to the FARD v0.5 compiler pipeline.
 
 Verified native execution (23 May 2026):
 
-   add(10, 32)  = 42   arithmetic
-   max(10, 42)  = 42   if/else, CmpI64, BrCond
-   fact(5)      = 120  recursion, MulI64, SubI64, CopyI64
+    add(10, 32)  = 42   arithmetic
+    max(10, 42)  = 42   if/else, CmpI64, BrCond
+    fact(5)      = 120  recursion, MulI64, SubI64, CopyI64
+    fib(10)      = 55   double recursion
+    xs[0]        = 10   list indexing (make_list + get_index)
+    xs[2]        = 30   list indexing offset
+    r.a          = 42   record field access (make_rec + get_field)
+    r.b          = 7    record field access second field
+    s[0]         = 104  string char access ('h' from "hello")
+    s[4]         = 111  string char access ('o' from "hello")
 
 IR ops supported in bridge:
-   const, load (CopyI64), add, sub, mul
-   gt, lt, le, ge, eq, ne (CmpI64 -> Bool)
-   branch/jump/patch_branch/patch_jump (flat -> block splitting)
-   call (direct + indirect via global_load name map)
-   global_load (resolved, filtered from output)
-   make_closure, global_store (stubbed as ImmI64 0)
+    const (int, bool, str), load (CopyI64), add, sub, mul
+    gt, lt, le, ge, eq, ne (CmpI64 -> Bool)
+    branch/jump/patch_branch/patch_jump (flat -> block splitting)
+    call (direct + indirect via global_load name map)
+    make_list -> AllocHeap + StoreHeap sequence
+    make_rec  -> AllocHeap + StoreHeap sequence
+    make_str  -> AllocHeap + len + chars (str.char_code)
+    get_index -> LoadHeapDyn (ptr + 8 + idx*8)
+    get_field -> LoadHeapStaticIdx (compile-time field order map)
+    global_load (resolved, filtered from output)
+    make_closure, global_store (stubbed as ImmI64 0)
+
+Runtime:
+    __DATA segment: 4KB bump allocator heap at 0x100002000
+    fard_alloc stub: 34-byte bump allocator in __TEXT
