@@ -255,6 +255,25 @@ fn encode_inst(inst) {
     ret()
   else if inst.op == "Label" then
     []
+  else if inst.op == "StoreHeap" then
+    // mov rax, [rbp+ptr]; mov rcx, [rbp+src]; mov [rax+offset], rcx
+    let rax = { k: "reg", name: "rax" } in
+    let rcx = { k: "reg", name: "rcx" } in
+    list.concat([
+      mov_stack_to_reg(rax, inst.ptr),
+      mov_stack_to_reg(rcx, inst.src),
+      // mov [rax + offset], rcx: REX.W 89 /r ModRM(disp8) = 72 137 104 offset
+      [72, 137, 72, inst.offset]
+    ])
+  else if inst.op == "LoadHeap" then
+    // mov rax, [rbp+ptr]; mov rax, [rax+offset]; mov [rbp+dst], rax
+    let rax = { k: "reg", name: "rax" } in
+    list.concat([
+      mov_stack_to_reg(rax, inst.ptr),
+      // mov rax, [rax+offset]: REX.W 8B /r ModRM(disp8) = 72 139 64 offset
+      [72, 139, 64, inst.offset],
+      mov_reg_to_stack(inst.dst, rax)
+    ])
   else if inst.op == "CopyI64" then
     let rax = { k: "reg", name: "rax" } in
     list.concat([
@@ -317,6 +336,7 @@ fn encode_module(m) {
 }
 
 export {
+  fard_alloc_stub,
   write_fval_int_enc,
   unbox_int_enc,
   store_param_enc,
@@ -347,4 +367,35 @@ export {
   encode_insts,
   encode_func,
   encode_module,
+}
+
+// fard_alloc(rdi=size) -> rax=ptr
+// Bump allocator using __DATA segment
+// heap_bump_ptr is at data_vmaddr (0x100002000)
+// Returns current bump ptr, advances by size (rounded up to 8)
+fn fard_alloc_stub(bump_ptr_vmaddr) {
+  // mov rax, [rip + offset_to_bump_ptr]  -- load bump ptr addr
+  // We use absolute addressing via mov rax, imm64
+  // mov rcx, bump_ptr_vmaddr (absolute)
+  // mov rax, [rcx]           -- load current bump ptr value
+  // mov rdx, rax             -- save return value
+  // add rax, rdi             -- advance by requested size
+  // add rax, 7               -- round up
+  // and rax, -8              -- align to 8
+  // mov [rcx], rax           -- store new bump ptr
+  // mov rax, rdx             -- return old bump ptr
+  // ret
+  let bump_abs = bump_ptr_vmaddr in
+  list.concat([
+    [72, 184],                           // REX.W mov rax, imm64
+    le64(bump_abs),                      // absolute address of bump ptr
+    [72, 139, 8],                        // mov rcx, [rax]  -- load bump ptr
+    [72, 137, 202],                      // mov rdx, rcx    -- save return val
+    [72, 1, 249],                        // add rcx, rdi    -- advance
+    [72, 131, 193, 7],                   // add rcx, 7      -- round up
+    [72, 131, 225, 248],                 // and rcx, -8     -- align
+    [72, 137, 8],                        // mov [rax], rcx  -- store new bump
+    [72, 137, 208],                      // mov rax, rdx    -- return old ptr
+    [195]                                // ret
+  ])
 }

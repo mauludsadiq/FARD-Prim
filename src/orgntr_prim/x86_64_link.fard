@@ -71,7 +71,11 @@ fn resolve_func_relocs(laid_out_entry, sym_table) {
 // Link a fully encoded module: resolve all call relocs, concatenate text sections.
 fn link_module(encoded_module) {
   let laid_out = layout_funcs(encoded_module.funcs) in
-  let sym_table = build_symbol_table(laid_out) in
+  let sym_table_base = build_symbol_table(laid_out) in
+  // Add fard_alloc at offset -34 in linked.text coords
+  // (it lives 34 bytes before linked.text, at full-text offset 24)
+  let alloc_offset_in_linked_text = 0 - 34 in
+  let sym_table = rec.set(sym_table_base, "fard_alloc", alloc_offset_in_linked_text) in
   let linked_funcs = list.map(laid_out, fn(entry) {
     resolve_func_relocs(entry, sym_table)
   }) in

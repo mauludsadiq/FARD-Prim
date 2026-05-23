@@ -55,6 +55,14 @@ fn verify_inst(inst, env, func_name, block_label) {
     ok(put_ty(env, inst.dst, "I64"))
   else if inst.op == "SubI64" then
     ok(put_ty(env, inst.dst, "I64"))
+  else if inst.op == "MoveI64" then
+    ok(put_ty(env, inst.dst, "I64"))
+  else if inst.op == "AllocHeap" then
+    ok(put_ty(env, inst.dst, "I64"))
+  else if inst.op == "StoreHeap" then
+    ok(env)
+  else if inst.op == "LoadHeap" then
+    ok(put_ty(env, inst.dst, "I64"))
   else
     err("UNKNOWN_INST", { func: func_name, block: block_label, op: inst.op })
 }

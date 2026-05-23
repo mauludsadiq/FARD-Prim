@@ -20,8 +20,13 @@ fn str_to_bytes(s) { obj.str_to_bytes(s) }
 
 fn text_file_offset()    { 4096 }
 fn text_vmaddr()         { 4294971392 }  // 0x100001000
-fn linkedit_file_offset() { 8192 }
-fn linkedit_vmaddr()     { 4294975488 }  // 0x100002000
+fn data_file_offset()    { 8192 }        // 0x2000
+fn data_vmaddr()         { 4294975488 }  // 0x100002000
+fn data_size()           { 4096 }        // 4KB heap
+fn heap_bump_ptr_vmaddr() { 4294975488 } // first 8 bytes of __DATA
+fn heap_base_vmaddr()    { 4294975496 }  // heap_bump_ptr + 8
+fn linkedit_file_offset() { 12288 }      // 0x3000
+fn linkedit_vmaddr()     { 4294979584 }  // 0x100003000
 fn image_base()          { 4294967296 }  // 0x100000000
 fn pagezero_size()       { 4294967296 }  // 0x100000000
 
@@ -58,7 +63,7 @@ fn lc_seg64(segname, vmaddr, vmsize, fileoff, filesize, maxprot, initprot, nsect
     le32(nsects),
     le32(flags)
   ]) in
-  list.concat([hdr, sections])
+  list.concat([hdr, list.flatten(sections)])
 }
 
 fn sect64(sectname, segname, addr, size, offset, align, reloff, nreloc, flags) {
@@ -102,6 +107,19 @@ fn lc_text(text_len) {
     1, 0,
     sect
   )
+}
+
+fn lc_data() {
+  // __DATA segment with __bss section for heap
+  // vmaddr=0x100002000, fileoff=0x2000, size=4096
+  // Section __heap in __DATA: bump allocator space
+  let heap_sect = sect64("__heap", "__DATA",
+    data_vmaddr(), data_size(),
+    data_file_offset(), 0, 0, 0, 0)
+  in
+  lc_seg64("__DATA", data_vmaddr(), data_size(),
+    data_file_offset(), data_size(),
+    7, 3, 1, 0, [heap_sect])
 }
 
 fn lc_linkedit(linkedit_size) {
@@ -229,14 +247,12 @@ fn find_func_offset(funcs, name) {
   if rec.has(found, "some") then found.some.base else 0
 }
 
+fn alloc_stub_size() { 34 }  // bytes in fard_alloc_stub
+
 fn build_text(linked) {
-  // Compute actual offset of fard_main within linked.text
-  // Add stub_size (24) since stub precedes all function code
-  let fard_main_base = find_func_offset(linked.funcs, "fard_main") in
-  let stub_size = 24 in
-  let fard_main_offset = stub_size + fard_main_base in
-  let stub = entry_stub_text(fard_main_offset) in
-  list.concat([stub, linked.text])
+  let entry_stub = entry_stub_text(24 + alloc_stub_size() + find_func_offset(linked.funcs, "fard_main")) in
+  let alloc_stub = enc.fard_alloc_stub(heap_bump_ptr_vmaddr()) in
+  list.concat([entry_stub, alloc_stub, linked.text])
 }
 
 fn build_symtab(linked) {
@@ -258,12 +274,13 @@ fn build_symtab(linked) {
 fn build_load_cmds(total_text_len, linkedit_size, symoff, nsyms, stroff, strsize) {
   let lc_pz = lc_pagezero() in
   let lc_tx = lc_text(total_text_len) in
+  let lc_da = lc_data() in
   let lc_le = lc_linkedit(linkedit_size) in
   let lc_st = lc_symtab(symoff, nsyms, stroff, strsize) in
   let lc_dy = lc_dysymtab_minimal() in
   let lc_cs = lc_code_sig_stub() in
   let lc_ut = lc_unixthread(text_vmaddr()) in
-  list.concat([lc_pz, lc_tx, lc_le, lc_st, lc_dy, lc_cs, lc_ut])
+  list.concat([lc_pz, lc_tx, lc_da, lc_le, lc_st, lc_dy, lc_cs, lc_ut])
 }
 
 fn emit_exe(linked, entry_func) {
@@ -275,17 +292,23 @@ fn emit_exe(linked, entry_func) {
   let strsize = list.len(strtab) in
   let nsyms = 2 + list.len(linked.funcs) in
   let symoff = linkedit_file_offset() in
+  let heap_bump = le64(heap_base_vmaddr()) in
+  let heap_rest = zeros(data_size() - 8) in
+  let heap_init = list.concat([heap_bump, heap_rest]) in
   let stroff = symoff + nsyms * 16 in
   let linkedit_size = nsyms * 16 + strsize in
   let load_cmds = build_load_cmds(total_text_len, linkedit_size, symoff, nsyms, stroff, strsize) in
-  let hdr = exe_header(7, 544) in
+  let hdr = exe_header(8, 696) in
   let header_and_lc = list.concat([hdr, load_cmds]) in
   let pad_to_text = zeros(text_file_offset() - list.len(header_and_lc)) in
-  let pad_to_linkedit = zeros(linkedit_file_offset() - text_file_offset() - total_text_len) in
+  let pad_to_text_end = zeros(data_file_offset() - text_file_offset() - total_text_len) in
+  let pad_to_linkedit = zeros(linkedit_file_offset() - data_file_offset() - data_size()) in
   list.concat([
     header_and_lc,
     pad_to_text,
     total_text,
+    pad_to_text_end,
+    heap_init,
     pad_to_linkedit,
     nlist_bytes,
     strtab
@@ -311,6 +334,11 @@ export {
   exe_strtab,
   exe_strtab_indices,
   lc_unixthread,
+  lc_data,
+  alloc_stub_size,
   text_vmaddr,
-  image_base
+  image_base,
+  data_vmaddr,
+  data_file_offset,
+  data_size
 }

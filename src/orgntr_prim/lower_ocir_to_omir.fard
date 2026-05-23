@@ -37,6 +37,10 @@ fn collect_inst_dst(acc, inst) {
   else if inst.op == "CopyI64" then rec.set(acc, str.from(inst.dst), "I64")  else if inst.op == "AddI64" then rec.set(acc, str.from(inst.dst), "I64")
   else if inst.op == "MulI64" then rec.set(acc, str.from(inst.dst), "I64")
   else if inst.op == "SubI64" then rec.set(acc, str.from(inst.dst), "I64")
+  else if inst.op == "MoveI64" then rec.set(acc, str.from(inst.dst), "I64")
+  else if inst.op == "AllocHeap" then rec.set(acc, str.from(inst.dst), "I64")
+  else if inst.op == "LoadHeap" then rec.set(acc, str.from(inst.dst), "I64")
+  else if inst.op == "StoreHeap" then acc
   else if inst.op == "CmpI64" then rec.set(acc, str.from(inst.dst), "Bool")
   else if inst.op == "BoxInt" then rec.set(acc, str.from(inst.dst), "FardVal")
   else if inst.op == "CallAddBoxed" then rec.set(acc, str.from(inst.dst_fval), "FardVal")
@@ -165,6 +169,26 @@ fn lower_inst(layout, inst) {
     let rhs_slot = stack_for(layout, inst.rhs) in
     let dst_slot = stack_for(layout, inst.dst) in
     [{ op: "SubI64", lhs: lhs_slot, rhs: rhs_slot, dst: dst_slot }]
+  else if inst.op == "MoveI64" then
+    [
+      omir.mov_stack_to_reg(omir.reg("rax"), stack_for(layout, inst.src)),
+      omir.mov_reg_to_stack(stack_for(layout, inst.dst), omir.reg("rax"))
+    ]
+  else if inst.op == "AllocHeap" then
+    let dst_slot = stack_for(layout, inst.dst) in
+    [
+      omir.mov_imm64(omir.reg("rdi"), inst.size),
+      omir.call_reloc("fard_alloc"),
+      omir.mov_reg_to_stack(dst_slot, omir.reg("rax"))
+    ]
+  else if inst.op == "StoreHeap" then
+    let ptr_slot = stack_for(layout, inst.ptr) in
+    let src_slot = stack_for(layout, inst.src) in
+    [{ op: "StoreHeap", ptr: ptr_slot, offset: inst.offset, src: src_slot }]
+  else if inst.op == "LoadHeap" then
+    let ptr_slot = stack_for(layout, inst.ptr) in
+    let dst_slot = stack_for(layout, inst.dst) in
+    [{ op: "LoadHeap", dst: dst_slot, ptr: ptr_slot, offset: inst.offset }]
   else if inst.op == "CmpI64" then
     // Compare two I64 registers, store Bool result
     // Use: cmp lhs, rhs; setcc al; movzx rax, al; mov [dst], rax

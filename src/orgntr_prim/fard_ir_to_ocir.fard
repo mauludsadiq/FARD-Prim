@@ -13,7 +13,7 @@ import("../orgntr_prim/ocir") as ocir
 
 // ── Instruction lowering ──────────────────────────────────────────────────────
 
-fn lower_instr(instr, fn_names) {
+fn lower_instr_one(instr, fn_names) {
   let op = instr.op in
   if op == "const" then
     let v = instr.val in
@@ -57,13 +57,51 @@ fn lower_instr(instr, fn_names) {
     ocir.inst_add_i64(instr.dst, instr.a, instr.b)
   else if op == "get_field" || op == "get_index" then
     ocir.inst_imm_i64(instr.dst, 0)
-  else if op == "make_list" || op == "make_rec" then
-    ocir.inst_imm_i64(instr.dst, 0)
+  else if op == "make_list" then
+    { op: "MakeList", dst: instr.dst, items: instr.items }
+  else if op == "make_rec" then
+    { op: "MakeRec", dst: instr.dst, fields: instr.fields }
   else if op == "global_load" then
     // Resolved in pre-pass via name_map; emit placeholder
     ocir.inst_imm_i64(instr.dst, 0)
   else
     { ok: false, err: str.concat(["fard_ir_to_ocir: unsupported op: ", op]) }
+}
+
+fn lower_instr(instr, fn_names) {
+  let op = instr.op in
+  if op == "make_list" then
+    // AllocHeap(ptr) + StoreHeap header + StoreHeap items + MoveI64(dst, ptr)
+    let items = instr.items in
+    let n = list.len(items) in
+    let size = (1 + n) * 8 in
+    let ptr_reg = 10000 + instr.dst in
+    let hdr_reg = 10001 + instr.dst in
+    let alloc = { op: "AllocHeap", dst: ptr_reg, size: size } in
+    let store_hdr = { op: "ImmI64", dst: hdr_reg, val: n } in
+    let store_hdr_heap = { op: "StoreHeap", ptr: ptr_reg, offset: 0, src: hdr_reg } in
+    let item_stores = list.build(n, fn(i) {
+      { op: "StoreHeap", ptr: ptr_reg, offset: 8 + i * 8, src: list.get(items, i) }
+    }) in
+    let copy = { op: "MoveI64", dst: instr.dst, src: ptr_reg } in
+    list.concat([[alloc, store_hdr, store_hdr_heap], item_stores, [copy]])
+  else if op == "make_rec" then
+    let fields = instr.fields in
+    let n = list.len(fields) in
+    let size = (1 + n) * 8 in
+    let ptr_reg = 10000 + instr.dst in
+    let hdr_reg = 10001 + instr.dst in
+    let alloc = { op: "AllocHeap", dst: ptr_reg, size: size } in
+    let store_hdr = { op: "ImmI64", dst: hdr_reg, val: n } in
+    let store_hdr_heap = { op: "StoreHeap", ptr: ptr_reg, offset: 0, src: hdr_reg } in
+    let field_stores = list.build(n, fn(i) {
+      let f = list.get(fields, i) in
+      { op: "StoreHeap", ptr: ptr_reg, offset: 8 + i * 8, src: f.src }
+    }) in
+    let copy = { op: "MoveI64", dst: instr.dst, src: ptr_reg } in
+    list.concat([[alloc, store_hdr, store_hdr_heap], field_stores, [copy]])
+  else
+    [lower_instr_one(instr, fn_names)]
 }
 
 fn lower_term(instr, fn_names) {
@@ -88,7 +126,7 @@ fn lower_block(label, instrs, fn_names) {
     then { ok: false, err: str.concat(["fard_ir_to_ocir: block has no terminator at label ", str.from(label)]) }
     else lower_term(list.get(terms, 0), fn_names)
   in
-  ocir.block(label, list.map(body, fn(i) { lower_instr(i, fn_names) }), term)
+  ocir.block(label, list.flatten(list.map(body, fn(i) { lower_instr(i, fn_names) })), term)
 }
 
 // ── Function lowering ─────────────────────────────────────────────────────────
@@ -201,10 +239,7 @@ fn lower_block_from_flat(blk, fn_names, subst, arity, all_blocks, patches) {
     else ocir.term_ret_i64(0)
   in
   
-  let body_insts = list.map(
-    list.map(body, fn(i) { lower_instr(i, fn_names) }),
-    fn(i) { subst_instr(i, subst) }
-  ) in
+  let body_insts = list.map(list.flatten(list.map(body, fn(i) { lower_instr(i, fn_names) })), fn(i) { subst_instr(i, subst) }) in
   
   ocir.block(label, body_insts, term)
 }
@@ -327,10 +362,7 @@ fn lower_fn(f, fn_names) {
       then ocir.term_ret_i64(subst_reg(term_raw.src, subst))
       else term_raw
     in
-    let body_insts = list.map(
-      list.map(body, fn(i) { lower_instr(i, fn_names) }),
-      fn(i) { subst_instr(i, subst) }
-    ) in
+    let body_insts = list.map(list.flatten(list.map(body, fn(i) { lower_instr(i, fn_names) })), fn(i) { subst_instr(i, subst) }) in
     let block0 = ocir.block(0, body_insts, term) in
     ocir.func_with_params(f.name, params, [block0])
 }
@@ -354,4 +386,4 @@ fn lower_module(ir) {
 
 import("std/type") as type
 
-export { lower_module, lower_fn, lower_block, lower_instr, lower_term }
+export { lower_module, lower_fn, lower_block, lower_instr, lower_instr_one, lower_term }
