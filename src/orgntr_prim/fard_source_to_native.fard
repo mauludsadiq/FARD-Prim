@@ -28,10 +28,11 @@ fn compile_and_emit(src, out_path) {
 
   // Stage 3: bridge v0.5 IR to OCIR
   let ocir_mod = bridge.lower_module(ir) in
+  // ocir_mod stage done
 
   // Stage 4: verify OCIR
   let v = verify.verify_module(ocir_mod) in
-  if v.t != "ok" then { ok: false, err: v } else
+  if v.t != "ok" then { ok: false, stage: "verify", err: v } else
 
   // Stage 5: lower OCIR to OMIR
   let omir_mod = omir_lower.lower_module(ocir_mod) in
