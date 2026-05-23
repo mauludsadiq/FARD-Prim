@@ -209,3 +209,25 @@ FARD Prim is the bridge from that pipeline to the language compiling itself
 to native x86-64 and executing correctly.
 
     https://github.com/mauludsadiq/FARD
+
+## Connected to FARD v0.5
+
+FARD Prim is now connected to the FARD v0.5 compiler pipeline.
+
+   src/orgntr_prim/
+     fard_ir_to_ocir.fard        bridges v0.5 IR to OCIR
+     fard_source_to_native.fard  end-to-end driver: source -> binary
+
+Verified native execution (23 May 2026):
+
+   add(10, 32)  = 42   arithmetic
+   max(10, 42)  = 42   if/else, CmpI64, BrCond
+   fact(5)      = 120  recursion, MulI64, SubI64, CopyI64
+
+IR ops supported in bridge:
+   const, load (CopyI64), add, sub, mul
+   gt, lt, le, ge, eq, ne (CmpI64 -> Bool)
+   branch/jump/patch_branch/patch_jump (flat -> block splitting)
+   call (direct + indirect via global_load name map)
+   global_load (resolved, filtered from output)
+   make_closure, global_store (stubbed as ImmI64 0)
