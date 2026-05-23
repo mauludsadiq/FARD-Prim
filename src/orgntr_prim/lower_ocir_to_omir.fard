@@ -34,7 +34,10 @@ fn collect_param_slots(acc, params) {
 fn collect_inst_dst(acc, inst) {
   if inst.op == "ImmI64" then rec.set(acc, str.from(inst.dst), "I64")
   else if inst.op == "ImmBool" then rec.set(acc, str.from(inst.dst), "I64")
-  else if inst.op == "AddI64" then rec.set(acc, str.from(inst.dst), "I64")
+  else if inst.op == "CopyI64" then rec.set(acc, str.from(inst.dst), "I64")  else if inst.op == "AddI64" then rec.set(acc, str.from(inst.dst), "I64")
+  else if inst.op == "MulI64" then rec.set(acc, str.from(inst.dst), "I64")
+  else if inst.op == "SubI64" then rec.set(acc, str.from(inst.dst), "I64")
+  else if inst.op == "CmpI64" then rec.set(acc, str.from(inst.dst), "Bool")
   else if inst.op == "BoxInt" then rec.set(acc, str.from(inst.dst), "FardVal")
   else if inst.op == "CallAddBoxed" then rec.set(acc, str.from(inst.dst_fval), "FardVal")
   else if inst.op == "CallMulBoxed" then rec.set(acc, str.from(inst.dst_fval), "FardVal")
@@ -100,6 +103,10 @@ fn lower_inst(layout, inst) {
       omir.mov_imm64(omir.reg("rax"), if inst.val then 1 else 0),
       omir.mov_reg_to_stack(stack_for(layout, inst.dst), omir.reg("rax"))
     ]
+  else if inst.op == "CopyI64" then
+    let src_slot = stack_for(layout, inst.src) in
+    let dst_slot = stack_for(layout, inst.dst) in
+    [{ op: "CopyI64", src: src_slot, dst: dst_slot }]
   else if inst.op == "AddI64" then
     [
       omir.mov_stack_to_reg(omir.reg("rax"), stack_for(layout, inst.lhs)),
@@ -148,6 +155,26 @@ fn lower_inst(layout, inst) {
       [omir.call_reloc(inst.callee)],
       [omir.mov_reg_to_stack(dst_slot, omir.reg("rax"))]
     ])
+  else if inst.op == "MulI64" then
+    let lhs_slot = stack_for(layout, inst.lhs) in
+    let rhs_slot = stack_for(layout, inst.rhs) in
+    let dst_slot = stack_for(layout, inst.dst) in
+    [{ op: "MulI64", lhs: lhs_slot, rhs: rhs_slot, dst: dst_slot }]
+  else if inst.op == "SubI64" then
+    let lhs_slot = stack_for(layout, inst.lhs) in
+    let rhs_slot = stack_for(layout, inst.rhs) in
+    let dst_slot = stack_for(layout, inst.dst) in
+    [{ op: "SubI64", lhs: lhs_slot, rhs: rhs_slot, dst: dst_slot }]
+  else if inst.op == "CmpI64" then
+    // Compare two I64 registers, store Bool result
+    // Use: cmp lhs, rhs; setcc al; movzx rax, al; mov [dst], rax
+    // Encode as: load lhs to rax, cmp with rhs stack, setcc
+    // Simplified: sub lhs-rhs, check sign/zero flags
+    // For now: emit a CmpI64 OMIR op that x86_64_encode handles
+    let lhs_slot = stack_for(layout, inst.lhs) in
+    let rhs_slot = stack_for(layout, inst.rhs) in
+    let dst_slot = stack_for(layout, inst.dst) in
+    [{ op: "CmpI64", lhs: lhs_slot, rhs: rhs_slot, dst: dst_slot, cmp: inst.cmp }]
   else
     [{ op: "LowerError", message: "unknown inst", inst: inst }]
 }

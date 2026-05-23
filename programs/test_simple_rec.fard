@@ -1,0 +1,5 @@
+import("../src/orgntr_prim/fard_source_to_native") as pipeline
+
+let src = "fn fact(n) { if n <= 1 then 1 else n * fact(n-1) }\nfact(5)"
+let result = pipeline.compile_and_emit(src, "out/test_fact")
+result

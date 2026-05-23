@@ -111,6 +111,24 @@ fn add_reg_stack(dst, src_stack) {
   [rex_w_for(dst), 3, modrm_disp8(c, 5), disp8(src_stack.slot)]
 }
 
+fn sub_reg_stack(dst, src_stack) {
+  // sub dst_reg, [rbp + src_stack.slot]
+  let c = reg_code(dst) in
+  [rex_w_for(dst), 43, modrm_disp8(c, 5), disp8(src_stack.slot)]
+}
+
+fn imul_reg_stack(dst, src_stack) {
+  // imul dst_reg, [rbp + src_stack.slot]
+  let c = reg_code(dst) in
+  [rex_w_for(dst), 15, 175, modrm_disp8(c, 5), disp8(src_stack.slot)]
+}
+
+fn cmp_reg_stack(dst, src_stack) {
+  // cmp dst_reg, [rbp + src_stack.slot]
+  let c = reg_code(dst) in
+  [rex_w_for(dst), 59, modrm_disp8(c, 5), disp8(src_stack.slot)]
+}
+
 fn cmp_stack_zero(src_stack) {
   [72, 131, 125, disp8(src_stack.slot), 0]
 }
@@ -237,6 +255,44 @@ fn encode_inst(inst) {
     ret()
   else if inst.op == "Label" then
     []
+  else if inst.op == "CopyI64" then
+    let rax = { k: "reg", name: "rax" } in
+    list.concat([
+      mov_stack_to_reg(rax, inst.src),
+      mov_reg_to_stack(inst.dst, rax)
+    ])
+  else if inst.op == "SubI64" then
+    // mov rax, [rbp+lhs]; sub rax, [rbp+rhs]; mov [rbp+dst], rax
+    let rax = { k: "reg", name: "rax" } in
+    list.concat([
+      mov_stack_to_reg(rax, inst.lhs),
+      sub_reg_stack(rax, inst.rhs),
+      mov_reg_to_stack(inst.dst, rax)
+    ])
+  else if inst.op == "MulI64" then
+    // mov rax, [rbp+lhs]; imul rax, [rbp+rhs]; mov [rbp+dst], rax
+    let rax = { k: "reg", name: "rax" } in
+    list.concat([
+      mov_stack_to_reg(rax, inst.lhs),
+      imul_reg_stack(rax, inst.rhs),
+      mov_reg_to_stack(inst.dst, rax)
+    ])
+  else if inst.op == "CmpI64" then
+    let rax = { k: "reg", name: "rax" } in
+    let setcc = if inst.cmp == "gt" then [15, 159, 192]   // setg al
+      else if inst.cmp == "lt" then [15, 156, 192]        // setl al
+      else if inst.cmp == "ge" then [15, 157, 192]        // setge al
+      else if inst.cmp == "le" then [15, 158, 192]        // setle al
+      else if inst.cmp == "eq" then [15, 148, 192]        // sete al
+      else [15, 149, 192]                                  // setne al
+    in
+    list.concat([
+      mov_stack_to_reg(rax, inst.lhs),
+      cmp_reg_stack(rax, inst.rhs),
+      setcc,
+      [72, 15, 182, 192],         // movzx rax, al (REX.W + 0F B6 C0)
+      mov_reg_to_stack(inst.dst, rax)
+    ])
   else
     []
 }

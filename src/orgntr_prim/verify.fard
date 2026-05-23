@@ -29,7 +29,8 @@ fn require_ty(env, r, ty, code, data) {
 fn verify_inst(inst, env, func_name, block_label) {
   if inst.op == "ImmI64" then
     ok(put_ty(env, inst.dst, "I64"))
-  else if inst.op == "ImmBool" then
+  else if inst.op == "CopyI64" then
+    ok(put_ty(env, inst.dst, "I64"))  else if inst.op == "ImmBool" then
     ok(put_ty(env, inst.dst, "Bool"))
   else if inst.op == "AddI64" then
     let a = require_ty(env, inst.lhs, "I64", "ADD_I64_LHS_TYPE", { func: func_name, block: block_label, reg: inst.lhs }) in
@@ -47,6 +48,12 @@ fn verify_inst(inst, env, func_name, block_label) {
   else if inst.op == "CallI64" then
     ok(put_ty(env, inst.dst, "I64"))
   else if inst.op == "UnboxInt" then
+    ok(put_ty(env, inst.dst, "I64"))
+  else if inst.op == "CmpI64" then
+    ok(put_ty(env, inst.dst, "Bool"))
+  else if inst.op == "MulI64" then
+    ok(put_ty(env, inst.dst, "I64"))
+  else if inst.op == "SubI64" then
     ok(put_ty(env, inst.dst, "I64"))
   else
     err("UNKNOWN_INST", { func: func_name, block: block_label, op: inst.op })

@@ -21,7 +21,13 @@ fn lower_instr(instr, fn_names) {
     else if type.of(v) == "bool" then ocir.inst_imm_bool(instr.dst, v)
     else { ok: false, err: str.concat(["fard_ir_to_ocir: unsupported const type: ", type.of(v)]) }
   else if op == "add" then ocir.inst_add_i64(instr.dst, instr.a, instr.b)
-  else if op == "load" then ocir.inst_imm_i64(instr.dst, instr.src)
+  else if op == "gt" then { op: "CmpI64", dst: instr.dst, lhs: instr.a, rhs: instr.b, cmp: "gt" }
+  else if op == "lt" then { op: "CmpI64", dst: instr.dst, lhs: instr.a, rhs: instr.b, cmp: "lt" }
+  else if op == "ge" then { op: "CmpI64", dst: instr.dst, lhs: instr.a, rhs: instr.b, cmp: "ge" }
+  else if op == "le" then { op: "CmpI64", dst: instr.dst, lhs: instr.a, rhs: instr.b, cmp: "le" }
+  else if op == "eq" then { op: "CmpI64", dst: instr.dst, lhs: instr.a, rhs: instr.b, cmp: "eq" }
+  else if op == "ne" then { op: "CmpI64", dst: instr.dst, lhs: instr.a, rhs: instr.b, cmp: "ne" }
+  else if op == "load" then { op: "CopyI64", dst: instr.dst, src: instr.src }
   else if op == "call" then
     let callee = if instr.fn_id >= 0
       then list.get(fn_names, instr.fn_id)
@@ -29,7 +35,8 @@ fn lower_instr(instr, fn_names) {
     in
     ocir.inst_call_i64(instr.dst, callee, instr.args)
   else if op == "call_direct" then
-    let callee = list.get(fn_names, instr.fn_id) in
+    let callee = if rec.has(instr, "callee_name") then instr.callee_name
+                 else list.get(fn_names, instr.fn_id) in
     ocir.inst_call_i64(instr.dst, callee, instr.args)
   else if op == "make_closure" then
     // Treat as a direct function reference — lower as ImmI64 with fn_id as value
@@ -43,8 +50,8 @@ fn lower_instr(instr, fn_names) {
   else if op == "neg" then
     // Negate: emit 0 - src
     ocir.inst_add_i64(instr.dst, 0, instr.src)
-  else if op == "sub" then ocir.inst_add_i64(instr.dst, instr.a, instr.b)
-  else if op == "mul" then ocir.inst_call_i64(instr.dst, "__mul__", [instr.a, instr.b])
+  else if op == "sub" then { op: "SubI64", dst: instr.dst, lhs: instr.a, rhs: instr.b }
+  else if op == "mul" then { op: "MulI64", dst: instr.dst, lhs: instr.a, rhs: instr.b }
   else if op == "eq" || op == "ne" || op == "lt" || op == "le" ||
           op == "gt" || op == "ge" || op == "and" || op == "or" then
     ocir.inst_add_i64(instr.dst, instr.a, instr.b)
@@ -53,6 +60,7 @@ fn lower_instr(instr, fn_names) {
   else if op == "make_list" || op == "make_rec" then
     ocir.inst_imm_i64(instr.dst, 0)
   else if op == "global_load" then
+    // Resolved in pre-pass via name_map; emit placeholder
     ocir.inst_imm_i64(instr.dst, 0)
   else
     { ok: false, err: str.concat(["fard_ir_to_ocir: unsupported op: ", op]) }
@@ -85,13 +93,147 @@ fn lower_block(label, instrs, fn_names) {
 
 // ── Function lowering ─────────────────────────────────────────────────────────
 
+
+// ── Flat IR to blocks conversion ─────────────────────────────────────────────
+// v0.5 IR uses flat instruction lists with patch_branch/patch_jump
+// Convert to OCIR block structure
+
+fn split_into_blocks(code) {
+  // First pass: find all branch/jump positions and patch targets
+  // to determine block boundaries
+  let indexed = list.build(list.len(code), fn(i) { { idx: i, instr: list.get(code, i) } }) in
+  
+  // Find patch instructions to determine block structure
+  let patches = list.filter(indexed, fn(e) {
+    e.instr.op == "patch_branch" || e.instr.op == "patch_jump"
+  }) in
+  
+  // Build block boundary set: indices where new blocks start
+  // Block 0 starts at 0
+  // New block starts after branch/jump or at patch targets
+  let branch_idxs = list.map(
+    list.filter(indexed, fn(e) { e.instr.op == "branch" }),
+    fn(e) { e.idx }
+  ) in
+  let jump_idxs = list.map(
+    list.filter(indexed, fn(e) { e.instr.op == "jump" }),
+    fn(e) { e.idx }
+  ) in
+  
+  // For each patch_branch: then_t and else_t are indices of first instr in each branch
+  // For each patch_jump: target is index of first instr after jump
+  let then_starts = list.map(
+    list.filter(indexed, fn(e) { e.instr.op == "patch_branch" }),
+    fn(e) { e.instr.then_t }
+  ) in
+  let else_starts = list.map(
+    list.filter(indexed, fn(e) { e.instr.op == "patch_branch" }),
+    fn(e) { e.instr.else_t }
+  ) in
+  let jump_targets = list.map(
+    list.filter(indexed, fn(e) { e.instr.op == "patch_jump" }),
+    fn(e) { e.instr.target }
+  ) in
+  
+  // Block starts: 0 + all branch targets
+  let all_starts_raw = list.concat([[0], then_starts, else_starts, jump_targets]) in
+  let all_starts = list.sort_by(
+    list.dedupe(all_starts_raw),
+    fn(a, b) { if a < b then -1 else if a > b then 1 else 0 }
+  ) in
+  
+  // Build blocks: each block runs from start[i] to start[i+1]-1
+  let n_blocks = list.len(all_starts) in
+  list.build(n_blocks, fn(i) {
+    let start = list.get(all_starts, i) in
+    let end_idx = if i + 1 < n_blocks then list.get(all_starts, i + 1) else list.len(code) in
+    let block_code = list.build(end_idx - start, fn(j) { list.get(code, start + j) }) in
+    { label: start, code: block_code }
+  })
+}
+
+fn lower_block_from_flat(blk, fn_names, subst, arity, all_blocks, patches) {
+  let code = blk.code in
+  let label = blk.label in
+  
+  // Separate terminators from body
+  let term_instr = list.find(code, fn(i) {
+    i.op == "branch" || i.op == "jump" || i.op == "return"
+  }) in
+  let body = list.filter(code, fn(i) {
+    i.op != "branch" && i.op != "jump" && i.op != "return" &&
+    i.op != "patch_branch" && i.op != "patch_jump"
+  }) in
+  
+  // Find patch by matching: patch at index = label + position of term in code
+  // term position = number of non-patch, non-term instrs before it + label offset
+  let term_pos = label + list.len(body) in
+  let patch = list.find(patches, fn(p) { p.idx == term_pos }) in
+  
+  // If no terminator in block, fall through to next block
+  let next_block_label = if list.len(all_blocks) > 0 then
+    let this_idx = list.find(
+      list.build(list.len(all_blocks), fn(i) { i }),
+      fn(i) { list.get(all_blocks, i).label == label }
+    ) in
+    if rec.has(this_idx, "some") && this_idx.some + 1 < list.len(all_blocks)
+      then list.get(all_blocks, this_idx.some + 1).label
+      else -1
+    else -1
+  in
+
+  let term = if !rec.has(term_instr, "some") then
+    if next_block_label >= 0 then ocir.term_br(next_block_label)
+    else ocir.term_ret_i64(0)
+  else
+    let t = term_instr.some in
+    if t.op == "return" then
+      ocir.term_ret_i64(subst_reg(t.src, subst))
+    else if t.op == "jump" then
+      if rec.has(patch, "some") then ocir.term_br(patch.some.target)
+      else ocir.term_br(t.target)
+    else if t.op == "branch" then
+      if rec.has(patch, "some") then
+        let p = patch.some in
+        ocir.term_br_cond(subst_reg(t.cond, subst), p.then_t, p.else_t)
+      else
+        ocir.term_br_cond(subst_reg(t.cond, subst), t.then_t, t.else_t)
+    else ocir.term_ret_i64(0)
+  in
+  
+  let body_insts = list.map(
+    list.map(body, fn(i) { lower_instr(i, fn_names) }),
+    fn(i) { subst_instr(i, subst) }
+  ) in
+  
+  ocir.block(label, body_insts, term)
+}
+
+fn resolve_subst(subst, reg) {
+  if type.of(reg) != "int" then reg else
+  let key = str.from(reg) in
+  if rec.has(subst, key) then
+    let target = rec.get(subst, key) in
+    if type.of(target) != "int" then target else
+    let key2 = str.from(target) in
+    if rec.has(subst, key2) then rec.get(subst, key2) else target
+  else reg
+}
+
 fn build_subst(instrs, arity) {
-  // Build substitution map: for param loads (load dst src where src < arity)
-  // map dst -> src so we can substitute dst with the param reg throughout
-  list.fold(instrs, {}, fn(acc, i) {
-    if i.op == "load" && rec.has(i, "src") && i.src < arity
-      then rec.set(acc, str.from(i.dst), i.src)
-      else acc
+  // Build substitution map for ALL load instructions (register copies)
+  // load dst src means dst = src
+  // Resolve chains transitively
+  let direct = list.fold(instrs, {}, fn(acc, i) {
+    if i.op == "load" && rec.has(i, "src") && type.of(i.src) == "int" && i.dst != 5
+      then rec.set(acc, str.from(i.dst), i.src)      else acc
+  }) in
+  // Resolve each entry transitively
+  let keys = rec.keys(direct) in
+  list.fold(keys, direct, fn(acc, k) {
+    let v = rec.get(direct, k) in
+    let resolved = resolve_subst(direct, v) in
+    rec.set(acc, k, resolved)
   })
 }
 
@@ -108,35 +250,89 @@ fn subst_instr(instr, subst) {
     ocir.inst_call_i64(instr.dst, instr.callee, list.map(instr.args, fn(a) { subst_reg(a, subst) }))
   else if op == "ImmI64" then instr
   else if op == "ImmBool" then instr
+  else if op == "CmpI64" then
+    { op: "CmpI64", dst: instr.dst,
+      lhs: subst_reg(instr.lhs, subst),
+      rhs: subst_reg(instr.rhs, subst),
+      cmp: instr.cmp }
+  else if op == "MulI64" then
+    { op: "MulI64", dst: instr.dst,
+      lhs: subst_reg(instr.lhs, subst),
+      rhs: subst_reg(instr.rhs, subst) }
+  else if op == "SubI64" then
+    { op: "SubI64", dst: instr.dst,
+      lhs: subst_reg(instr.lhs, subst),
+      rhs: subst_reg(instr.rhs, subst) }
   else instr
+}
+
+fn has_branches(code) {
+  list.any(code, fn(i) { i.op == "branch" || i.op == "patch_branch" })
+}
+
+fn build_name_map(instrs) {
+  // Map register -> function name from global_load instructions
+  list.fold(instrs, {}, fn(acc, i) {
+    if i.op == "global_load" && rec.has(i, "name")
+      then rec.set(acc, str.from(i.dst), i.name)
+      else acc
+  })
 }
 
 fn lower_fn(f, fn_names) {
   let arity = f.arity in
   let all_instrs = f.code in
   let subst = build_subst(all_instrs, arity) in
-  // Skip param load instructions — substituted throughout
-  let non_param = list.filter(all_instrs, fn(i) {
-    !(i.op == "load" && rec.has(i, "src") && i.src < arity)
-  }) in
-  let body = list.filter(non_param, fn(i) { !is_term(i) }) in
-  let terms = list.filter(non_param, fn(i) { is_term(i) }) in
-  let term_raw = if list.len(terms) == 0
-    then ocir.term_ret_i64(0)
-    else lower_term(list.get(terms, 0), fn_names)
-  in
-  // Apply substitution to return register
-  let term = if term_raw.op == "RetI64"
-    then ocir.term_ret_i64(subst_reg(term_raw.src, subst))
-    else term_raw
-  in
+  let name_map = build_name_map(all_instrs) in
   let params = list.build(arity, fn(i) { ocir.param(i, "I64") }) in
-  let body_insts = list.map(
-    list.map(body, fn(i) { lower_instr(i, fn_names) }),
-    fn(i) { subst_instr(i, subst) }
-  ) in
-  let block0 = ocir.block(0, body_insts, term) in
-  ocir.func_with_params(f.name, params, [block0])
+  
+  // Pre-pass: resolve indirect calls (fn_r != -1) using global_load names
+  let resolved_instrs = list.map(all_instrs, fn(i) {
+    if i.op == "call" && i.fn_id == -1 && rec.has(i, "fn_r") && i.fn_r >= 0 then
+      let key = str.from(i.fn_r) in
+      if rec.has(name_map, key) then
+        { op: "call_direct", fn_id: 0, dst: i.dst, args: i.args,
+          callee_name: rec.get(name_map, key) }
+      else i
+    else i
+  }) in
+  let all_instrs = resolved_instrs in
+
+  if has_branches(all_instrs) then
+    // Multi-block: split flat IR into blocks
+    // patches already have idx field pointing to the instruction they patch
+    let patches = list.map(
+      list.filter(all_instrs, fn(i) { i.op == "patch_branch" || i.op == "patch_jump" }),
+      fn(i) { i }
+    ) in
+    let flat_blocks = split_into_blocks(all_instrs) in
+    let ocir_blocks = list.map(flat_blocks, fn(blk) {
+      lower_block_from_flat(blk, fn_names, subst, arity, flat_blocks, patches)
+    }) in
+    ocir.func_with_params(f.name, params, ocir_blocks)
+  else
+    // Single block: simple path
+    let non_param = list.filter(all_instrs, fn(i) {
+      !(i.op == "load" && rec.has(i, "src") && i.src < arity)
+    }) in
+    let body = list.filter(non_param, fn(i) {
+    !is_term(i) && i.op != "global_load"
+  }) in
+    let terms = list.filter(non_param, fn(i) { is_term(i) }) in
+    let term_raw = if list.len(terms) == 0
+      then ocir.term_ret_i64(0)
+      else lower_term(list.get(terms, 0), fn_names)
+    in
+    let term = if term_raw.op == "RetI64"
+      then ocir.term_ret_i64(subst_reg(term_raw.src, subst))
+      else term_raw
+    in
+    let body_insts = list.map(
+      list.map(body, fn(i) { lower_instr(i, fn_names) }),
+      fn(i) { subst_instr(i, subst) }
+    ) in
+    let block0 = ocir.block(0, body_insts, term) in
+    ocir.func_with_params(f.name, params, [block0])
 }
 
 // ── Module lowering ───────────────────────────────────────────────────────────
