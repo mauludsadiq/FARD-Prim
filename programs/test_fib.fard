@@ -1,0 +1,5 @@
+import("../src/orgntr_prim/fard_source_to_native") as pipeline
+
+let src = "fn fib(n) { if n <= 1 then n else fib(n-1) + fib(n-2) }\nfib(10)"
+let result = pipeline.compile_and_emit(src, "out/test_fib")
+result
