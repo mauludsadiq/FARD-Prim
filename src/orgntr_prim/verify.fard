@@ -22,8 +22,19 @@ fn reg_key(r) { str.from(r) }
 fn get_ty(env, r) { rec.get(env, reg_key(r)) }
 fn put_ty(env, r, ty) { rec.set(env, reg_key(r), ty) }
 
+fn has_reg(env, r) {
+  rec.has(env, str.from(r))
+}
+
+fn require_defined(env, r, func_name, block_label) {
+  if has_reg(env, r) then ok(env)
+  else err("UNDEF_REG", { func: func_name, block: block_label, reg: r })
+}
+
 fn require_ty(env, r, ty, code, data) {
-  if get_ty(env, r) == ty then ok(env) else err(code, data)
+  if !has_reg(env, r) then err("UNDEF_REG", { reg: r, expected_ty: ty, in_require_ty: true })
+  else if get_ty(env, r) == ty then ok(env)
+  else err(code, data)
 }
 
 fn verify_inst(inst, env, func_name, block_label) {
