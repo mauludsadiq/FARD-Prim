@@ -136,18 +136,75 @@ fn verify_block(block, state, labels, func_name, func_arities) {
     if inst_state.t == "err" then inst_state else verify_term(block.term, inst_state.v, labels, func_name, block.label)
 }
 
+fn env_intersect(a, b) {
+  // Keep only registers defined in BOTH envs with same type
+  let a_keys = rec.keys(a) in
+  list.fold(a_keys, {}, fn(acc, k) {
+    if rec.has(b, k) && rec.get(a, k) == rec.get(b, k)
+      then rec.set(acc, k, rec.get(a, k))
+      else acc
+  })
+}
+
+fn block_successors(term) {
+  if term.op == "Br" then [term.to]
+  else if term.op == "BrCond" then [term.then_blk, term.else_blk]
+  else []
+}
+
+fn build_pred_map(blocks) {
+  // pred_map: label -> list of predecessor labels
+  list.fold(blocks, {}, fn(acc, b) {
+    let succs = block_successors(b.term) in
+    list.fold(succs, acc, fn(a, succ_label) {
+      let key = str.from(succ_label) in
+      let existing = if rec.has(a, key) then rec.get(a, key) else [] in
+      rec.set(a, key, list.append(existing, b.label))
+    })
+  })
+}
+
 fn verify_func(f, func_arities) {
   if list.len(f.blocks) == 0 then err("FUNC_HAS_NO_BLOCKS", { func: f.name })
   else
     let labels = label_record(f.blocks) in
     if rec.has(labels, "__duplicate__") then err("DUPLICATE_BLOCK_LABEL", { func: f.name, label: rec.get(labels, "__duplicate__") })
     else
-      // Seed type env with param types if func_with_params
       let init_env = if rec.has(f, "params")
         then list.fold(f.params, {}, fn(env, p) { put_ty(env, p.reg, p.ty) })
         else {}
       in
-      list.fold(f.blocks, ok(init_env), fn(state, b) { verify_block(b, state, labels, f.name, func_arities) })
+      let pred_map = build_pred_map(f.blocks) in
+      // block_envs: maps label -> output env after processing that block
+      // Process blocks in order, using intersection of predecessor outputs
+      let result = list.fold(f.blocks, { err: null, block_envs: {} }, fn(acc, b) {
+        if acc.err != null then acc else
+          // Compute entry env: init_env for first block, intersection of preds for others
+          let pred_labels = if rec.has(pred_map, str.from(b.label))
+            then rec.get(pred_map, str.from(b.label))
+            else [] in
+          let entry_env = if list.len(pred_labels) == 0
+            then init_env
+            else list.fold(pred_labels, null, fn(merged, pred_label) {
+              let pred_key = str.from(pred_label) in
+              if !rec.has(acc.block_envs, pred_key) then merged
+              else
+                let pred_env = rec.get(acc.block_envs, pred_key) in
+                if merged == null then pred_env
+                else env_intersect(merged, pred_env)
+            }) ?? init_env
+          in
+          let inst_state = verify_insts(b.insts, entry_env, f.name, b.label, func_arities) in
+          if inst_state.t == "err" then { err: inst_state, block_envs: acc.block_envs }
+          else
+            let term_state = verify_term(b.term, inst_state.v, labels, f.name, b.label) in
+            if term_state.t == "err" then { err: term_state, block_envs: acc.block_envs }
+            else
+              { err: null,
+                block_envs: rec.set(acc.block_envs, str.from(b.label), inst_state.v) }
+      }) in
+      if result.err != null then result.err
+      else ok(result.block_envs)
 }
 
 fn duplicate_func_name(funcs) {
