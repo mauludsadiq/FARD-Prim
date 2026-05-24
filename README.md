@@ -69,18 +69,17 @@ No linker. No C driver. No libSystem. No dyld.
 ### Correctness track
     [done]  Phase 1 — Semantic correctness
             add/max/fact/fib/list/record/string/closure all match fardrun
-    [done]  Phase 2 — Verifier completion (partial)
+    [done]  Phase 2 — Verifier completion
             UNDEF_REG: undefined register rejected at use site
-            RET_I64 src verified defined
+            RET_I64 src verified defined on all paths
             CALL_ARITY_MISMATCH: arg count vs callee arity
             call arg registers verified defined
             BrCond cond defined + both branch targets exist
             Br target label exists
             duplicate function name rejected
             entry function present
-    [next]  Phase 2 cont — CFG join dominance
-            register defined on only one branch used at join point
-            requires dataflow intersection at join nodes
+            CFG join dominance: dataflow intersection at join points
+            reg defined on only one branch rejected at join
     [next]  Phase 3 — Regression matrix
             one command, full native equivalence suite,
             interpreted vs OCIR vs OMIR vs native for every construct
