@@ -43,9 +43,9 @@ fn lower_instr_one(instr, fn_names, field_order) {
                  else list.get(fn_names, instr.fn_id) in
     ocir.inst_call_i64(instr.dst, callee, instr.args)
   else if op == "make_closure" then
-    // Treat as a direct function reference — lower as ImmI64 with fn_id as value
-    // Closures not fully supported yet; use fn_id as a placeholder
-    ocir.inst_imm_i64(instr.dst, instr.fn_id)
+    let ptr_reg = 30000 + instr.dst in
+    let fn_name = list.get(fn_names, instr.fn_id) in
+    { op: "MakeClosure", dst: instr.dst, ptr_reg: ptr_reg, fn_name: fn_name }
   else if op == "global_store" then
     // Global stores not yet supported — emit a no-op ImmI64 0
     ocir.inst_imm_i64(0, 0)
@@ -162,6 +162,13 @@ fn lower_instr(instr, fn_names, field_order) {
     }) in
     let copy = { op: "MoveI64", dst: instr.dst, src: ptr_reg } in
     list.concat([[alloc, store_hdr, store_hdr_heap], field_stores, [copy]])
+  else if op == "MakeClosure" then
+    let ptr_reg = 30000 + instr.dst in
+    let fn_name = instr.fn_name in
+    [{ op: "MakeClosure", dst: instr.dst, ptr_reg: ptr_reg, fn_name: fn_name }]
+  else if op == "CallIndirect" then
+    [{ op: "CallIndirect", dst: instr.dst,
+       closure_reg: instr.closure_reg, args: instr.args }]
   else
     [lower_instr_one(instr, fn_names, field_order)]
 }
@@ -370,6 +377,11 @@ fn subst_instr(instr, subst) {
     { op: "LoadHeapStaticIdx", dst: instr.dst,
       ptr: subst_reg(instr.ptr, subst),
       field_idx: instr.field_idx }
+  else if op == "MakeClosure" then instr
+  else if op == "CallIndirect" then
+    { op: "CallIndirect", dst: instr.dst,
+      closure_reg: subst_reg(instr.closure_reg, subst),
+      args: list.map(instr.args, fn(a) { subst_reg(a, subst) }) }
   else if op == "AllocHeap" then instr
   else if op == "StoreHeap" then
     { op: "StoreHeap", ptr: subst_reg(instr.ptr, subst),
@@ -393,10 +405,11 @@ fn build_field_order(instrs) {
   })
 }
 
-fn build_name_map(instrs) {
-  // Map register -> function name from global_load instructions
+fn build_name_map(instrs, fn_names) {
+  // Map register -> function name, only for global_load of known functions
   list.fold(instrs, {}, fn(acc, i) {
-    if i.op == "global_load" && rec.has(i, "name")
+    if i.op == "global_load" && rec.has(i, "name") &&
+       list.any(fn_names, fn(n) { n == i.name })
       then rec.set(acc, str.from(i.dst), i.name)
       else acc
   })
@@ -406,21 +419,33 @@ fn lower_fn(f, fn_names, mod_field_order) {
   let arity = f.arity in
   let all_instrs = f.code in
   let subst = build_subst(all_instrs, arity) in
-  let name_map = build_name_map(all_instrs) in
+  let name_map = build_name_map(all_instrs, fn_names) in
   let field_order = mod_field_order in
+  // Build global alias map: global_load dst -> global_store src (same name)
+  let global_stores = list.fold(all_instrs, {}, fn(acc, i) {
+    if i.op == "global_store" && rec.has(i, "name")
+      then rec.set(acc, i.name, i.src)
+      else acc
+  }) in
+  let subst = list.fold(all_instrs, subst, fn(acc, i) {
+    if i.op == "global_load" && rec.has(i, "name") && rec.has(global_stores, i.name)
+      then rec.set(acc, str.from(i.dst), rec.get(global_stores, i.name))
+      else acc
+  }) in
   let params = list.build(arity, fn(i) { ocir.param(i, "I64") }) in
-  
-  // Pre-pass: resolve indirect calls (fn_r != -1) using global_load names
-  let resolved_instrs = list.map(all_instrs, fn(i) {
+
+  // Pre-pass: resolve indirect calls (fn_r >= 0) to call_direct or CallIndirect
+  let all_instrs = list.map(all_instrs, fn(i) {
     if i.op == "call" && i.fn_id == -1 && rec.has(i, "fn_r") && i.fn_r >= 0 then
       let key = str.from(i.fn_r) in
+      let closure_reg = subst_reg(i.fn_r, subst) in
       if rec.has(name_map, key) then
         { op: "call_direct", fn_id: 0, dst: i.dst, args: i.args,
           callee_name: rec.get(name_map, key) }
-      else i
+      else
+        { op: "CallIndirect", dst: i.dst, closure_reg: closure_reg, args: i.args }
     else i
   }) in
-  let all_instrs = resolved_instrs in
 
   if has_branches(all_instrs) then
     // Multi-block: split flat IR into blocks

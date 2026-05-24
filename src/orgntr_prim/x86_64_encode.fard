@@ -293,6 +293,26 @@ fn encode_inst(inst) {
       [72, 139, 64, inst.offset],
       mov_reg_to_stack(inst.dst, rax)
     ])
+  else if inst.op == "StoreFnPtr" then
+    // Store function address into [ptr+0]
+    // Emit: mov rax, [rbp+ptr]; mov rcx, fn_addr_placeholder; mov [rax], rcx
+    // REX.W mov rcx, imm64 = 48 B9 + 8 bytes
+    let rax = { k: "reg", name: "rax" } in
+    list.concat([
+      mov_stack_to_reg(rax, inst.ptr),
+      [72, 185],                    // REX.W mov rcx, imm64
+      [0, 0, 0, 0, 0, 0, 0, 0],   // 8-byte placeholder for fn vmaddr
+      [72, 137, 8]                  // mov [rax], rcx
+    ])
+  else if inst.op == "CallIndirect" then
+    // Load fn_ptr from [closure+0], call it
+    // mov rax, [rbp+closure]; mov rax, [rax]; call rax
+    let rax = { k: "reg", name: "rax" } in
+    list.concat([
+      mov_stack_to_reg(rax, inst.closure),
+      [72, 139, 0],                 // mov rax, [rax]  (load fn_ptr)
+      [255, 208]                    // call rax
+    ])
   else if inst.op == "CopyI64" then
     let rax = { k: "reg", name: "rax" } in
     list.concat([

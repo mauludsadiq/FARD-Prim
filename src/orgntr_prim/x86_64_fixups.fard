@@ -31,6 +31,14 @@ fn scan_labels_and_patches(insts) {
         labels: acc.labels,
         patches: list.append(acc.patches, { kind: "Jmp", at: acc.pc + 1, next_ip: acc.pc + 5, target: inst.target.id })
       }
+    else if inst.op == "StoreFnPtr" then
+      // 64-bit absolute address patch at pc+2 (after REX.W + opcode byte)
+      // Encoding: [72,184] + 8-byte addr + [72,137,8] = 13 bytes
+      // StoreFnPtr: mov_stack_to_reg(4) + REX.W+B9(2) + placeholder(8) + mov[rax]rcx(3) = 17 bytes
+      // placeholder starts at pc + 4 + 2 = pc + 6
+      { pc: acc.pc + 17,
+        labels: acc.labels,
+        patches: list.append(acc.patches, { kind: "AbsReloc", at: acc.pc + 6, symbol: inst.fn_name }) }
     else if inst.op == "CallReloc" then
       {
         pc: acc.pc + size_of_inst(inst),
@@ -48,6 +56,25 @@ fn scan_labels_and_patches(insts) {
 
 fn byte_at(bs, i) {
   list.get(bs, i)
+}
+
+fn replace8(bs, at, value) {
+  let b0 = value % 256 in
+  let b1 = (value / 256) % 256 in
+  let b2 = (value / 65536) % 256 in
+  let b3 = (value / 16777216) % 256 in
+  let b4 = (value / 4294967296) % 256 in
+  let b5 = (value / 1099511627776) % 256 in
+  let b6 = (value / 281474976710656) % 256 in
+  let b7 = (value / 72057594037927936) % 256 in
+  let t = list.set(bs, at,   b0) in
+  let t = list.set(t,  at+1, b1) in
+  let t = list.set(t,  at+2, b2) in
+  let t = list.set(t,  at+3, b3) in
+  let t = list.set(t,  at+4, b4) in
+  let t = list.set(t,  at+5, b5) in
+  let t = list.set(t,  at+6, b6) in
+  list.set(t, at+7, b7)
 }
 
 fn replace4(bs, at, value) {
@@ -75,7 +102,7 @@ fn apply_label_patches(bs, labels, patches) {
 }
 
 fn unresolved_relocs(patches) {
-  list.filter(patches, fn(p) { p.kind == "CallReloc" })
+  list.filter(patches, fn(p) { p.kind == "CallReloc" || p.kind == "AbsReloc" })
 }
 
 fn encode_with_fixups(insts) {
@@ -115,6 +142,7 @@ export {
   size_of_inst,
   scan_labels_and_patches,
   replace4,
+  replace8,
   apply_label_patches,
   unresolved_relocs,
   encode_with_fixups,

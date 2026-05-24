@@ -33,15 +33,32 @@ fn build_symbol_table(laid_out) {
 // patch.next_ip = local pc after the call instruction
 // base = base address of this function in the linked text
 // Returns { resolved: bool, text: patched_text }
+fn text_vmaddr() { 4294971392 }  // 0x100001000
+fn alloc_stub_size() { 34 }
+fn entry_stub_size() { 24 }
+fn fn_vmaddr(base_in_linked_text) {
+  // Convert offset in linked.text to absolute vmaddr
+  text_vmaddr() + entry_stub_size() + alloc_stub_size() + base_in_linked_text
+}
+
 fn resolve_call_patch(text, base, patch, sym_table) {
   if rec.has(sym_table, patch.symbol) then
-    let target_addr = rec.get(sym_table, patch.symbol) in
-    let call_next_ip = base + patch.next_ip in
-    let rel = target_addr - call_next_ip in
-    {
-      resolved: true,
-      text: fix.replace4(text, patch.at, rel)
-    }
+    if patch.kind == "AbsReloc" then
+      // 64-bit absolute address
+      let target_offset = rec.get(sym_table, patch.symbol) in
+      let target_vmaddr = fn_vmaddr(target_offset) in
+      {
+        resolved: true,
+        text: fix.replace8(text, patch.at, target_vmaddr)
+      }
+    else
+      let target_addr = rec.get(sym_table, patch.symbol) in
+      let call_next_ip = base + patch.next_ip in
+      let rel = target_addr - call_next_ip in
+      {
+        resolved: true,
+        text: fix.replace4(text, patch.at, rel)
+      }
   else
     { resolved: false, text: text }
 }
@@ -50,7 +67,7 @@ fn resolve_call_patch(text, base, patch, sym_table) {
 fn resolve_func_relocs(laid_out_entry, sym_table) {
   let base = laid_out_entry.base in
   let f = laid_out_entry.func in
-  let call_relocs = list.filter(f.relocs, fn(p) { p.kind == "CallReloc" }) in
+  let call_relocs = list.filter(f.relocs, fn(p) { p.kind == "CallReloc" || p.kind == "AbsReloc" }) in
   let result = list.fold(call_relocs, { text: f.text, unresolved: [] }, fn(acc, patch) {
     let r = resolve_call_patch(acc.text, base, patch, sym_table) in
     if r.resolved then

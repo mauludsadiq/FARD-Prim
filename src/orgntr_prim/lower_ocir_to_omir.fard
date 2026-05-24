@@ -39,6 +39,10 @@ fn collect_inst_dst(acc, inst) {
   else if inst.op == "SubI64" then rec.set(acc, str.from(inst.dst), "I64")
   else if inst.op == "MoveI64" then rec.set(acc, str.from(inst.dst), "I64")
   else if inst.op == "AllocHeap" then rec.set(acc, str.from(inst.dst), "I64")
+  else if inst.op == "MakeClosure" then
+    rec.set(rec.set(acc, str.from(inst.dst), "I64"), str.from(inst.ptr_reg), "I64")
+  else if inst.op == "CallIndirect" then
+    rec.set(acc, str.from(inst.dst), "I64")
   else if inst.op == "ConstStr" then
     // Reserve slots for ptr, len, and char temporaries
     let s = inst.s in
@@ -188,6 +192,28 @@ fn lower_inst(layout, inst) {
       omir.mov_stack_to_reg(omir.reg("rax"), stack_for(layout, inst.src)),
       omir.mov_reg_to_stack(stack_for(layout, inst.dst), omir.reg("rax"))
     ]
+  else if inst.op == "MakeClosure" then
+    let ptr_slot = stack_for(layout, inst.ptr_reg) in
+    let dst_slot = stack_for(layout, inst.dst) in
+    [
+      omir.mov_imm64(omir.reg("rdi"), 8),
+      omir.call_reloc("fard_alloc"),
+      omir.mov_reg_to_stack(ptr_slot, omir.reg("rax")),
+      { op: "StoreFnPtr", ptr: ptr_slot, fn_name: inst.fn_name },
+      omir.mov_stack_to_reg(omir.reg("rax"), ptr_slot),
+      omir.mov_reg_to_stack(dst_slot, omir.reg("rax"))
+    ]
+  else if inst.op == "CallIndirect" then
+    let closure_slot = stack_for(layout, inst.closure_reg) in
+    let dst_slot = stack_for(layout, inst.dst) in
+    let arg_moves = list.build(list.len(inst.args), fn(i) {
+      omir.load_arg(i, stack_for(layout, list.get(inst.args, i)).slot)
+    }) in
+    list.concat([
+      arg_moves,
+      [{ op: "CallIndirect", closure: closure_slot }],
+      [omir.mov_reg_to_stack(dst_slot, omir.reg("rax"))]
+    ])
   else if inst.op == "ConstStr" then
     // Expand string constant: alloc heap, store len, store chars
     let s = inst.s in

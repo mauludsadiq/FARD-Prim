@@ -61,6 +61,10 @@ fn verify_inst(inst, env, func_name, block_label) {
     ok(put_ty(env, inst.dst, "I64"))
   else if inst.op == "ConstStr" then
     ok(put_ty(env, inst.dst, "I64"))
+  else if inst.op == "MakeClosure" then
+    ok(put_ty(env, inst.dst, "I64"))
+  else if inst.op == "CallIndirect" then
+    ok(put_ty(env, inst.dst, "I64"))
   else if inst.op == "StoreHeap" then
     ok(env)
   else if inst.op == "LoadHeap" then
