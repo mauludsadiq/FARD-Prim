@@ -304,6 +304,22 @@ fn encode_inst(inst) {
       [0, 0, 0, 0, 0, 0, 0, 0],   // 8-byte placeholder for fn vmaddr
       [72, 137, 8]                  // mov [rax], rcx
     ])
+  else if inst.op == "LoadCap" then
+    // Load capture i from closure heap at [closure_ptr + 8 + i*8]
+    // mov rax, [rbp+closure]   -- load closure ptr
+    // mov rax, [rax + 8 + i*8] -- load capture value
+    // mov [rbp+tmp], rax        -- save to temp slot
+    let rax = { k: "reg", name: "rax" } in
+    let byte_off = 8 + inst.cap_idx * 8 in
+    list.concat([
+      mov_stack_to_reg(rax, inst.closure),
+      if byte_off < 128
+        then [72, 139, 64, byte_off]   // mov rax, [rax+disp8]
+        else [72, 139, 128,
+              byte_off % 256, (byte_off / 256) % 256,
+              (byte_off / 65536) % 256, (byte_off / 16777216) % 256], // mov rax, [rax+disp32]
+      mov_reg_to_stack(inst.tmp, rax)
+    ])
   else if inst.op == "CallIndirect" then
     // Load fn_ptr from [closure+0], call it
     // mov rax, [rbp+closure]; mov rax, [rax]; call rax

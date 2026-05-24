@@ -30,7 +30,8 @@ fn verify_inst(inst, env, func_name, block_label) {
   if inst.op == "ImmI64" then
     ok(put_ty(env, inst.dst, "I64"))
   else if inst.op == "CopyI64" then
-    ok(put_ty(env, inst.dst, "I64"))  else if inst.op == "ImmBool" then
+    ok(put_ty(env, inst.dst, "I64"))
+  else if inst.op == "ImmBool" then
     ok(put_ty(env, inst.dst, "Bool"))
   else if inst.op == "AddI64" then
     let a = require_ty(env, inst.lhs, "I64", "ADD_I64_LHS_TYPE", { func: func_name, block: block_label, reg: inst.lhs }) in
@@ -65,6 +66,8 @@ fn verify_inst(inst, env, func_name, block_label) {
     ok(put_ty(env, inst.dst, "I64"))
   else if inst.op == "CallIndirect" then
     ok(put_ty(env, inst.dst, "I64"))
+  else if inst.op == "LoadCap" then
+    ok(env)
   else if inst.op == "StoreHeap" then
     ok(env)
   else if inst.op == "LoadHeap" then

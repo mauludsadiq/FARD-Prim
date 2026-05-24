@@ -193,24 +193,43 @@ fn lower_inst(layout, inst) {
       omir.mov_reg_to_stack(stack_for(layout, inst.dst), omir.reg("rax"))
     ]
   else if inst.op == "MakeClosure" then
+    let n_caps = list.len(inst.captures) in
+    let heap_size = (1 + n_caps) * 8 in
     let ptr_slot = stack_for(layout, inst.ptr_reg) in
     let dst_slot = stack_for(layout, inst.dst) in
-    [
-      omir.mov_imm64(omir.reg("rdi"), 8),
-      omir.call_reloc("fard_alloc"),
-      omir.mov_reg_to_stack(ptr_slot, omir.reg("rax")),
-      { op: "StoreFnPtr", ptr: ptr_slot, fn_name: inst.fn_name },
-      omir.mov_stack_to_reg(omir.reg("rax"), ptr_slot),
-      omir.mov_reg_to_stack(dst_slot, omir.reg("rax"))
-    ]
-  else if inst.op == "CallIndirect" then
-    let closure_slot = stack_for(layout, inst.closure_reg) in
-    let dst_slot = stack_for(layout, inst.dst) in
-    let arg_moves = list.build(list.len(inst.args), fn(i) {
-      omir.load_arg(i, stack_for(layout, list.get(inst.args, i)).slot)
+    let cap_stores = list.build(n_caps, fn(i) {
+      let cap_reg = list.get(inst.captures, i) in
+      { op: "StoreHeap", ptr: ptr_slot, offset: 8 + i * 8,
+        src: stack_for(layout, cap_reg) }
     }) in
     list.concat([
-      arg_moves,
+      [
+        omir.mov_imm64(omir.reg("rdi"), heap_size),
+        omir.call_reloc("fard_alloc"),
+        omir.mov_reg_to_stack(ptr_slot, omir.reg("rax")),
+        { op: "StoreFnPtr", ptr: ptr_slot, fn_name: inst.fn_name }
+      ],
+      cap_stores,
+      [
+        omir.mov_stack_to_reg(omir.reg("rax"), ptr_slot),
+        omir.mov_reg_to_stack(dst_slot, omir.reg("rax"))
+      ]
+    ])
+  else if inst.op == "CallIndirect" then
+    // ABI: pass closure ptr as first arg (rdi), explicit args follow (rsi, rdx...)
+    // anon_ uses __env__ (param 0 = closure ptr) to load captures via get_index
+    let closure_slot = stack_for(layout, inst.closure_reg) in
+    let dst_slot = stack_for(layout, inst.dst) in
+    let n_explicit = list.len(inst.args) in
+    // First arg = closure ptr itself
+    let closure_arg = omir.load_arg(0, closure_slot.slot) in
+    // Remaining args = explicit args shifted by 1
+    let explicit_arg_moves = list.build(n_explicit, fn(i) {
+      omir.load_arg(1 + i, stack_for(layout, list.get(inst.args, i)).slot)
+    }) in
+    list.concat([
+      [closure_arg],
+      explicit_arg_moves,
       [{ op: "CallIndirect", closure: closure_slot }],
       [omir.mov_reg_to_stack(dst_slot, omir.reg("rax"))]
     ])

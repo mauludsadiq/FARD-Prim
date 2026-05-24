@@ -45,7 +45,8 @@ fn lower_instr_one(instr, fn_names, field_order) {
   else if op == "make_closure" then
     let ptr_reg = 30000 + instr.dst in
     let fn_name = list.get(fn_names, instr.fn_id) in
-    { op: "MakeClosure", dst: instr.dst, ptr_reg: ptr_reg, fn_name: fn_name }
+    { op: "MakeClosure", dst: instr.dst, ptr_reg: ptr_reg,
+      fn_name: fn_name, captures: instr.captures }
   else if op == "global_store" then
     // Global stores not yet supported — emit a no-op ImmI64 0
     ocir.inst_imm_i64(0, 0)
@@ -163,9 +164,8 @@ fn lower_instr(instr, fn_names, field_order) {
     let copy = { op: "MoveI64", dst: instr.dst, src: ptr_reg } in
     list.concat([[alloc, store_hdr, store_hdr_heap], field_stores, [copy]])
   else if op == "MakeClosure" then
-    let ptr_reg = 30000 + instr.dst in
-    let fn_name = instr.fn_name in
-    [{ op: "MakeClosure", dst: instr.dst, ptr_reg: ptr_reg, fn_name: fn_name }]
+    [{ op: "MakeClosure", dst: instr.dst, ptr_reg: instr.ptr_reg,
+       fn_name: instr.fn_name, captures: instr.captures }]
   else if op == "CallIndirect" then
     [{ op: "CallIndirect", dst: instr.dst,
        closure_reg: instr.closure_reg, args: instr.args }]
@@ -308,7 +308,7 @@ fn lower_block_from_flat(blk, fn_names, subst, arity, all_blocks, patches, field
     else ocir.term_ret_i64(0)
   in
   
-  let body_insts = list.map(list.flatten(list.map(body, fn(i) { lower_instr(i, fn_names, field_order) })), fn(i) { subst_instr(i, subst) }) in
+  let body_insts = list.map(list.flatten(list.map(body, fn(i) { lower_instr(i, fn_names, field_order) })), fn(i) { subst_instr(i, subst, arity) }) in
   
   ocir.block(label, body_insts, term)
 }
@@ -329,9 +329,9 @@ fn build_subst(instrs, arity) {
   // load dst src means dst = src
   // Resolve chains transitively
   let direct = list.fold(instrs, {}, fn(acc, i) {
-    if i.op == "load" && rec.has(i, "src") && type.of(i.src) == "int" && i.dst != 5
-      then rec.set(acc, str.from(i.dst), i.src)      else acc
-  }) in
+    if type.of(i) == "record" && rec.has(i, "op") && i.op == "load" && rec.has(i, "src") && type.of(i.src) == "int" && i.src >= arity
+      then rec.set(acc, str.from(i.dst), i.src)
+      else acc  }) in
   // Resolve each entry transitively
   let keys = rec.keys(direct) in
   list.fold(keys, direct, fn(acc, k) {
@@ -346,7 +346,7 @@ fn subst_reg(reg, subst) {
   if rec.has(subst, key) then rec.get(subst, key) else reg
 }
 
-fn subst_instr(instr, subst) {
+fn subst_instr(instr, subst, arity) {
   let op = instr.op in
   if op == "AddI64" then
     ocir.inst_add_i64(instr.dst, subst_reg(instr.lhs, subst), subst_reg(instr.rhs, subst))
@@ -434,18 +434,24 @@ fn lower_fn(f, fn_names, mod_field_order) {
   }) in
   let params = list.build(arity, fn(i) { ocir.param(i, "I64") }) in
 
-  // Pre-pass: resolve indirect calls (fn_r >= 0) to call_direct or CallIndirect
-  let all_instrs = list.map(all_instrs, fn(i) {
-    if i.op == "call" && i.fn_id == -1 && rec.has(i, "fn_r") && i.fn_r >= 0 then
-      let key = str.from(i.fn_r) in
-      let closure_reg = subst_reg(i.fn_r, subst) in
-      if rec.has(name_map, key) then
-        { op: "call_direct", fn_id: 0, dst: i.dst, args: i.args,
-          callee_name: rec.get(name_map, key) }
-      else
-        { op: "CallIndirect", dst: i.dst, closure_reg: closure_reg, args: i.args }
-    else i
-  }) in
+    // Build closure caps map: register -> n_captures
+    let closure_caps = list.fold(all_instrs, {}, fn(acc, i) {
+      if type.of(i) == "record" && rec.has(i, "op") && i.op == "make_closure" && rec.has(i, "captures")
+        then rec.set(acc, str.from(i.dst), list.len(i.captures))
+        else acc
+    }) in
+    // Pre-pass: resolve indirect calls (fn_r >= 0) to call_direct or CallIndirect
+    let all_instrs = list.map(all_instrs, fn(i) {
+      if type.of(i) == "record" && rec.has(i, "op") && i.op == "call" && i.fn_id == -1 && rec.has(i, "fn_r") && i.fn_r >= 0 then
+        let key = str.from(i.fn_r) in
+        let closure_reg = subst_reg(i.fn_r, subst) in
+        let n_caps = if rec.has(closure_caps, str.from(closure_reg)) then rec.get(closure_caps, str.from(closure_reg)) else 0 in
+        if rec.has(name_map, key) then
+          { op: "call_direct", fn_id: 0, dst: i.dst, args: i.args, callee_name: rec.get(name_map, key) }
+        else
+          { op: "CallIndirect", dst: i.dst, closure_reg: closure_reg, args: i.args, n_caps: n_caps }
+      else i
+    }) in
 
   if has_branches(all_instrs) then
     // Multi-block: split flat IR into blocks
@@ -460,14 +466,11 @@ fn lower_fn(f, fn_names, mod_field_order) {
     }) in
     ocir.func_with_params(f.name, params, ocir_blocks)
   else
-    // Single block: simple path
-    let non_param = list.filter(all_instrs, fn(i) {
-      !(i.op == "load" && rec.has(i, "src") && i.src < arity)
-    }) in
-    let body = list.filter(non_param, fn(i) {
-    !is_term(i) && i.op != "global_load"
-  }) in
-    let terms = list.filter(non_param, fn(i) { is_term(i) }) in
+      // Single block: simple path
+      let non_param = all_instrs in
+      let body = list.filter(non_param, fn(i) {
+        !is_term(i) && !(type.of(i) == "record" && rec.has(i, "op") && i.op == "global_load")
+      }) in    let terms = list.filter(non_param, fn(i) { is_term(i) }) in
     let term_raw = if list.len(terms) == 0
       then ocir.term_ret_i64(0)
       else lower_term(list.get(terms, 0), fn_names)
@@ -476,7 +479,7 @@ fn lower_fn(f, fn_names, mod_field_order) {
       then ocir.term_ret_i64(subst_reg(term_raw.src, subst))
       else term_raw
     in
-    let body_insts = list.map(list.flatten(list.map(body, fn(i) { lower_instr(i, fn_names, field_order) })), fn(i) { subst_instr(i, subst) }) in
+    let body_insts = list.map(list.flatten(list.map(body, fn(i) { lower_instr(i, fn_names, field_order) })), fn(i) { subst_instr(i, subst, arity) }) in
     let block0 = ocir.block(0, body_insts, term) in
     ocir.func_with_params(f.name, params, [block0])
 }
