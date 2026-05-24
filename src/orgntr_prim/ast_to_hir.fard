@@ -1,0 +1,50 @@
+/// ast_to_hir — lowers FARD AST to HIR
+/// AST node types: var, int, float, bool, str, bin, if, let, fn, call,
+///                 get_field, get_index, list, rec, fn_item, expr_item
+
+import("std/list") as list
+import("std/rec")  as rec
+import("std/str")  as str
+import("../orgntr_prim/hir") as hir
+
+fn lower_expr(node) {
+  let t = node.t in
+  if t == "int"   then hir.hir_int(node.v)
+  else if t == "float"  then hir.hir_int(node.v)  // treat float as int for now
+  else if t == "bool"   then hir.hir_bool(node.v)
+  else if t == "str"    then hir.hir_str(node.v)
+  else if t == "null_lit" then hir.hir_null()
+  else if t == "var"    then hir.hir_var(node.v)
+  else if t == "bin"    then hir.hir_binop(node.op, lower_expr(node.left), lower_expr(node.right))
+  else if t == "if"     then hir.hir_if(lower_expr(node.cond), lower_expr(node.then_n), lower_expr(node.else_n))
+  else if t == "let"    then hir.hir_let(node.name, lower_expr(node.val), lower_expr(node.body))
+  else if t == "fn"     then hir.hir_fn(node.params, lower_expr(node.body))
+  else if t == "call"   then hir.hir_call(lower_expr(node.fn_n), list.map(node.args, fn(a) { lower_expr(a) }))
+  else if t == "get_field"  then hir.hir_get_field(lower_expr(node.obj), node.field)
+  else if t == "get_index"  then hir.hir_get_index(lower_expr(node.obj), lower_expr(node.idx))
+  else if t == "list"   then hir.hir_make_list(list.map(node.items, fn(i) { lower_expr(i) }))
+  else if t == "rec"    then hir.hir_make_rec(list.map(node.fields, fn(f) { { key: f.k, val: lower_expr(f.v) } }))
+  else { t: "hir_todo", node_t: t }
+}
+
+fn lower_item(item) {
+  if item.t == "fn_item" then
+    hir.hir_fn_def(item.name, item.params, lower_expr(item.body))
+  else if item.t == "expr_item" then
+    { t: "entry_expr", expr: lower_expr(item.expr) }
+  else if item.t == "let_item" then
+    { t: "let_def", name: item.name, val: lower_expr(item.val) }
+  else { t: "hir_todo", item_t: item.t }
+}
+
+fn lower_module(ast_module) {
+  let items = ast_module.items in
+  let defs = list.filter(list.map(items, fn(i) { lower_item(i) }), fn(d) { d.t != "entry_expr" }) in
+  let entry_items = list.filter(list.map(items, fn(i) { lower_item(i) }), fn(d) { d.t == "entry_expr" }) in
+  let entry = if list.len(entry_items) > 0
+    then list.get(entry_items, list.len(entry_items) - 1).expr
+    else hir.hir_null() in
+  hir.hir_module(defs, entry)
+}
+
+export { lower_expr, lower_item, lower_module }

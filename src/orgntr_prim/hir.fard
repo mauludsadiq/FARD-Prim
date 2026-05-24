@@ -1,0 +1,80 @@
+/// HIR — High-level Intermediate Representation
+/// Sits between AST and OCIR. Keeps source-level structure.
+/// No flat instruction sequences. No patch instructions.
+/// No register allocation — uses named values.
+
+import("std/list") as list
+import("std/str")  as str
+import("std/rec")  as rec
+
+// ── Value constructors ────────────────────────────────────────────────────────
+
+fn hir_int(v)          { { t: "int",  v: v } }
+fn hir_bool(v)         { { t: "bool", v: v } }
+fn hir_str(v)          { { t: "str",  v: v } }
+fn hir_var(name)       { { t: "var",  name: name } }
+fn hir_null()          { { t: "null" } }
+
+// ── Expression constructors ───────────────────────────────────────────────────
+
+fn hir_binop(op, l, r) { { t: "binop", op: op, l: l, r: r } }
+fn hir_if(cond, then_, else_) { { t: "if", cond: cond, then_: then_, else_: else_ } }
+fn hir_let(name, val, body) { { t: "let", name: name, val: val, body: body } }
+fn hir_call(callee, args) { { t: "call", callee: callee, args: args } }
+fn hir_fn(params, body)   { { t: "fn",   params: params, body: body } }
+fn hir_get_index(obj, idx) { { t: "get_index", obj: obj, idx: idx } }
+fn hir_get_field(obj, field) { { t: "get_field", obj: obj, field: field } }
+fn hir_make_list(items)   { { t: "list", items: items } }
+fn hir_make_rec(fields)   { { t: "rec",  fields: fields } }
+
+// ── Top-level definition ──────────────────────────────────────────────────────
+
+fn hir_fn_def(name, params, body) { { t: "fn_def", name: name, params: params, body: body } }
+
+// ── Module ────────────────────────────────────────────────────────────────────
+
+fn hir_module(defs, entry) { { t: "module", defs: defs, entry: entry } }
+
+// ── HIR printer (for debugging) ───────────────────────────────────────────────
+
+fn hir_depth(node, depth) {
+  let pad = list.fold(list.build(depth, fn(_) { "  " }), "", fn(a, s) { str.concat(a, s) }) in
+  if node.t == "int"    then str.concat(pad, str.from(node.v))
+  else if node.t == "bool"   then str.concat(pad, str.from(node.v))
+  else if node.t == "str"    then str.concat(pad, str.concat("\"", str.concat(node.v, "\"")))
+  else if node.t == "var"    then str.concat(pad, node.name)
+  else if node.t == "null"   then str.concat(pad, "null")
+  else if node.t == "binop"  then
+    str.concat(pad, str.concat("(", str.concat(hir_depth(node.l, 0),
+      str.concat(" ", str.concat(node.op, str.concat(" ", str.concat(hir_depth(node.r, 0), ")")))))))
+  else if node.t == "if" then
+    str.join([pad, "if ", hir_depth(node.cond, 0), "\n",
+              hir_depth(node.then_, depth+1), "\n",
+              pad, "else\n",
+              hir_depth(node.else_, depth+1)], "")
+  else if node.t == "let" then
+    str.join([pad, "let ", node.name, " =\n",
+              hir_depth(node.val, depth+1), "\n",
+              pad, "in\n",
+              hir_depth(node.body, depth+1)], "")
+  else if node.t == "call" then
+    str.join([pad, hir_depth(node.callee, 0), "(",
+              str.join(list.map(node.args, fn(a) { hir_depth(a, 0) }), ", "), ")"], "")
+  else if node.t == "fn" then
+    str.join([pad, "fn(", str.join(node.params, ", "), ") {\n",
+              hir_depth(node.body, depth+1), "\n", pad, "}"], "")
+  else if node.t == "fn_def" then
+    str.join([pad, "fn ", node.name, "(", str.join(node.params, ", "), ") {\n",
+              hir_depth(node.body, depth+1), "\n", pad, "}"], "")
+  else str.concat(pad, str.concat("<hir:", str.concat(node.t, ">")))
+}
+
+fn hir_print(node) { hir_depth(node, 0) }
+
+export {
+  hir_int, hir_bool, hir_str, hir_var, hir_null,
+  hir_binop, hir_if, hir_let, hir_call, hir_fn,
+  hir_get_index, hir_get_field, hir_make_list, hir_make_rec,
+  hir_fn_def, hir_module,
+  hir_print
+}

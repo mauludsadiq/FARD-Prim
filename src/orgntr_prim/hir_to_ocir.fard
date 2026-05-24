@@ -1,0 +1,263 @@
+/// hir_to_ocir — lowers HIR to OCIR
+/// HIR is structured (if/else, let, fn).
+/// OCIR is a typed CFG with basic blocks.
+/// This replaces the flat IR -> OCIR path.
+
+import("std/list") as list
+import("std/rec")  as rec
+import("std/str")  as str
+import("std/type") as type
+import("std/array") as array
+import("std/int")  as int_mod
+import("../orgntr_prim/ocir") as ocir
+
+// ── Register allocation ───────────────────────────────────────────────────────
+
+fn make_ctx(fn_names) {
+  { next_reg: array.from_list([0]), fn_names: fn_names }
+}
+
+fn alloc_reg(ctx) {
+  let r = array.get(ctx.next_reg, 0) in
+  let _ = array.set(ctx.next_reg, 0, r + 1) in
+  r
+}
+
+fn alloc_label(ctx) {
+  let r = array.get(ctx.next_reg, 0) in
+  let _ = array.set(ctx.next_reg, 0, r + 1) in
+  r
+}
+
+// ── Environment ───────────────────────────────────────────────────────────────
+
+fn env_empty() { null }
+fn env_set(env, name, reg) { { name: name, reg: reg, next: env } }
+fn env_get(env, name) {
+  if env == null then null
+  else if env.name == name then env.reg
+  else env_get(env.next, name)
+}
+
+// ── Block builder ─────────────────────────────────────────────────────────────
+
+fn make_block_builder(label) {
+  { label: label, insts: [] }
+}
+
+fn emit(builder, inst) {
+  { label: builder.label, insts: list.append(builder.insts, inst) }
+}
+
+fn finish_block(builder, term) {
+  ocir.block(builder.label, builder.insts, term)
+}
+
+// ── Expression lowering ───────────────────────────────────────────────────────
+
+// Returns { reg: int, blk: builder, extra_blocks: [block] }
+fn lower_hir_expr(node, env, blk, ctx) {
+  let t = node.t in
+  if t == "int" then
+    let dst = alloc_reg(ctx) in
+    let v = if type.of(node.v) == "int" then node.v else (int_mod.parse(node.v) ?? { v: 0 }).v in
+    { reg: dst, blk: emit(blk, ocir.inst_imm_i64(dst, v)), extra: [] }
+  else if t == "bool" then
+    let dst = alloc_reg(ctx) in
+    { reg: dst, blk: emit(blk, { op: "ImmBool", dst: dst, val: node.v }), extra: [] }
+  else if t == "str" then
+    let dst = alloc_reg(ctx) in
+    { reg: dst, blk: emit(blk, { op: "ConstStr", dst: dst, s: node.v }), extra: [] }
+  else if t == "null" then
+    let dst = alloc_reg(ctx) in
+    { reg: dst, blk: emit(blk, ocir.inst_imm_i64(dst, 0)), extra: [] }
+  else if t == "var" then
+    let reg = env_get(env, node.name) in
+    if reg != null then { reg: reg, blk: blk, extra: [] }
+    else
+      // Global function reference — return 0 placeholder (resolved at call site)
+      let dst = alloc_reg(ctx) in
+      { reg: dst, blk: emit(blk, ocir.inst_imm_i64(dst, 0)), extra: [] }
+  else if t == "binop" then
+    let l = lower_hir_expr(node.l, env, blk, ctx) in
+    let r = lower_hir_expr(node.r, env, l.blk, ctx) in
+    let dst = alloc_reg(ctx) in
+    let op = node.op in
+    let inst = if op == "+"  then ocir.inst_add_i64(dst, l.reg, r.reg)
+      else if op == "-"  then { op: "SubI64", dst: dst, lhs: l.reg, rhs: r.reg }
+      else if op == "*"  then { op: "MulI64", dst: dst, lhs: l.reg, rhs: r.reg }
+      else if op == "==" then { op: "CmpI64", dst: dst, lhs: l.reg, rhs: r.reg, cmp: "eq" }
+      else if op == "!=" then { op: "CmpI64", dst: dst, lhs: l.reg, rhs: r.reg, cmp: "ne" }
+      else if op == "<"  then { op: "CmpI64", dst: dst, lhs: l.reg, rhs: r.reg, cmp: "lt" }
+      else if op == "<=" then { op: "CmpI64", dst: dst, lhs: l.reg, rhs: r.reg, cmp: "le" }
+      else if op == ">"  then { op: "CmpI64", dst: dst, lhs: l.reg, rhs: r.reg, cmp: "gt" }
+      else if op == ">=" then { op: "CmpI64", dst: dst, lhs: l.reg, rhs: r.reg, cmp: "ge" }
+      else { op: "SubI64", dst: dst, lhs: l.reg, rhs: r.reg }  // fallback
+    in
+    { reg: dst, blk: emit(r.blk, inst), extra: list.concat([l.extra, r.extra]) }
+  else if t == "if" then
+    lower_hir_if(node, env, blk, ctx)
+  else if t == "let" then
+    let val = lower_hir_expr(node.val, env, blk, ctx) in
+    let env2 = env_set(env, node.name, val.reg) in
+    let body = lower_hir_expr(node.body, env2, val.blk, ctx) in
+    { reg: body.reg, blk: body.blk, extra: list.concat([val.extra, body.extra]) }
+  else if t == "call" then
+    lower_hir_call(node, env, blk, ctx)
+  else if t == "list" then
+    lower_hir_list(node, env, blk, ctx)
+  else if t == "rec" then
+    lower_hir_rec(node, env, blk, ctx)
+  else if t == "get_index" then
+    let obj = lower_hir_expr(node.obj, env, blk, ctx) in
+    let idx = lower_hir_expr(node.idx, env, obj.blk, ctx) in
+    let dst = alloc_reg(ctx) in
+    { reg: dst, blk: emit(idx.blk, { op: "LoadHeapDyn", dst: dst, ptr: obj.reg, idx: idx.reg }),
+      extra: list.concat([obj.extra, idx.extra]) }
+  else if t == "get_field" then
+    let obj = lower_hir_expr(node.obj, env, blk, ctx) in
+    let dst = alloc_reg(ctx) in
+    { reg: dst, blk: emit(obj.blk, { op: "GetField", dst: dst, obj: obj.reg, field: node.field }),
+      extra: obj.extra }
+  else
+    let dst = alloc_reg(ctx) in
+    { reg: dst, blk: emit(blk, ocir.inst_imm_i64(dst, 0)), extra: [] }
+}
+
+fn lower_hir_if(node, env, blk, ctx) {
+  // Lower condition
+  let cond = lower_hir_expr(node.cond, env, blk, ctx) in
+  let then_label = alloc_label(ctx) in
+  let else_label = alloc_label(ctx) in
+  let join_label = alloc_label(ctx) in
+  // Finish condition block with BrCond
+  let cond_block = finish_block(cond.blk,
+    { op: "BrCond", cond: cond.reg, then_blk: then_label, else_blk: else_label }) in
+  // Lower then branch
+  let then_blk = make_block_builder(then_label) in
+  let then_res = lower_hir_expr(node.then_, env, then_blk, ctx) in
+  let join_dst = alloc_reg(ctx) in
+  let then_block = finish_block(emit(then_res.blk,
+    { op: "CopyI64", dst: join_dst, src: then_res.reg }),
+    { op: "Br", to: join_label }) in
+  // Lower else branch
+  let else_blk = make_block_builder(else_label) in
+  let else_res = lower_hir_expr(node.else_, env, else_blk, ctx) in
+  let else_block = finish_block(emit(else_res.blk,
+    { op: "CopyI64", dst: join_dst, src: else_res.reg }),
+    { op: "Br", to: join_label }) in
+  // Join block (empty — result is join_dst)
+  let join_blk = make_block_builder(join_label) in
+  { reg: join_dst, blk: join_blk,
+    extra: list.concat([cond.extra, [cond_block, then_block], then_res.extra,
+                        [else_block], else_res.extra]) }
+}
+
+fn lower_hir_call(node, env, blk, ctx) {
+  // Lower all args
+  let args_result = list.fold(node.args, { regs: [], blk: blk, extra: [] }, fn(acc, arg) {
+    let r = lower_hir_expr(arg, env, acc.blk, ctx) in
+    { regs: list.append(acc.regs, r.reg), blk: r.blk, extra: list.concat([acc.extra, r.extra]) }
+  }) in
+  let dst = alloc_reg(ctx) in
+  // Check if callee is a direct function name
+  let callee_node = node.callee in
+  if callee_node.t == "var" && list.any(ctx.fn_names, fn(n) { n == callee_node.name }) then
+    { reg: dst, blk: emit(args_result.blk, ocir.inst_call_i64(dst, callee_node.name, args_result.regs)),
+      extra: args_result.extra }
+  else
+    // Indirect call — lower callee to get closure reg
+    let callee_r = lower_hir_expr(callee_node, env, args_result.blk, ctx) in
+    { reg: dst, blk: emit(callee_r.blk,
+        { op: "CallIndirect", dst: dst, closure_reg: callee_r.reg, args: args_result.regs }),
+      extra: list.concat([args_result.extra, callee_r.extra]) }
+}
+
+fn lower_hir_list(node, env, blk, ctx) {
+  let items_result = list.fold(node.items, { regs: [], blk: blk, extra: [] }, fn(acc, item) {
+    let r = lower_hir_expr(item, env, acc.blk, ctx) in
+    { regs: list.append(acc.regs, r.reg), blk: r.blk, extra: list.concat([acc.extra, r.extra]) }
+  }) in
+  let dst = alloc_reg(ctx) in
+  let ptr_reg = 10000 + dst in
+  let n = list.len(node.items) in
+  let size = (1 + n) * 8 in
+  let len_reg = 10001 + dst in
+  let alloc = { op: "AllocHeap", dst: ptr_reg, size: size } in
+  let store_len = { op: "ImmI64", dst: len_reg, val: n } in
+  let store_len_heap = { op: "StoreHeap", ptr: ptr_reg, offset: 0, src: len_reg } in
+  let item_stores = list.build(n, fn(i) {
+    { op: "StoreHeap", ptr: ptr_reg, offset: 8 + i * 8, src: list.get(items_result.regs, i) }
+  }) in
+  let move = { op: "CopyI64", dst: dst, src: ptr_reg } in
+  let new_blk = list.fold(
+    list.concat([[alloc, store_len, store_len_heap], item_stores, [move]]),
+    items_result.blk, fn(b, inst) { emit(b, inst) }) in
+  { reg: dst, blk: new_blk, extra: items_result.extra }
+}
+
+fn lower_hir_rec(node, env, blk, ctx) {
+  let fields_result = list.fold(node.fields, { regs: [], blk: blk, extra: [] }, fn(acc, f) {
+    let r = lower_hir_expr(f.val, env, acc.blk, ctx) in
+    { regs: list.append(acc.regs, r.reg), blk: r.blk, extra: list.concat([acc.extra, r.extra]) }
+  }) in
+  let dst = alloc_reg(ctx) in
+  let ptr_reg = 10000 + dst in
+  let n = list.len(node.fields) in
+  let size = (1 + n) * 8 in
+  let len_reg = 10001 + dst in
+  let alloc = { op: "AllocHeap", dst: ptr_reg, size: size } in
+  let store_len = { op: "ImmI64", dst: len_reg, val: n } in
+  let store_len_heap = { op: "StoreHeap", ptr: ptr_reg, offset: 0, src: len_reg } in
+  let field_stores = list.build(n, fn(i) {
+    { op: "StoreHeap", ptr: ptr_reg, offset: 8 + i * 8, src: list.get(fields_result.regs, i) }
+  }) in
+  let move = { op: "CopyI64", dst: dst, src: ptr_reg } in
+  let new_blk = list.fold(
+    list.concat([[alloc, store_len, store_len_heap], field_stores, [move]]),
+    fields_result.blk, fn(b, inst) { emit(b, inst) }) in
+  { reg: dst, blk: new_blk, extra: fields_result.extra }
+}
+
+// ── Function lowering ─────────────────────────────────────────────────────────
+
+fn lower_hir_fn_def(def, fn_names) {
+  let ctx = make_ctx(fn_names) in
+  let params = list.build(list.len(def.params), fn(i) { ocir.param(i, "I64") }) in
+  // Build env from params
+  let env = list.fold(list.build(list.len(def.params), fn(i) { i }), env_empty(),
+    fn(e, i) {
+      let _ = alloc_reg(ctx) in  // consume reg i for param
+      env_set(e, list.get(def.params, i), i)
+    }) in
+  let entry_blk = make_block_builder(0) in
+  let result = lower_hir_expr(def.body, env, entry_blk, ctx) in
+  let final_block = finish_block(result.blk, ocir.term_ret_i64(result.reg)) in
+  let all_blocks = list.concat([result.extra, [final_block]]) in
+  // Sort blocks by label
+  let sorted = list.sort_int(list.map(all_blocks, fn(b) { b.label })) in
+  let block_map = list.fold(all_blocks, {}, fn(acc, b) { rec.set(acc, str.from(b.label), b) }) in
+  let ordered_blocks = list.map(sorted, fn(lbl) { rec.get(block_map, str.from(lbl)) }) in
+  ocir.func_with_params(def.name, params, ordered_blocks)
+}
+
+// ── Module lowering ───────────────────────────────────────────────────────────
+
+fn lower_hir_module(hir_mod) {
+  let fn_names = list.map(
+    list.filter(hir_mod.defs, fn(d) { d.t == "fn_def" }),
+    fn(d) { d.name }
+  ) in
+  let all_fn_names = list.append(fn_names, "fard_main") in
+  let ocir_fns = list.map(
+    list.filter(hir_mod.defs, fn(d) { d.t == "fn_def" }),
+    fn(d) { lower_hir_fn_def(d, all_fn_names) }
+  ) in
+  // Lower entry expression as fard_main
+  let main_def = { t: "fn_def", name: "fard_main", params: [], body: hir_mod.entry } in
+  let main_fn = lower_hir_fn_def(main_def, all_fn_names) in
+  let all_fns = list.append(ocir_fns, main_fn) in
+  ocir.module("fard_main", all_fns)
+}
+
+export { lower_hir_module, lower_hir_fn_def, lower_hir_expr }
