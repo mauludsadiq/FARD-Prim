@@ -1,15 +1,25 @@
 # FARD Prim
 
-FARD is a deterministic, content-addressed language where every execution
-produces a SHA-256 receipt committing to source, imports, inputs, and result.
+A verifiable compilation substrate — written entirely in FARD.
 
-FARD Prim is the x86-64 native backend — written entirely in FARD. It takes
-the compiler from producing verified receipts to producing native machine code.
+FARD is the proving ground. FARD Prim is the pitch: a compiler that targets
+correctness first, then performance, portability, and eventually becomes the
+verified native backend for major programming languages.
 
-## What it does
+## Status
 
-Takes FARD source → native MH_EXECUTE binary. No linker. No C driver.
-No libSystem. No dyld. Pure FARD end to end.
+Stage 8 complete. All core FARD constructs compile to native x86-64 MH_EXECUTE.
+
+    add(10,32)    = 42   arithmetic
+    max(10,42)    = 42   if/else
+    fact(5)       = 120  recursion
+    fib(10)       = 55   double recursion
+    xs[0]         = 10   list indexing
+    r.a           = 42   record field access
+    s[0]          = 104  string char access
+    adder(10)(32) = 42   closure with captured variable
+
+## Pipeline
 
     FARD source
       -> fardlex (tokenize)
@@ -18,61 +28,87 @@ No libSystem. No dyld. Pure FARD end to end.
       -> fard_ir_to_ocir (bridge to OCIR)
       -> verify (OCIR type check)
       -> lower_ocir_to_omir (OMIR)
-      -> x86_64_encode + fixups (bytes)
+      -> x86_64_encode + fixups
       -> x86_64_link (reloc resolution)
       -> macho_exe (MH_EXECUTE)
       -> binary
 
-## Verified native execution (Stage 8 complete)
-
-    add(10,32)    = 42   arithmetic
-    max(10,42)    = 42   if/else, CmpI64, BrCond
-    fact(5)       = 120  recursion, MulI64, SubI64
-    fib(10)       = 55   double recursion
-    xs[0]         = 10   list indexing (make_list + get_index)
-    xs[2]         = 30   list indexing offset
-    r.a           = 42   record field access (make_rec + get_field)
-    r.b           = 7    record second field
-    s[0]          = 104  string char 'h' from "hello"
-    s[4]          = 111  string char 'o' from "hello"
-    adder(10)(32) = 42   closure with captured variable (x+y)
+No linker. No C driver. No libSystem. No dyld.
 
 ## IR ops supported
 
     const (int, bool, str), load, add, sub, mul
     gt, lt, le, ge, eq, ne  (CmpI64)
-    branch/jump/patch_branch/patch_jump  (flat IR -> block splitting)
-    call (direct), call fn_r (CallIndirect via closure ptr)
-    make_list, make_rec, make_str  -> AllocHeap + StoreHeap
-    get_index  -> LoadHeapDyn (ptr + 8 + idx*8)
-    get_field  -> LoadHeapStaticIdx (compile-time field order map)
+    branch/jump/patch_branch/patch_jump
+    call (direct), call fn_r (CallIndirect)
+    make_list, make_rec, make_str  -> heap allocation
+    get_index  -> LoadHeapDyn
+    get_field  -> LoadHeapStaticIdx
     make_closure  -> AllocHeap + StoreFnPtr (AbsReloc)
-    global_load   -> aliased to global_store src (same name)
+    global_load   -> aliased to global_store src
 
 ## Runtime
 
-    __TEXT  entry stub (24 bytes) + fard_alloc stub (34 bytes) + functions
+    __TEXT  entry stub (24 bytes) + fard_alloc (34 bytes) + functions
     __DATA  4KB bump allocator heap at 0x100002000
     Closure heap: [fn_ptr, cap0, cap1, ...]
-    Closure ABI: __env__ passed as arg0, captures loaded via get_index
+    Closure ABI: closure ptr as arg0, captures via get_index(__env__, i)
 
-## Closure capture ABI
+## Roadmap
 
-    adder(x) returns closure ptr = [fn_ptr_of_anon_, x_value]
-    CallIndirect: passes closure ptr as rdi, explicit args follow
-    anon_(__env__, y): loads x = get_index(__env__, 0), computes x+y
+### Correctness track
+    [done]  Phase 1 — Semantic correctness
+            add/max/fact/fib/list/record/string/closure all match fardrun
+    [next]  Phase 2 — Verifier completion
+            register dominance, CFG join correctness, arity checks,
+            undefined register rejection, return-defined-on-all-paths
+    [next]  Phase 3 — Regression matrix
+            one command, full native equivalence suite,
+            interpreted vs OCIR vs OMIR vs native for every construct
 
-## MH_EXECUTE structure
+### IR track
+    [next]  Phase 4 — Proper IR layering
+            HIR (source-level) -> OCIR (typed) -> SSA/phi -> OMIR (machine)
+    [next]  UVIR — Universal Verified IR
+            language-neutral: functions, closures, heap objects, effects,
+            direct/indirect calls, phi/join values, module boundaries
 
-    __PAGEZERO   vmaddr=0 vmsize=4GB
-    __TEXT       vmaddr=0x100001000
-    __DATA       vmaddr=0x100002000 (heap)
-    __LINKEDIT
+### Optimization track (after correctness locked)
+    [ ]     SSA — explicit phi nodes + dominance
+    [ ]     copy propagation + dead code elimination (first safe passes)
+    [ ]     constant folding / propagation
+    [ ]     closure inlining
+    [ ]     register allocation
 
-Entry stub (24 bytes):
+### Backend track
+    [ ]     ELF (Linux)
+    [ ]     ARM64 (Apple Silicon, Linux)
+    [ ]     WASM
+    [ ]     DWARF debug info
+    [ ]     Dynamic libraries
 
-    push rbp / mov rbp,rsp / call fard_main / mov rdi,rax
-    mov rax,0x2000001 / syscall
+### Self-hosting track
+    [next]  stdlib native (list.map, str.concat, rec.get, ...)
+    [ ]     import flattening -> fardlex + fardparse + fard_eval compile natively
+    [ ]     delete Rust eval loop
+    [ ]     FARD compiles FARD Prim compiles FARD
+
+### Language frontend track (after UVIR/SSA stable)
+    [ ]     Python subset (stress-tests dynamic objects, closures, dicts)
+    [ ]     JavaScript/TypeScript subset
+    [ ]     Rust MIR-style path
+    [ ]     C, Go, Swift, Java
+
+## Architecture principle
+
+    FARD source   -> FARD frontend   \
+    Python source -> Python frontend  \
+    JS source     -> JS frontend       -> UVIR -> SSA -> OMIR -> Native/WASM
+    Rust source   -> Rust frontend    /
+
+Every language keeps its surface semantics.
+Every compilation lowers into a verified common substrate.
+Every transformation emits receipts.
 
 ## Source
 
@@ -87,16 +123,7 @@ Entry stub (24 bytes):
       macho_exe.fard              MH_EXECUTE emitter
       ocir.fard / omir.fard       IR definitions
 
-## Roadmap
+## Repos
 
-    Stage 8  [done]  full language native: int, bool, list, record, string, closure
-    Stage 9  [next]  stdlib native (list.map, str.concat, rec.get, ...)
-                     import flattening → fardlex + fardparse + fard_eval compile natively
-                     delete Rust eval loop
-    Stage 10         FARD ISA Phase 4 — Verilog / FPGA
-
-## Status
-
-- FARD v0.5.0, fardrun v1.7.1, target x86_64-apple-darwin
-- Repos: https://github.com/mauludsadiq/FARD-Prim (backend)
-         https://github.com/mauludsadiq/FARD (v0.5 compiler)
+    https://github.com/mauludsadiq/FARD-Prim   (backend)
+    https://github.com/mauludsadiq/FARD         (v0.5 compiler)
