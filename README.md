@@ -69,9 +69,11 @@ No linker. No C driver. No libSystem. No dyld.
 ### Correctness track
     [done]  Phase 1 — Semantic correctness
             add/max/fact/fib/list/record/string/closure all match fardrun
-    [next]  Phase 2 — Verifier completion
-            register dominance, CFG join correctness, arity checks,
-            undefined register rejection, return-defined-on-all-paths
+    [done]  Phase 2 — Verifier completion (partial)
+            UNDEF_REG: undefined register rejection
+            CALL_ARITY_MISMATCH: arg count vs callee arity
+            call arg undefined-reg check
+    [next]  Phase 2 cont — return defined on all paths, CFG dominance
     [next]  Phase 3 — Regression matrix
             one command, full native equivalence suite,
             interpreted vs OCIR vs OMIR vs native for every construct
