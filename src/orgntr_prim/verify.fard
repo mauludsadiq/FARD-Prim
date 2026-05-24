@@ -37,7 +37,7 @@ fn require_ty(env, r, ty, code, data) {
   else err(code, data)
 }
 
-fn verify_inst(inst, env, func_name, block_label) {
+fn verify_inst(inst, env, func_name, block_label, func_arities) {
   if inst.op == "ImmI64" then
     ok(put_ty(env, inst.dst, "I64"))
   else if inst.op == "CopyI64" then
@@ -58,7 +58,25 @@ fn verify_inst(inst, env, func_name, block_label) {
       let b = require_ty(a.v, inst.rhs_fval, "FardVal", "BOXED_CALL_RHS_TYPE", { func: func_name, block: block_label, reg: inst.rhs_fval, op: inst.op }) in
       if b.t == "err" then b else ok(put_ty(b.v, inst.dst_fval, "FardVal"))
   else if inst.op == "CallI64" then
-    ok(put_ty(env, inst.dst, "I64"))
+    let n_args = list.len(inst.args) in
+    let arity_ok = if rec.has(func_arities, inst.callee)
+      then rec.get(func_arities, inst.callee) == n_args
+      else true in  // unknown callee (external) — skip arity check
+    if !arity_ok
+      then err("CALL_ARITY_MISMATCH", { func: func_name, block: block_label,
+               callee: inst.callee,
+               expected: rec.get(func_arities, inst.callee),
+               got: n_args })
+      else
+        // Also verify each arg register is defined
+        let args_ok = list.fold(inst.args, ok(env), fn(state, r) {
+          if state.t == "err" then state
+          else if !has_reg(state.v, r)
+            then err("UNDEF_REG", { func: func_name, block: block_label, reg: r, in_call_arg: true })
+            else ok(state.v)
+        }) in
+        if args_ok.t == "err" then args_ok
+        else ok(put_ty(env, inst.dst, "I64"))
   else if inst.op == "UnboxInt" then
     ok(put_ty(env, inst.dst, "I64"))
   else if inst.op == "CmpI64" then
@@ -91,9 +109,9 @@ fn verify_inst(inst, env, func_name, block_label) {
     err("UNKNOWN_INST", { func: func_name, block: block_label, op: inst.op })
 }
 
-fn verify_insts(insts, env, func_name, block_label) {
+fn verify_insts(insts, env, func_name, block_label, func_arities) {
   list.fold(insts, ok(env), fn(state, inst) {
-    if state.t == "err" then state else verify_inst(inst, state.v, func_name, block_label)
+    if state.t == "err" then state else verify_inst(inst, state.v, func_name, block_label, func_arities)
   })
 }
 
@@ -112,13 +130,13 @@ fn verify_term(term, env, labels, func_name, block_label) {
     err("UNKNOWN_TERM", { func: func_name, block: block_label, op: term.op })
 }
 
-fn verify_block(block, state, labels, func_name) {
+fn verify_block(block, state, labels, func_name, func_arities) {
   if state.t == "err" then state else
-    let inst_state = verify_insts(block.insts, state.v, func_name, block.label) in
+    let inst_state = verify_insts(block.insts, state.v, func_name, block.label, func_arities) in
     if inst_state.t == "err" then inst_state else verify_term(block.term, inst_state.v, labels, func_name, block.label)
 }
 
-fn verify_func(f) {
+fn verify_func(f, func_arities) {
   if list.len(f.blocks) == 0 then err("FUNC_HAS_NO_BLOCKS", { func: f.name })
   else
     let labels = label_record(f.blocks) in
@@ -129,7 +147,7 @@ fn verify_func(f) {
         then list.fold(f.params, {}, fn(env, p) { put_ty(env, p.reg, p.ty) })
         else {}
       in
-      list.fold(f.blocks, ok(init_env), fn(state, b) { verify_block(b, state, labels, f.name) })
+      list.fold(f.blocks, ok(init_env), fn(state, b) { verify_block(b, state, labels, f.name, func_arities) })
 }
 
 fn duplicate_func_name(funcs) {
@@ -145,9 +163,14 @@ fn verify_module(m) {
   let dup = duplicate_func_name(m.funcs) in
   if dup != null then err("DUPLICATE_FUNC_NAME", { name: dup })
   else if !has_name(m.funcs, m.entry) then err("ENTRY_FUNCTION_MISSING", { entry: m.entry })
-  else list.fold(m.funcs, ok({ entry: m.entry }), fn(state, f) {
-    if state.t == "err" then state else verify_func(f)
-  })
+  else
+    let func_arities = list.fold(m.funcs, {}, fn(acc, f) {
+      let arity = if rec.has(f, "params") then list.len(f.params) else 0 in
+      rec.set(acc, f.name, arity)
+    }) in
+    list.fold(m.funcs, ok({ entry: m.entry }), fn(state, f) {
+      if state.t == "err" then state else verify_func(f, func_arities)
+    })
 }
 
 export { ok, err, verify_module, verify_func }
