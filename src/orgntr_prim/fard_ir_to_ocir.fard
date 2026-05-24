@@ -43,11 +43,12 @@ fn lower_instr_one(instr, fn_names, field_order) {
                  else list.get(fn_names, instr.fn_id) in
     ocir.inst_call_i64(instr.dst, callee, instr.args)
   else if op == "make_closure" then
-    let ptr_reg = 30000 + instr.dst in
     let fn_name = list.get(fn_names, instr.fn_id) in
-    { op: "MakeClosure", dst: instr.dst, ptr_reg: ptr_reg,
-      fn_name: fn_name, captures: instr.captures }
-  else if op == "global_store" then
+    if list.len(instr.captures) == 0 then
+      ocir.inst_imm_i64(instr.dst, 0)
+    else
+      let ptr_reg = 30000 + instr.dst in
+      { op: "MakeClosure", dst: instr.dst, ptr_reg: ptr_reg, fn_name: fn_name, captures: instr.captures }  else if op == "global_store" then
     // Global stores not yet supported — emit a no-op ImmI64 0
     ocir.inst_imm_i64(0, 0)
   else if op == "call_global" then
@@ -295,7 +296,7 @@ fn lower_block_from_flat(blk, fn_names, subst, arity, all_blocks, patches, field
   else
     let t = term_instr.some in
     if t.op == "return" then
-      ocir.term_ret_i64(subst_reg(t.src, subst))
+      ocir.term_ret_i64(t.src)
     else if t.op == "jump" then
       if rec.has(patch, "some") then ocir.term_br(patch.some.target)
       else ocir.term_br(t.target)
@@ -476,9 +477,8 @@ fn lower_fn(f, fn_names, mod_field_order) {
       else lower_term(list.get(terms, 0), fn_names)
     in
     let term = if term_raw.op == "RetI64"
-      then ocir.term_ret_i64(subst_reg(term_raw.src, subst))
-      else term_raw
-    in
+      then ocir.term_ret_i64(term_raw.src)
+      else term_raw    in
     let body_insts = list.map(list.flatten(list.map(body, fn(i) { lower_instr(i, fn_names, field_order) })), fn(i) { subst_instr(i, subst, arity) }) in
     let block0 = ocir.block(0, body_insts, term) in
     ocir.func_with_params(f.name, params, [block0])
