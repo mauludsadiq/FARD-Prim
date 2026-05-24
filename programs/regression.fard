@@ -1,0 +1,25 @@
+/// FARD Prim regression suite — Phase 3
+/// Run: fardrun run --program programs/regression.fard --out /tmp/reg
+///      python3 programs/regression_run.py
+
+import("../src/orgntr_prim/fard_source_to_native") as pipeline
+
+fn check(name, src, out, expected) {
+  let result = pipeline.compile_and_emit(src, out) in
+  if result.ok
+    then { name: name, compiled: true, expected: expected, out: out }
+    else { name: name, compiled: false, expected: expected, err: result.err }
+}
+
+[
+  check("add",        "fn add(a,b){a+b}\nadd(10,32)",                              "out/r_add",     42),
+  check("max",        "fn max(a,b){if a>b then a else b}\nmax(10,42)",              "out/r_max",     42),
+  check("fact",       "fn fact(n){if n==0 then 1 else n*fact(n-1)}\nfact(5)",       "out/r_fact",    120),
+  check("fib",        "fn fib(n){if n<=1 then n else fib(n-1)+fib(n-2)}\nfib(10)", "out/r_fib",     55),
+  check("list_idx",   "fn get0(xs){xs[0]}\nget0([10,20,30])",                       "out/r_list",    10),
+  check("list_idx2",  "fn get2(xs){xs[2]}\nget2([10,20,30])",                       "out/r_list2",   30),
+  check("rec_field",  "fn geta(r){r.a}\ngeta({a:42,b:7})",                          "out/r_rec",     42),
+  check("rec_field2", "fn getb(r){r.b}\ngetb({a:42,b:7})",                          "out/r_rec2",    7),
+  check("closure",    "fn adder(x){fn(y){x+y}}\nadder(10)(32)",                     "out/r_closure", 42),
+  check("str_char",   "fn c0(s){s[0]}\nc0(\"hello\")",                              "out/r_str",     104)
+]
