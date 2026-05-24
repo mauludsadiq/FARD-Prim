@@ -250,3 +250,13 @@ IR ops supported in bridge:
 Runtime:
     __DATA segment: 4KB bump allocator heap at 0x100002000
     fard_alloc stub: 34-byte bump allocator in __TEXT
+## Stage 9 — Native stdlib (next)
+
+fard_eval uses these stdlib ops that need native implementation:
+- list: map, fold, filter, find, flatten, concat, append, build, len, get, any, all, ...
+- rec: get, has, set, keys, merge
+- str: concat, len, from, slice, split, contains, starts_with, ends_with
+- type: of
+
+Path: implement as FARD-compiled native functions in liborgntr_rt.a
+Then: import flattening → fardlex + fardparse + fard_eval compile natively
