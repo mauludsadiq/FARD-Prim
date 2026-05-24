@@ -54,6 +54,16 @@ No linker. No C driver. No libSystem. No dyld.
     Closure heap: [fn_ptr, cap0, cap1, ...]
     Closure ABI: closure ptr as arg0, captures via get_index(__env__, i)
 
+## Regression suite
+
+   fardrun run --program programs/regression.fard --out /tmp/reg
+   python3 programs/regression_run.py /tmp/reg/result.json
+
+10 cases, all PASS:
+   add(10,32)=42    max(10,42)=42    fact(5)=120      fib(10)=55
+   xs[0]=10         xs[2]=30         r.a=42           r.b=7
+   adder(10)(32)=42 (closure+capture)   s[0]=104 (string)
+
 ## Roadmap
 
 ### Correctness track
