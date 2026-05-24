@@ -230,8 +230,7 @@ Verified native execution (23 May 2026):
     r.b          = 7    record field access second field
     s[0]         = 104  string char access ('h' from "hello")
     s[4]         = 111  string char access ('o' from "hello")
-    adder(10)(32) = 64  closure call (make_closure + CallIndirect)
-                        note: 64=32+32; fard_lower captures not yet emitted
+    adder(10)(32) = 42  closure call with capture (x+y, x captured from outer scope)
 
 IR ops supported in bridge:
     const (int, bool, str), load (CopyI64), add, sub, mul
