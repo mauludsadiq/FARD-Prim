@@ -230,6 +230,8 @@ Verified native execution (23 May 2026):
     r.b          = 7    record field access second field
     s[0]         = 104  string char access ('h' from "hello")
     s[4]         = 111  string char access ('o' from "hello")
+    adder(10)(32) = 64  closure call (make_closure + CallIndirect)
+                        note: 64=32+32; fard_lower captures not yet emitted
 
 IR ops supported in bridge:
     const (int, bool, str), load (CopyI64), add, sub, mul
@@ -238,11 +240,13 @@ IR ops supported in bridge:
     call (direct + indirect via global_load name map)
     make_list -> AllocHeap + StoreHeap sequence
     make_rec  -> AllocHeap + StoreHeap sequence
-    make_str  -> AllocHeap + len + chars (str.char_code)
-    get_index -> LoadHeapDyn (ptr + 8 + idx*8)
-    get_field -> LoadHeapStaticIdx (compile-time field order map)
-    global_load (resolved, filtered from output)
-    make_closure, global_store (stubbed as ImmI64 0)
+    make_str     -> AllocHeap + len + chars (str.char_code)
+    get_index    -> LoadHeapDyn (ptr + 8 + idx*8)
+    get_field    -> LoadHeapStaticIdx (compile-time field order map)
+    make_closure -> MakeClosure (AllocHeap + StoreFnPtr + AbsReloc)
+    call fn_r    -> CallIndirect (load fn_ptr from closure[0] + call rax)
+    global_load  -> aliased to global_store src (same name)
+    global_store -> filtered from output
 
 Runtime:
     __DATA segment: 4KB bump allocator heap at 0x100002000
