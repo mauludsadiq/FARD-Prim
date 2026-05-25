@@ -85,14 +85,16 @@ No linker. No C driver. No libSystem. No dyld.
             interpreted vs OCIR vs OMIR vs native for every construct
 
 ### IR track
-    [done]  Phase 4 — HIR pipeline (initial)
-            AST -> HIR (structured: if/else, let, fn, call) -> OCIR -> native
-            hir.fard: HIR constructors + pretty-printer
-            ast_to_hir.fard: AST -> HIR lowering
-            hir_to_ocir.fard: HIR -> OCIR (proper BrCond blocks, no patches)
-            Verified: add(10,32)=42, fact(5)=120 via HIR pipeline
-    [next]  Phase 4 cont — GetField in HIR, closure HIR, let-chains
-            Then: HIR -> SSA (explicit phi nodes at joins)
+    [done]  Phase 4 — HIR pipeline complete
+            AST -> HIR -> OCIR -> verify -> OMIR -> x86-64 -> MH_EXECUTE
+            hir.fard: structured HIR (if/else, let, fn, call, list, rec)
+            ast_to_hir.fard: full AST -> HIR lowering
+            hir_to_ocir.fard: single recursive lower_hir_expr (284 lines)
+              closures with captures, get_field, let-chain, list, rec
+              free_vars analysis, global field_order pre-pass
+            Verified: add=42, fact=120, get_field=42, let_chain=42, closure=42
+    [next]  HIR -> SSA — explicit phi nodes at join points
+            UVIR — language-neutral IR substrate
     [next]  UVIR — Universal Verified IR
             language-neutral: functions, closures, heap objects, effects,
             direct/indirect calls, phi/join values, module boundaries
