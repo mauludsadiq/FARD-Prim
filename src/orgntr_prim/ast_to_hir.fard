@@ -20,7 +20,7 @@ fn lower_expr(node) {
   else if t == "let"    then hir.hir_let(node.name, lower_expr(node.val), lower_expr(node.body))
   else if t == "fn"     then hir.hir_fn(node.params, lower_expr(node.body))
   else if t == "call"   then hir.hir_call(lower_expr(node.fn_n), list.map(node.args, fn(a) { lower_expr(a) }))
-  else if t == "get_field"  then hir.hir_get_field(lower_expr(node.obj), node.field)
+  else if t == "get_field" || t == "get"  then hir.hir_get_field(lower_expr(node.obj), node.field)
   else if t == "get_index"  then hir.hir_get_index(lower_expr(node.obj), lower_expr(node.idx))
   else if t == "list"   then hir.hir_make_list(list.map(node.items, fn(i) { lower_expr(i) }))
   else if t == "rec"    then hir.hir_make_rec(list.map(node.fields, fn(f) { { key: f.k, val: lower_expr(f.v) } }))
@@ -39,12 +39,21 @@ fn lower_item(item) {
 
 fn lower_module(ast_module) {
   let items = ast_module.items in
-  let defs = list.filter(list.map(items, fn(i) { lower_item(i) }), fn(d) { d.t != "entry_expr" }) in
-  let entry_items = list.filter(list.map(items, fn(i) { lower_item(i) }), fn(d) { d.t == "entry_expr" }) in
-  let entry = if list.len(entry_items) > 0
-    then list.get(entry_items, list.len(entry_items) - 1).expr
+  let lowered = list.map(items, fn(i) { lower_item(i) }) in
+  let fn_defs = list.filter(lowered, fn(d) { d.t == "fn_def" }) in
+  let entry_exprs = list.filter(lowered, fn(d) { d.t == "entry_expr" }) in
+  let let_defs = list.filter(lowered, fn(d) { d.t == "let_def" }) in
+  // Wrap entry in let bindings from let_items
+  let raw_entry = if list.len(entry_exprs) > 0
+    then list.get(entry_exprs, list.len(entry_exprs) - 1).expr
     else hir.hir_null() in
-  hir.hir_module(defs, entry)
+  // Chain: let x = v1 in (let y = v2 in entry)
+  let entry = list.fold(
+    list.reverse(let_defs),
+    raw_entry,
+    fn(body, ld) { hir.hir_let(ld.name, ld.val, body) }
+  ) in
+  hir.hir_module(fn_defs, entry)
 }
 
 export { lower_expr, lower_item, lower_module }
