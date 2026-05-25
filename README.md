@@ -80,9 +80,10 @@ No linker. No C driver. No libSystem. No dyld.
             entry function present
             CFG join dominance: dataflow intersection at join points
             reg defined on only one branch rejected at join
-    [next]  Phase 3 — Regression matrix
-            one command, full native equivalence suite,
-            interpreted vs OCIR vs OMIR vs native for every construct
+    [done]  Phase 3 — Regression matrix
+            one command: fardrun run --program programs/regression.fard
+            runner: python3 programs/regression_run.py /tmp/reg/result.json
+            10 cases: add, max, fact, fib, list, rec, string, closure
 
 ### IR track
     [done]  Phase 4 — HIR pipeline complete
