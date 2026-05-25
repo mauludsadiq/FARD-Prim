@@ -1,0 +1,202 @@
+/// UVIR — Universal Verified Intermediate Representation
+/// Language-neutral substrate between language frontends and OCIR/OMIR.
+///
+/// Pipeline:
+///   FARD AST   -> fard_to_uvir   -> UVIR
+///   Python AST -> python_to_uvir -> UVIR  (future)
+///   JS AST     -> js_to_uvir     -> UVIR  (future)
+///                                       |
+///                                  uvir_verify
+///                                       |
+///                                  uvir_to_ocir -> OCIR -> OMIR -> x86-64
+///
+/// Design principles:
+///   1. Every value has a type tag (static or dynamic)
+///   2. Every definition is unique (SSA-ready)
+///   3. Control flow is explicit (no implicit fall-through)
+///   4. Heap is explicit (alloc, load, store)
+///   5. Foreign calls are typed at the boundary
+///   6. Receipts at every stage
+
+import("std/rec") as rec
+import("std/list") as list
+import("std/str") as str
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+fn ty_int()     { "Int" }       // 64-bit integer
+fn ty_float()   { "Float" }     // 64-bit float
+fn ty_bool()    { "Bool" }      // boolean
+fn ty_str()     { "Str" }       // interned string reference
+fn ty_ref()     { "Ref" }       // heap reference (GC-managed)
+fn ty_fn()      { "Fn" }        // function pointer / closure
+fn ty_any()     { "Any" }       // dynamically typed (Python/JS values)
+fn ty_unit()    { "Unit" }      // void / None / undefined
+fn ty_never()   { "Never" }     // diverging (throw, infinite loop)
+
+// ── Values (compile-time constants) ──────────────────────────────────────────
+
+fn val_int(v)   { { t: "VInt",   v: v } }
+fn val_float(v) { { t: "VFloat", v: v } }
+fn val_bool(v)  { { t: "VBool",  v: v } }
+fn val_str(v)   { { t: "VStr",   v: v } }
+fn val_null()   { { t: "VNull" } }
+
+// ── Instructions ─────────────────────────────────────────────────────────────
+
+// Arithmetic (typed)
+fn inst_int_add(dst, a, b)  { { op: "IntAdd",  dst: dst, a: a, b: b } }
+fn inst_int_sub(dst, a, b)  { { op: "IntSub",  dst: dst, a: a, b: b } }
+fn inst_int_mul(dst, a, b)  { { op: "IntMul",  dst: dst, a: a, b: b } }
+fn inst_int_div(dst, a, b)  { { op: "IntDiv",  dst: dst, a: a, b: b } }
+fn inst_int_mod(dst, a, b)  { { op: "IntMod",  dst: dst, a: a, b: b } }
+
+// Comparisons
+fn inst_int_cmp(dst, op, a, b) { { op: "IntCmp", dst: dst, cmp: op, a: a, b: b } }
+// op: "eq" | "ne" | "lt" | "le" | "gt" | "ge"
+
+// Constants
+fn inst_const(dst, val) { { op: "Const", dst: dst, val: val } }
+
+// Copy / move
+fn inst_copy(dst, src) { { op: "Copy", dst: dst, src: src } }
+
+// Heap: reference-counted or GC-managed objects
+fn inst_alloc(dst, size, tag) { { op: "Alloc", dst: dst, size: size, tag: tag } }
+// tag: object kind ("list", "rec", "closure", "str", "any", ...)
+fn inst_load(dst, ptr, offset) { { op: "Load", dst: dst, ptr: ptr, offset: offset } }
+fn inst_store(ptr, offset, src) { { op: "Store", ptr: ptr, offset: offset, src: src } }
+fn inst_load_dyn(dst, ptr, idx) { { op: "LoadDyn", dst: dst, ptr: ptr, idx: idx } }
+
+// String
+fn inst_str_const(dst, s) { { op: "StrConst", dst: dst, s: s } }
+fn inst_str_len(dst, s)   { { op: "StrLen",   dst: dst, s: s } }
+fn inst_str_get(dst, s, i) { { op: "StrGet",  dst: dst, s: s, i: i } }
+
+// Closures
+fn inst_make_closure(dst, fn_name, caps) {
+  { op: "MakeClosure", dst: dst, fn_name: fn_name, caps: caps }
+}
+
+// Calls
+fn inst_call_direct(dst, callee, args) {
+  { op: "CallDirect", dst: dst, callee: callee, args: args }
+}
+fn inst_call_indirect(dst, closure, args) {
+  { op: "CallIndirect", dst: dst, closure: closure, args: args }
+}
+fn inst_call_foreign(dst, name, args, ret_ty) {
+  { op: "CallForeign", dst: dst, name: name, args: args, ret_ty: ret_ty }
+}
+
+// Dynamic typing (for Python/JS)
+fn inst_type_of(dst, src) { { op: "TypeOf", dst: dst, src: src } }
+fn inst_coerce(dst, src, to_ty) { { op: "Coerce", dst: dst, src: src, to_ty: to_ty } }
+fn inst_is_truthy(dst, src) { { op: "IsTruthy", dst: dst, src: src } }
+
+// Phi node (SSA join)
+fn inst_phi(dst, incoming) {
+  // incoming: [{ from_label: int, reg: int }, ...]
+  { op: "Phi", dst: dst, incoming: incoming }
+}
+
+// ── Terminators ───────────────────────────────────────────────────────────────
+
+fn term_ret(src)            { { op: "Ret",    src: src } }
+fn term_ret_void()          { { op: "RetVoid" } }
+fn term_br(to)              { { op: "Br",     to: to } }
+fn term_br_cond(cond, t, f) { { op: "BrCond", cond: cond, then_blk: t, else_blk: f } }
+fn term_throw(exc)          { { op: "Throw",  exc: exc } }
+fn term_unreachable()       { { op: "Unreachable" } }
+
+// ── Basic block ───────────────────────────────────────────────────────────────
+
+fn block(label, insts, term) { { label: label, insts: insts, term: term } }
+
+// ── Function ──────────────────────────────────────────────────────────────────
+
+fn param(reg, ty, name) { { reg: reg, ty: ty, name: name } }
+
+fn func(name, params, ret_ty, blocks, attrs) {
+  // attrs: { is_closure: bool, is_foreign: bool, is_pure: bool, ... }
+  { name: name, params: params, ret_ty: ret_ty, blocks: blocks, attrs: attrs }
+}
+
+fn func_attrs(is_closure, is_pure) {
+  { is_closure: is_closure, is_pure: is_pure }
+}
+
+// ── Module ────────────────────────────────────────────────────────────────────
+
+fn module(name, funcs, entry, imports, exports) {
+  { name: name, funcs: funcs, entry: entry,
+    imports: imports, exports: exports }
+}
+
+fn import_decl(name, from_module, ty) {
+  { name: name, from_module: from_module, ty: ty }
+}
+
+fn export_decl(name, fn_name) {
+  { name: name, fn_name: fn_name }
+}
+
+// ── UVIR pretty printer ───────────────────────────────────────────────────────
+
+fn pp_inst(inst) {
+  let op = inst.op in
+  if op == "Const" then str.concat(["%", str.from(inst.dst), " = const ", str.from(inst.val.v)])
+  else if op == "IntAdd" then str.concat(["%", str.from(inst.dst), " = add %", str.from(inst.a), " %", str.from(inst.b)])
+  else if op == "IntSub" then str.concat(["%", str.from(inst.dst), " = sub %", str.from(inst.a), " %", str.from(inst.b)])
+  else if op == "IntMul" then str.concat(["%", str.from(inst.dst), " = mul %", str.from(inst.a), " %", str.from(inst.b)])
+  else if op == "IntCmp" then str.concat(["%", str.from(inst.dst), " = cmp.", inst.cmp, " %", str.from(inst.a), " %", str.from(inst.b)])
+  else if op == "Copy"   then str.concat(["%", str.from(inst.dst), " = %", str.from(inst.src)])
+  else if op == "Alloc"  then str.concat(["%", str.from(inst.dst), " = alloc ", inst.tag, " ", str.from(inst.size)])
+  else if op == "Load"   then str.concat(["%", str.from(inst.dst), " = load [%", str.from(inst.ptr), "+", str.from(inst.offset), "]"])
+  else if op == "Store"  then str.concat(["store [%", str.from(inst.ptr), "+", str.from(inst.offset), "] = %", str.from(inst.src)])
+  else if op == "CallDirect" then str.concat(["%", str.from(inst.dst), " = call ", inst.callee, "(", str.join(list.map(inst.args, fn(a) { str.concat(["%", str.from(a)]) }), ", "), ")"])
+  else if op == "Phi" then str.concat(["%", str.from(inst.dst), " = phi(", str.join(list.map(inst.incoming, fn(i) { str.concat(["[%", str.from(i.reg), " from ", str.from(i.from_label), "]"]) }), ", "), ")"])
+  else str.concat(["// ", op])
+}
+
+fn pp_term(term) {
+  let op = term.op in
+  if op == "Ret"    then str.concat(["ret %", str.from(term.src)])
+  else if op == "RetVoid" then "ret void"
+  else if op == "Br"     then str.concat(["br label ", str.from(term.to)])
+  else if op == "BrCond" then str.concat(["br %", str.from(term.cond), " ? ", str.from(term.then_blk), " : ", str.from(term.else_blk)])
+  else op
+}
+
+fn pp_block(b) {
+  let inst_lines = list.map(b.insts, fn(i) { str.concat(["  ", pp_inst(i)]) }) in
+  let term_line = str.concat(["  ", pp_term(b.term)]) in
+  str.join(list.concat([[str.concat(["block_", str.from(b.label), ":"])], inst_lines, [term_line]]), "\n")
+}
+
+fn pp_func(f) {
+  let param_str = str.join(list.map(f.params, fn(p) { str.concat([p.ty, " %", str.from(p.reg)]) }), ", ") in
+  let header = str.concat(["fn ", f.name, "(", param_str, ") -> ", f.ret_ty, " {"]) in
+  let body = str.join(list.map(f.blocks, fn(b) { pp_block(b) }), "\n") in
+  str.concat([header, "\n", body, "\n}"])
+}
+
+fn pp_module(m) {
+  str.concat(["module ", m.name, "\n\n",
+    str.join(list.map(m.funcs, fn(f) { pp_func(f) }), "\n\n")])
+}
+
+export {
+  ty_int, ty_float, ty_bool, ty_str, ty_ref, ty_fn, ty_any, ty_unit, ty_never,
+  val_int, val_float, val_bool, val_str, val_null,
+  inst_int_add, inst_int_sub, inst_int_mul, inst_int_div, inst_int_mod,
+  inst_int_cmp, inst_const, inst_copy,
+  inst_alloc, inst_load, inst_store, inst_load_dyn,
+  inst_str_const, inst_str_len, inst_str_get,
+  inst_make_closure, inst_call_direct, inst_call_indirect, inst_call_foreign,
+  inst_type_of, inst_coerce, inst_is_truthy,
+  inst_phi,
+  term_ret, term_ret_void, term_br, term_br_cond, term_throw, term_unreachable,
+  block, param, func, func_attrs, module, import_decl, export_decl,
+  pp_inst, pp_block, pp_func, pp_module
+}

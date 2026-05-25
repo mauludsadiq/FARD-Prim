@@ -1,0 +1,113 @@
+/// uvir_to_ocir — lowers UVIR to OCIR
+/// Phi nodes become CopyI64 pairs (one per predecessor).
+/// This is the phi-elimination pass.
+
+import("std/list") as list
+import("std/rec")  as rec
+import("std/str")  as str
+import("../orgntr_prim/ocir") as ocir
+
+fn lower_val(v) {
+  if v.t == "VInt"   then v.v
+  else if v.t == "VBool" then if v.v then 1 else 0
+  else 0
+}
+
+fn lower_inst(inst) {
+  let op = inst.op in
+  if op == "Const" then [ocir.inst_imm_i64(inst.dst, lower_val(inst.val))]
+  else if op == "IntAdd" then [ocir.inst_add_i64(inst.dst, inst.a, inst.b)]
+  else if op == "IntSub" then [{ op: "SubI64", dst: inst.dst, lhs: inst.a, rhs: inst.b }]
+  else if op == "IntMul" then [{ op: "MulI64", dst: inst.dst, lhs: inst.a, rhs: inst.b }]
+  else if op == "IntCmp" then
+    let cmp = if inst.cmp == "==" then "eq"
+      else if inst.cmp == "!=" then "ne"
+      else if inst.cmp == "<"  then "lt"
+      else if inst.cmp == "<=" then "le"
+      else if inst.cmp == ">"  then "gt"
+      else if inst.cmp == ">=" then "ge"
+      else inst.cmp in
+    [{ op: "CmpI64", dst: inst.dst, lhs: inst.a, rhs: inst.b, cmp: cmp }]
+  else if op == "Copy"   then [{ op: "CopyI64", dst: inst.dst, src: inst.src }]
+  else if op == "StrConst" then [{ op: "ConstStr", dst: inst.dst, s: inst.s }]
+  else if op == "Alloc"  then [{ op: "AllocHeap", dst: inst.dst, size: inst.size }]
+  else if op == "Load"   then [{ op: "LoadHeapStaticIdx", dst: inst.dst, ptr: inst.ptr,
+                                  field_idx: inst.offset / 8 - 1 }]
+  else if op == "Store"  then [{ op: "StoreHeap", ptr: inst.ptr, offset: inst.offset, src: inst.src }]
+  else if op == "LoadDyn" then [{ op: "LoadHeapDyn", dst: inst.dst, ptr: inst.ptr, idx: inst.idx }]
+  else if op == "CallDirect" then [ocir.inst_call_i64(inst.dst, inst.callee, inst.args)]
+  else if op == "CallIndirect" then [{ op: "CallIndirect", dst: inst.dst,
+                                        closure_reg: inst.closure, args: inst.args }]
+  else if op == "MakeClosure" then [{ op: "MakeClosure", dst: inst.dst,
+                                       ptr_reg: 30000 + inst.dst,
+                                       fn_name: inst.fn_name, captures: inst.caps }]
+  else if op == "Phi" then []  // phi handled by predecessor copy insertion
+  else if op == "ImmBool" then [{ op: "ImmBool", dst: inst.dst, val: inst.val }]
+  else []
+}
+
+fn lower_term(term) {
+  let op = term.op in
+  if op == "Ret"     then ocir.term_ret_i64(term.src)
+  else if op == "Br"     then ocir.term_br(term.to)
+  else if op == "BrCond" then { op: "BrCond", cond: term.cond, then_blk: term.then_blk, else_blk: term.else_blk }
+  else ocir.term_ret_i64(0)
+}
+
+fn collect_phis(blocks) {
+  // Returns map: block_label -> [phi insts]
+  list.fold(blocks, {}, fn(acc, b) {
+    let phis = list.filter(b.insts, fn(i) { i.op == "Phi" }) in
+    if list.len(phis) > 0
+      then rec.set(acc, str.from(b.label), phis)
+      else acc
+  })
+}
+
+fn phi_copies_for_pred(phis, from_label) {
+  // For each phi in the successor, emit CopyI64 for the incoming value
+  list.flatten(list.map(phis, fn(phi) {
+    let incoming = list.filter(phi.incoming, fn(i) { i.from_label == from_label }) in
+    if list.len(incoming) > 0
+      then [{ op: "CopyI64", dst: phi.dst, src: list.get(incoming, 0).reg }]
+      else []
+  }))
+}
+
+fn successors(term) {
+  let op = term.op in
+  if op == "Br"     then [term.to]
+  else if op == "BrCond" then [term.then_blk, term.else_blk]
+  else []
+}
+
+fn lower_block(b, phi_map) {
+  // Lower instructions (skip phis — handled via pred copies)
+  let non_phi = list.filter(b.insts, fn(i) { i.op != "Phi" }) in
+  let lowered = list.flatten(list.map(non_phi, fn(i) { lower_inst(i) })) in
+  let term = lower_term(b.term) in
+  // Insert phi copies before branch — for each successor that has phis
+  let succ_list = successors(b.term) in
+  let phi_copies = list.flatten(list.map(succ_list, fn(succ) {
+    let key = str.from(succ) in
+    if rec.has(phi_map, key)
+      then phi_copies_for_pred(rec.get(phi_map, key), b.label)
+      else []
+  })) in
+  ocir.block(b.label, list.concat([lowered, phi_copies]), term)
+}
+
+fn lower_func(f) {
+  let phi_map = collect_phis(f.blocks) in
+  let params = if rec.has(f, "params")
+    then list.map(f.params, fn(p) { ocir.param(p.reg, "I64") })
+    else [] in
+  let blocks = list.map(f.blocks, fn(b) { lower_block(b, phi_map) }) in
+  ocir.func_with_params(f.name, params, blocks)
+}
+
+fn lower_module(umod) {
+  ocir.module(umod.entry, list.map(umod.funcs, fn(f) { lower_func(f) }))
+}
+
+export { lower_module, lower_func, lower_block }

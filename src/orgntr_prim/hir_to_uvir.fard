@@ -1,0 +1,278 @@
+/// hir_to_uvir — lowers FARD HIR to UVIR
+/// UVIR is the language-neutral substrate.
+/// This replaces hir_to_ocir for the UVIR pipeline.
+
+import("std/list")  as list
+import("std/rec")   as rec
+import("std/str")   as str
+import("std/type")  as type
+import("std/array") as array
+import("std/int")   as int_mod
+import("../orgntr_prim/uvir") as uvir
+
+fn make_ctx(fn_names) {
+  { next_reg: array.from_list([0]), fn_names: fn_names,
+    field_order: array.from_list([{}]), lifted_fns: array.from_list([]) }
+}
+fn alloc_reg(ctx) {
+  let r = array.get(ctx.next_reg, 0) in
+  let _ = array.set(ctx.next_reg, 0, r + 1) in r
+}
+fn alloc_label(ctx) {
+  let r = array.get(ctx.next_reg, 0) in
+  let _ = array.set(ctx.next_reg, 0, r + 1) in r
+}
+fn env_empty() { null }
+fn env_set(env, name, reg) { { name: name, reg: reg, next: env } }
+fn env_get(env, name) {
+  if env == null then null
+  else if env.name == name then env.reg
+  else env_get(env.next, name)
+}
+fn make_bb(label) { { label: label, insts: [] } }
+fn bb_emit(bb, inst) { { label: bb.label, insts: list.append(bb.insts, inst) } }
+fn bb_finish(bb, term) { uvir.block(bb.label, bb.insts, term) }
+
+fn fv_union(a, b) {
+  list.fold(rec.keys(b), a, fn(acc, k) { rec.set(acc, k, true) })
+}
+fn free_vars(node, bound) {
+  let t = node.t in
+  let emp = rec.remove(rec.set({}, "__x__", false), "__x__") in
+  if t == "var" then
+    if rec.has(bound, node.name) then emp else rec.set(emp, node.name, true)
+  else if t == "binop" then fv_union(free_vars(node.l, bound), free_vars(node.r, bound))
+  else if t == "if" then fv_union(free_vars(node.cond, bound),
+    fv_union(free_vars(rec.get(node, "then_"), bound), free_vars(rec.get(node, "else_"), bound)))
+  else if t == "let" then fv_union(free_vars(node.val, bound),
+    free_vars(node.body, rec.set(bound, node.name, true)))
+  else if t == "fn" then
+    let b2 = list.fold(node.params, bound, fn(acc, p) { rec.set(acc, p, true) }) in
+    free_vars(node.body, b2)
+  else if t == "call" then
+    list.fold(node.args, free_vars(node.callee, bound), fn(acc, a) { fv_union(acc, free_vars(a, bound)) })
+  else if t == "get_field" then free_vars(node.obj, bound)
+  else if t == "get_index" then fv_union(free_vars(node.obj, bound), free_vars(node.idx, bound))
+  else if t == "list" then list.fold(node.items, emp, fn(acc, i) { fv_union(acc, free_vars(i, bound)) })
+  else if t == "rec" then list.fold(node.fields, emp, fn(acc, f) { fv_union(acc, free_vars(f.val, bound)) })
+  else emp
+}
+
+fn lower_hir_expr(node, env, bb, ctx) {
+  let t = node.t in
+  if t == "int" then
+    let dst = alloc_reg(ctx) in
+    let v = if type.of(node.v) == "int" then node.v else (int_mod.parse(node.v) ?? { v: 0 }).v in
+    { reg: dst, bb: bb_emit(bb, uvir.inst_const(dst, uvir.val_int(v))), extra: [] }
+  else if t == "bool" then
+    let dst = alloc_reg(ctx) in
+    { reg: dst, bb: bb_emit(bb, uvir.inst_const(dst, uvir.val_bool(node.v))), extra: [] }
+  else if t == "str" then
+    let dst = alloc_reg(ctx) in
+    { reg: dst, bb: bb_emit(bb, uvir.inst_str_const(dst, node.v)), extra: [] }
+  else if t == "null" then
+    let dst = alloc_reg(ctx) in
+    { reg: dst, bb: bb_emit(bb, uvir.inst_const(dst, uvir.val_null())), extra: [] }
+  else if t == "var" then
+    let vr = env_get(env, node.name) in
+    if vr != null then { reg: vr, bb: bb, extra: [] }
+    else let dst = alloc_reg(ctx) in
+      { reg: dst, bb: bb_emit(bb, uvir.inst_const(dst, uvir.val_int(0))), extra: [] }
+  else if t == "binop" then
+    let lv = lower_hir_expr(node.l, env, bb, ctx) in
+    let rv = lower_hir_expr(node.r, env, lv.bb, ctx) in
+    let dst = alloc_reg(ctx) in
+    let op = node.op in
+    let ins = if op == "+" then uvir.inst_int_add(dst, lv.reg, rv.reg)
+      else if op == "-" then uvir.inst_int_sub(dst, lv.reg, rv.reg)
+      else if op == "*" then uvir.inst_int_mul(dst, lv.reg, rv.reg)
+      else if op == "/" then uvir.inst_int_div(dst, lv.reg, rv.reg)
+      else uvir.inst_int_cmp(dst, op, lv.reg, rv.reg)
+    in
+    { reg: dst, bb: bb_emit(rv.bb, ins), extra: list.concat([lv.extra, rv.extra]) }
+  else if t == "let" then
+    let vl = lower_hir_expr(node.val, env, bb, ctx) in
+    let e2 = env_set(env, node.name, vl.reg) in
+    let bd = lower_hir_expr(node.body, e2, vl.bb, ctx) in
+    { reg: bd.reg, bb: bd.bb, extra: list.concat([vl.extra, bd.extra]) }
+  else if t == "if" then
+    // Proper phi-based if/else
+    let cr = lower_hir_expr(node.cond, env, bb, ctx) in
+    let lt = alloc_label(ctx) in
+    let lf = alloc_label(ctx) in
+    let lj = alloc_label(ctx) in
+    let cb = bb_finish(cr.bb, uvir.term_br_cond(cr.reg, lt, lf)) in
+    let tn = rec.get(node, "then_") in
+    let tb = make_bb(lt) in
+    let tr = lower_hir_expr(tn, env, tb, ctx) in
+    let tblk = bb_finish(tr.bb, uvir.term_br(lj)) in
+    let en = rec.get(node, "else_") in
+    let fb = make_bb(lf) in
+    let fr = lower_hir_expr(en, env, fb, ctx) in
+    let fblk = bb_finish(fr.bb, uvir.term_br(lj)) in
+    // Phi node at join
+    let jd = alloc_reg(ctx) in
+    let phi = uvir.inst_phi(jd, [{ from_label: lt, reg: tr.reg }, { from_label: lf, reg: fr.reg }]) in
+    let jb = bb_emit(make_bb(lj), phi) in
+    let xa = list.concat([cr.extra, [cb, tblk]]) in
+    let xb = list.concat([tr.extra, [fblk]]) in
+    { reg: jd, bb: jb, extra: list.concat([xa, xb, fr.extra]) }
+  else if t == "fn" then
+    let bound = list.fold(node.params, {}, fn(acc, p) { rec.set(acc, p, true) }) in
+    let fvs = free_vars(node.body, bound) in
+    let cap_names = list.filter(rec.keys(fvs), fn(n) { env_get(env, n) != null }) in
+    let cap_regs = list.map(cap_names, fn(n) { env_get(env, n) }) in
+    let n_caps = list.len(cap_names) in
+    let anon_name = str.concat("anon_uvir_", str.from(array.get(ctx.next_reg, 0))) in
+    let all_params = if n_caps > 0 then list.concat([["__env__"], node.params]) else node.params in
+    let up = list.build(list.len(all_params), fn(i) { uvir.param(i, uvir.ty_int(), list.get(all_params, i)) }) in
+    let actx = make_ctx(ctx.fn_names) in
+    let _ = array.set(actx.field_order, 0, array.get(ctx.field_order, 0)) in
+    let _ = list.build(list.len(all_params), fn(_) { alloc_reg(actx) }) in
+    let ienv = list.fold(list.build(list.len(all_params), fn(i) { i }), env_empty(),
+      fn(e, i) { env_set(e, list.get(all_params, i), i) }) in
+    let abb = make_bb(0) in
+    let cap_res = if n_caps == 0 then { e: ienv, b: abb }
+      else list.fold(list.build(n_caps, fn(i) { i }), { e: ienv, b: abb }, fn(acc, i) {
+        let dst = alloc_reg(actx) in
+        let ir = alloc_reg(actx) in
+        let b1 = bb_emit(acc.b, uvir.inst_const(ir, uvir.val_int(i))) in
+        let b2 = bb_emit(b1, uvir.inst_load_dyn(dst, 0, ir)) in
+        { e: env_set(acc.e, list.get(cap_names, i), dst), b: b2 }
+      }) in
+    let br = lower_hir_expr(node.body, cap_res.e, cap_res.b, actx) in
+    let fblk = bb_finish(br.bb, uvir.term_ret(br.reg)) in
+    let ablocks = list.concat([br.extra, [fblk]]) in
+    let slbls = list.sort_int(list.map(ablocks, fn(b) { b.label })) in
+    let bmap = list.fold(ablocks, {}, fn(acc, b) { rec.set(acc, str.from(b.label), b) }) in
+    let ordered = list.map(slbls, fn(l) { rec.get(bmap, str.from(l)) }) in
+    let nested = array.to_list(actx.lifted_fns) in
+    let afn = uvir.func(anon_name, up, uvir.ty_int(), ordered, uvir.func_attrs(true, false)) in
+    let _ = list.fold(list.append(nested, afn), null, fn(_, f) { array.push(ctx.lifted_fns, f) }) in
+    let dst = alloc_reg(ctx) in
+    { reg: dst, bb: bb_emit(bb, uvir.inst_make_closure(dst, anon_name, cap_regs)), extra: [] }
+  else if t == "call" then
+    let ar = list.fold(node.args, { regs: [], bb: bb, extra: [] }, fn(acc, arg) {
+      let r = lower_hir_expr(arg, env, acc.bb, ctx) in
+      { regs: list.append(acc.regs, r.reg), bb: r.bb, extra: list.concat([acc.extra, r.extra]) }
+    }) in
+    let dst = alloc_reg(ctx) in
+    let cn = node.callee in
+    if cn.t == "var" && list.any(ctx.fn_names, fn(n) { n == cn.name }) then
+      { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, cn.name, ar.regs)), extra: ar.extra }
+    else
+      let cr = lower_hir_expr(cn, env, ar.bb, ctx) in
+      { reg: dst, bb: bb_emit(cr.bb, uvir.inst_call_indirect(dst, cr.reg, ar.regs)),
+        extra: list.concat([ar.extra, cr.extra]) }
+  else if t == "list" then
+    let ir = list.fold(node.items, { regs: [], bb: bb, extra: [] }, fn(acc, item) {
+      let r = lower_hir_expr(item, env, acc.bb, ctx) in
+      { regs: list.append(acc.regs, r.reg), bb: r.bb, extra: list.concat([acc.extra, r.extra]) }
+    }) in
+    let dst = alloc_reg(ctx) in
+    let pr = 10000 + dst in
+    let n = list.len(node.items) in
+    let lr = 10001 + dst in
+    let b0 = bb_emit(ir.bb, uvir.inst_alloc(pr, (1 + n) * 8, "list")) in
+    let b1 = bb_emit(b0, uvir.inst_const(lr, uvir.val_int(n))) in
+    let b2 = bb_emit(b1, uvir.inst_store(pr, 0, lr)) in
+    let b3 = list.fold(list.build(n, fn(i) { i }), b2, fn(bk, i) {
+      bb_emit(bk, uvir.inst_store(pr, 8 + i * 8, list.get(ir.regs, i)))
+    }) in
+    { reg: dst, bb: bb_emit(b3, uvir.inst_copy(dst, pr)), extra: ir.extra }
+  else if t == "rec" then
+    let fo = array.get(ctx.field_order, 0) in
+    let _ = list.fold(list.build(list.len(node.fields), fn(i) { i }), null, fn(_, i) {
+      let fname = list.get(node.fields, i).key in
+      if !rec.has(fo, fname)
+        then array.set(ctx.field_order, 0, rec.set(array.get(ctx.field_order, 0), fname, i))
+        else null
+    }) in
+    let fr = list.fold(node.fields, { regs: [], bb: bb, extra: [] }, fn(acc, f) {
+      let r = lower_hir_expr(f.val, env, acc.bb, ctx) in
+      { regs: list.append(acc.regs, r.reg), bb: r.bb, extra: list.concat([acc.extra, r.extra]) }
+    }) in
+    let dst = alloc_reg(ctx) in
+    let pr = 10000 + dst in
+    let n = list.len(node.fields) in
+    let lr = 10001 + dst in
+    let b0 = bb_emit(fr.bb, uvir.inst_alloc(pr, (1 + n) * 8, "rec")) in
+    let b1 = bb_emit(b0, uvir.inst_const(lr, uvir.val_int(n))) in
+    let b2 = bb_emit(b1, uvir.inst_store(pr, 0, lr)) in
+    let b3 = list.fold(list.build(n, fn(i) { i }), b2, fn(bk, i) {
+      bb_emit(bk, uvir.inst_store(pr, 8 + i * 8, list.get(fr.regs, i)))
+    }) in
+    { reg: dst, bb: bb_emit(b3, uvir.inst_copy(dst, pr)), extra: fr.extra }
+  else if t == "get_index" then
+    let ob = lower_hir_expr(node.obj, env, bb, ctx) in
+    let ix = lower_hir_expr(node.idx, env, ob.bb, ctx) in
+    let dst = alloc_reg(ctx) in
+    { reg: dst, bb: bb_emit(ix.bb, uvir.inst_load_dyn(dst, ob.reg, ix.reg)),
+      extra: list.concat([ob.extra, ix.extra]) }
+  else if t == "get_field" then
+    let ob = lower_hir_expr(node.obj, env, bb, ctx) in
+    let dst = alloc_reg(ctx) in
+    let fo = array.get(ctx.field_order, 0) in
+    let fi = if rec.has(fo, node.field) then rec.get(fo, node.field) else 0 in
+    { reg: dst, bb: bb_emit(ob.bb, uvir.inst_load(dst, ob.reg, 8 + fi * 8)), extra: ob.extra }
+  else
+    let dst = alloc_reg(ctx) in
+    { reg: dst, bb: bb_emit(bb, uvir.inst_const(dst, uvir.val_int(0))), extra: [] }
+}
+
+fn collect_fo(node, fo) {
+  let t = node.t in
+  if t == "rec" then
+    list.fold(list.build(list.len(node.fields), fn(i) { i }), fo, fn(acc, i) {
+      let fname = list.get(node.fields, i).key in
+      let acc2 = if !rec.has(acc, fname) then rec.set(acc, fname, i) else acc in
+      collect_fo(list.get(node.fields, i).val, acc2)
+    })
+  else if t == "if" then collect_fo(rec.get(node, "else_"),
+    collect_fo(rec.get(node, "then_"), collect_fo(node.cond, fo)))
+  else if t == "let" then collect_fo(node.body, collect_fo(node.val, fo))
+  else if t == "call" then
+    list.fold(node.args, collect_fo(node.callee, fo), fn(acc, a) { collect_fo(a, acc) })
+  else if t == "binop" then collect_fo(node.r, collect_fo(node.l, fo))
+  else if t == "fn" || t == "fn_def" then collect_fo(node.body, fo)
+  else if t == "list" then list.fold(node.items, fo, fn(acc, i) { collect_fo(i, acc) })
+  else if t == "get_field" then collect_fo(node.obj, fo)
+  else if t == "get_index" then collect_fo(node.idx, collect_fo(node.obj, fo))
+  else fo
+}
+
+fn lower_fn_def(def, fn_names, global_fo) {
+  let ctx = make_ctx(fn_names) in
+  let _ = array.set(ctx.field_order, 0, global_fo) in
+  let params = list.build(list.len(def.params), fn(i) {
+    uvir.param(i, uvir.ty_int(), list.get(def.params, i))
+  }) in
+  let env = list.fold(list.build(list.len(def.params), fn(i) { i }), env_empty(),
+    fn(e, i) { let _ = alloc_reg(ctx) in env_set(e, list.get(def.params, i), i) }) in
+  let ebb = make_bb(0) in
+  let result = lower_hir_expr(def.body, env, ebb, ctx) in
+  let fblk = bb_finish(result.bb, uvir.term_ret(result.reg)) in
+  let all_blocks = list.concat([result.extra, [fblk]]) in
+  let sorted = list.sort_int(list.map(all_blocks, fn(b) { b.label })) in
+  let bmap = list.fold(all_blocks, {}, fn(acc, b) { rec.set(acc, str.from(b.label), b) }) in
+  let ordered = list.map(sorted, fn(l) { rec.get(bmap, str.from(l)) }) in
+  let lifted = array.to_list(ctx.lifted_fns) in
+  { main: uvir.func(def.name, params, uvir.ty_int(), ordered, uvir.func_attrs(false, false)),
+    lifted: lifted }
+}
+
+fn lower_hir_module(hir_mod) {
+  let fn_names = list.map(list.filter(hir_mod.defs, fn(d) { d.t == "fn_def" }), fn(d) { d.name }) in
+  let all_names = list.append(fn_names, "fard_main") in
+  let global_fo = list.fold(hir_mod.defs, collect_fo(hir_mod.entry, {}),
+    fn(acc, d) { collect_fo(d, acc) }) in
+  let fn_results = list.map(list.filter(hir_mod.defs, fn(d) { d.t == "fn_def" }),
+    fn(d) { lower_fn_def(d, all_names, global_fo) }) in
+  let main_def = { t: "fn_def", name: "fard_main", params: [], body: hir_mod.entry } in
+  let main_result = lower_fn_def(main_def, all_names, global_fo) in
+  let all_results = list.append(fn_results, main_result) in
+  let all_fns = list.flatten(list.map(all_results, fn(r) { list.append(r.lifted, r.main) })) in
+  uvir.module("fard", all_fns, "fard_main", [], [])
+}
+
+export { lower_hir_module, lower_fn_def, lower_hir_expr }
