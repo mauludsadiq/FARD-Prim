@@ -93,8 +93,14 @@ No linker. No C driver. No libSystem. No dyld.
               closures with captures, get_field, let-chain, list, rec
               free_vars analysis, global field_order pre-pass
             Verified: add=42, fact=120, get_field=42, let_chain=42, closure=42
-    [next]  HIR -> SSA — explicit phi nodes at join points
-            UVIR — language-neutral IR substrate
+    [done]  UVIR — Universal Verified IR
+            uvir.fard: types, values, instructions, phi, pretty-printer
+            hir_to_uvir.fard: FARD HIR -> UVIR with explicit phi nodes
+            uvir_to_ocir.fard: phi elimination via predecessor copies
+            Verified: add=42, max=42, fact=120, fib=55, closure=42
+            Example: fn max -> phi([%0 from then], [%1 from else])
+    [next]  UVIR verifier — type-check UVIR before lowering to OCIR
+    [next]  Python subset frontend -> UVIR
     [next]  UVIR — Universal Verified IR
             language-neutral: functions, closures, heap objects, effects,
             direct/indirect calls, phi/join values, module boundaries
