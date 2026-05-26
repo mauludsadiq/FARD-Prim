@@ -249,8 +249,8 @@ fn find_func_offset(funcs, name) {
 
 fn alloc_stub_size() { 34 }  // bytes in fard_alloc_stub
 
-fn build_text(linked) {
-  let entry_stub = entry_stub_text(24 + alloc_stub_size() + find_func_offset(linked.funcs, "fard_main")) in
+fn build_text(linked, entry_func) {
+  let entry_stub = entry_stub_text(24 + alloc_stub_size() + find_func_offset(linked.funcs, entry_func)) in
   let alloc_stub = enc.fard_alloc_stub(heap_bump_ptr_vmaddr()) in
   list.concat([entry_stub, alloc_stub, linked.text])
 }
@@ -284,7 +284,7 @@ fn build_load_cmds(total_text_len, linkedit_size, symoff, nsyms, stroff, strsize
 }
 
 fn emit_exe(linked, entry_func) {
-  let total_text = build_text(linked) in
+  let total_text = build_text(linked, entry_func) in
   let total_text_len = list.len(total_text) in
   let nlist_bytes = build_symtab(linked) in
   let func_names = list.map(linked.funcs, fn(f) { f.name }) in

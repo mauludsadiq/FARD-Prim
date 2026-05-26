@@ -1,0 +1,289 @@
+/// python_to_uvir — lowers Python JSON AST to UVIR
+/// Uses Python's ast module output (via py_to_json.py bridge).
+/// Subset: integers, bools, None, arithmetic, comparisons,
+///         variables, if/else, while, def, return, call, list, subscript
+
+import("std/list")  as list
+import("std/rec")   as rec
+import("std/str")   as str
+import("std/type")  as type
+import("std/array") as array
+import("../orgntr_prim/uvir") as uvir
+
+fn make_ctx(fn_names) {
+  { next_reg: array.from_list([0]), fn_names: fn_names,
+    lifted_fns: array.from_list([]) }
+}
+fn alloc_reg(ctx) {
+  let r = array.get(ctx.next_reg, 0) in
+  let _ = array.set(ctx.next_reg, 0, r + 1) in r
+}
+fn alloc_label(ctx) {
+  let r = array.get(ctx.next_reg, 0) in
+  let _ = array.set(ctx.next_reg, 0, r + 1) in r
+}
+fn env_empty() { null }
+fn env_set(env, name, reg) { { name: name, reg: reg, next: env } }
+fn env_get(env, name) {
+  if env == null then null
+  else if env.name == name then env.reg
+  else env_get(env.next, name)
+}
+fn make_bb(label) { { label: label, insts: [] } }
+fn bb_emit(bb, inst) { { label: bb.label, insts: list.append(bb.insts, inst) } }
+fn bb_finish(bb, term) { uvir.block(bb.label, bb.insts, term) }
+
+fn py_op_to_uvir(op) {
+  let t = op.t in
+  if t == "Add"      then "+"
+  else if t == "Sub" then "-"
+  else if t == "Mult" then "*"
+  else if t == "FloorDiv" then "/"
+  else if t == "Mod"  then "%"
+  else if t == "Eq"   then "=="
+  else if t == "NotEq" then "!="
+  else if t == "Lt"   then "<"
+  else if t == "LtE"  then "<="
+  else if t == "Gt"   then ">"
+  else if t == "GtE"  then ">="
+  else "+"
+}
+
+// Lower a Python expression node -> { reg, bb, extra }
+fn lower_expr(node, env, bb, ctx) {
+  let t = node.t in
+  if t == "Constant" then
+    let dst = alloc_reg(ctx) in
+    let v = node.value in
+    let ins = if type.of(v) == "int" then uvir.inst_const(dst, uvir.val_int(v))
+      else if type.of(v) == "bool" then uvir.inst_const(dst, uvir.val_bool(v))
+      else if type.of(v) == "string" then uvir.inst_str_const(dst, v)
+      else if v == null then uvir.inst_const(dst, uvir.val_null())
+      else uvir.inst_const(dst, uvir.val_int(0)) in
+    { reg: dst, bb: bb_emit(bb, ins), extra: [] }
+  else if t == "Name" then
+    let vr = env_get(env, node.id) in
+    if vr != null then { reg: vr, bb: bb, extra: [] }
+    else let dst = alloc_reg(ctx) in
+      { reg: dst, bb: bb_emit(bb, uvir.inst_const(dst, uvir.val_int(0))), extra: [] }
+  else if t == "BinOp" then
+    let lv = lower_expr(node.left, env, bb, ctx) in
+    let rv = lower_expr(node.right, env, lv.bb, ctx) in
+    let dst = alloc_reg(ctx) in
+    let op = py_op_to_uvir(node.op) in
+    let ins = if op == "+" then uvir.inst_int_add(dst, lv.reg, rv.reg)
+      else if op == "-" then uvir.inst_int_sub(dst, lv.reg, rv.reg)
+      else if op == "*" then uvir.inst_int_mul(dst, lv.reg, rv.reg)
+      else if op == "/" then uvir.inst_int_div(dst, lv.reg, rv.reg)
+      else if op == "%" then uvir.inst_int_mod(dst, lv.reg, rv.reg)
+      else uvir.inst_int_add(dst, lv.reg, rv.reg) in
+    { reg: dst, bb: bb_emit(rv.bb, ins), extra: list.concat([lv.extra, rv.extra]) }
+  else if t == "Compare" then
+    let lv = lower_expr(node.left, env, bb, ctx) in
+    // Single comparator for subset
+    let op = if list.len(node.ops) > 0 then py_op_to_uvir(list.get(node.ops, 0)) else "==" in
+    let cv = if list.len(node.comparators) > 0
+      then lower_expr(list.get(node.comparators, 0), env, lv.bb, ctx)
+      else { reg: lv.reg, bb: lv.bb, extra: [] } in
+    let dst = alloc_reg(ctx) in
+    { reg: dst, bb: bb_emit(cv.bb, uvir.inst_int_cmp(dst, op, lv.reg, cv.reg)),
+      extra: list.concat([lv.extra, cv.extra]) }
+  else if t == "UnaryOp" then
+    let v = lower_expr(node.operand, env, bb, ctx) in
+    let dst = alloc_reg(ctx) in
+    // -x = 0 - x
+    let z = alloc_reg(ctx) in
+    let b1 = bb_emit(v.bb, uvir.inst_const(z, uvir.val_int(0))) in
+    { reg: dst, bb: bb_emit(b1, uvir.inst_int_sub(dst, z, v.reg)), extra: v.extra }
+  else if t == "Call" then
+    let ar = list.fold(node.args, { regs: [], bb: bb, extra: [] }, fn(acc, arg) {
+      let r = lower_expr(arg, env, acc.bb, ctx) in
+      { regs: list.append(acc.regs, r.reg), bb: r.bb, extra: list.concat([acc.extra, r.extra]) }
+    }) in
+    let dst = alloc_reg(ctx) in
+    let fn_name = if node.func.t == "Name" then node.func.id else "__unknown__" in
+    if list.any(ctx.fn_names, fn(n) { n == fn_name }) then
+      { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, fn_name, ar.regs)), extra: ar.extra }
+    else
+      let fr = lower_expr(node.func, env, ar.bb, ctx) in
+      { reg: dst, bb: bb_emit(fr.bb, uvir.inst_call_indirect(dst, fr.reg, ar.regs)),
+        extra: list.concat([ar.extra, fr.extra]) }
+  else if t == "List" then
+    let ir = list.fold(node.elts, { regs: [], bb: bb, extra: [] }, fn(acc, elt) {
+      let r = lower_expr(elt, env, acc.bb, ctx) in
+      { regs: list.append(acc.regs, r.reg), bb: r.bb, extra: list.concat([acc.extra, r.extra]) }
+    }) in
+    let dst = alloc_reg(ctx) in
+    let pr = 10000 + dst in
+    let n = list.len(node.elts) in
+    let lr = 10001 + dst in
+    let b0 = bb_emit(ir.bb, uvir.inst_alloc(pr, (1 + n) * 8, "list")) in
+    let b1 = bb_emit(b0, uvir.inst_const(lr, uvir.val_int(n))) in
+    let b2 = bb_emit(b1, uvir.inst_store(pr, 0, lr)) in
+    let b3 = list.fold(list.build(n, fn(i) { i }), b2, fn(bk, i) {
+      bb_emit(bk, uvir.inst_store(pr, 8 + i * 8, list.get(ir.regs, i)))
+    }) in
+    { reg: dst, bb: bb_emit(b3, uvir.inst_copy(dst, pr)), extra: ir.extra }
+  else if t == "Subscript" then
+    let ob = lower_expr(node.value, env, bb, ctx) in
+    let ix = lower_expr(node.slice, env, ob.bb, ctx) in
+    let dst = alloc_reg(ctx) in
+    { reg: dst, bb: bb_emit(ix.bb, uvir.inst_load_dyn(dst, ob.reg, ix.reg)),
+      extra: list.concat([ob.extra, ix.extra]) }
+  else if t == "IfExp" then
+    // Ternary: a if cond else b
+    let cr = lower_expr(rec.get(node, "test"), env, bb, ctx) in
+    let lt = alloc_label(ctx) in
+    let lf = alloc_label(ctx) in
+    let lj = alloc_label(ctx) in
+    let cb = bb_finish(cr.bb, uvir.term_br_cond(cr.reg, lt, lf)) in
+    let tb = make_bb(lt) in
+    let tr = lower_expr(node.body, env, tb, ctx) in
+    let tblk = bb_finish(tr.bb, uvir.term_br(lj)) in
+    let fb = make_bb(lf) in
+    let fr = lower_expr(node.orelse, env, fb, ctx) in
+    let fblk = bb_finish(fr.bb, uvir.term_br(lj)) in
+    let jd = alloc_reg(ctx) in
+    let phi = uvir.inst_phi(jd, [{ from_label: lt, reg: tr.reg }, { from_label: lf, reg: fr.reg }]) in
+    let jb = bb_emit(make_bb(lj), phi) in
+    let xa = list.concat([cr.extra, [cb, tblk]]) in
+    let xb = list.concat([tr.extra, [fblk]]) in
+    { reg: jd, bb: jb, extra: list.concat([xa, xb, fr.extra]) }
+  else
+    let dst = alloc_reg(ctx) in
+    { reg: dst, bb: bb_emit(bb, uvir.inst_const(dst, uvir.val_int(0))), extra: [] }
+}
+
+// Lower a list of Python statements -> { bb, extra, env, ret_reg }
+// ret_reg: if a return was encountered
+fn lower_stmts(stmts, env, bb, ctx) {
+  list.fold(stmts, { bb: bb, extra: [], env: env, ret_reg: null }, fn(acc, stmt) {
+    if acc.ret_reg != null then acc else
+    let t = stmt.t in
+    if t == "Return" then
+      let v = if stmt.value != null
+        then lower_expr(stmt.value, acc.env, acc.bb, ctx)
+        else { reg: alloc_reg(ctx), bb: bb_emit(acc.bb, uvir.inst_const(alloc_reg(ctx), uvir.val_null())), extra: [] } in
+      { bb: v.bb, extra: list.concat([acc.extra, v.extra]), env: acc.env, ret_reg: v.reg }
+    else if t == "Assign" then
+      let v = lower_expr(stmt.value, acc.env, acc.bb, ctx) in
+      let name = if list.len(stmt.targets) > 0 && list.get(stmt.targets, 0).t == "Name"
+        then list.get(stmt.targets, 0).id else "__anon__" in
+      { bb: v.bb, extra: list.concat([acc.extra, v.extra]),
+        env: env_set(acc.env, name, v.reg), ret_reg: null }
+    else if t == "AugAssign" then
+      // x += expr => x = x + expr
+      let name = if stmt.target.t == "Name" then stmt.target.id else "__anon__" in
+      let lv = lower_expr(stmt.target, acc.env, acc.bb, ctx) in
+      let rv = lower_expr(stmt.value, acc.env, lv.bb, ctx) in
+      let dst = alloc_reg(ctx) in
+      let op = py_op_to_uvir(stmt.op) in
+      let ins = if op == "+" then uvir.inst_int_add(dst, lv.reg, rv.reg)
+        else if op == "-" then uvir.inst_int_sub(dst, lv.reg, rv.reg)
+        else if op == "*" then uvir.inst_int_mul(dst, lv.reg, rv.reg)
+        else uvir.inst_int_add(dst, lv.reg, rv.reg) in
+      let nb = bb_emit(rv.bb, ins) in
+      { bb: nb, extra: list.concat([acc.extra, lv.extra, rv.extra]),
+        env: env_set(acc.env, name, dst), ret_reg: null }
+    else if t == "If" then
+      let cr = lower_expr(rec.get(stmt, "test"), acc.env, acc.bb, ctx) in
+      let lt = alloc_label(ctx) in
+      let lf = alloc_label(ctx) in
+      let lj = alloc_label(ctx) in
+      let cb = bb_finish(cr.bb, uvir.term_br_cond(cr.reg, lt, lf)) in
+      // Then branch
+      let tb = make_bb(lt) in
+      let tr = lower_stmts(stmt.body, acc.env, tb, ctx) in
+      let tblk = bb_finish(tr.bb, uvir.term_br(lj)) in
+      // Else branch
+      let fb = make_bb(lf) in
+      let or_stmts = if rec.has(stmt, "orelse") then stmt.orelse else [] in
+      let fr = lower_stmts(or_stmts, acc.env, fb, ctx) in
+      let fblk = bb_finish(fr.bb, uvir.term_br(lj)) in
+      let jb = make_bb(lj) in
+      let extra = list.concat([acc.extra, cr.extra, [cb, tblk], tr.extra, [fblk], fr.extra]) in
+      // If both branches return, propagate
+      // If both branches return, add phi at join
+      let phi_ret = if tr.ret_reg != null && fr.ret_reg != null
+        then
+          let jd = alloc_reg(ctx) in
+          let phi = uvir.inst_phi(jd, [{ from_label: lt, reg: tr.ret_reg }, { from_label: lf, reg: fr.ret_reg }]) in
+          let jb2 = bb_emit(jb, phi) in
+          { jb: jb2, reg: jd }
+        else { jb: jb, reg: null } in
+      let ret = if tr.ret_reg != null && fr.ret_reg != null then phi_ret.reg else null in
+      let final_jb = phi_ret.jb in
+      { bb: final_jb, extra: extra, env: acc.env, ret_reg: ret }
+    else if t == "While" then
+      let loop_label = alloc_label(ctx) in
+      let body_label = alloc_label(ctx) in
+      let exit_label = alloc_label(ctx) in
+      let entry_block = bb_finish(acc.bb, uvir.term_br(loop_label)) in
+      let loop_bb = make_bb(loop_label) in
+      let cr = lower_expr(rec.get(stmt, "test"), acc.env, loop_bb, ctx) in
+      let cond_block = bb_finish(cr.bb, uvir.term_br_cond(cr.reg, body_label, exit_label)) in
+      let body_bb = make_bb(body_label) in
+      let br = lower_stmts(stmt.body, acc.env, body_bb, ctx) in
+      let body_block = bb_finish(br.bb, uvir.term_br(loop_label)) in
+      let exit_bb = make_bb(exit_label) in
+      let extra = list.concat([acc.extra, [entry_block, cond_block, body_block], br.extra, cr.extra]) in
+      { bb: exit_bb, extra: extra, env: acc.env, ret_reg: null }
+    else if t == "Expr" then
+      // Expression statement (side effects)
+      let v = lower_expr(stmt.value, acc.env, acc.bb, ctx) in
+      { bb: v.bb, extra: list.concat([acc.extra, v.extra]), env: acc.env, ret_reg: null }
+    else
+      acc
+  })
+}
+
+fn lower_funcdef(node, fn_names) {
+  let ctx = make_ctx(fn_names) in
+  let param_names = list.map(node.args.args, fn(a) { a.arg }) in
+  let params = list.build(list.len(param_names), fn(i) {
+    uvir.param(i, uvir.ty_any(), list.get(param_names, i))
+  }) in
+  let env = list.fold(list.build(list.len(param_names), fn(i) { i }), env_empty(),
+    fn(e, i) { let _ = alloc_reg(ctx) in env_set(e, list.get(param_names, i), i) }) in
+  let ebb = make_bb(0) in
+  let result = lower_stmts(node.body, env, ebb, ctx) in
+  let ret_reg = if result.ret_reg != null then result.ret_reg else
+    let r = alloc_reg(ctx) in r in
+  let fblk = bb_finish(result.bb, uvir.term_ret(ret_reg)) in
+  let all_blocks = list.concat([result.extra, [fblk]]) in
+  let sorted = list.sort_int(list.map(all_blocks, fn(b) { b.label })) in
+  let bmap = list.fold(all_blocks, {}, fn(acc, b) { rec.set(acc, str.from(b.label), b) }) in
+  let ordered = list.map(sorted, fn(l) { rec.get(bmap, str.from(l)) }) in
+  uvir.func(node.name, params, uvir.ty_any(), ordered, uvir.func_attrs(false, false))
+}
+
+fn lower_module(py_ast) {
+  // Collect all function names first
+  let fn_names = list.map(
+    list.filter(py_ast.body, fn(s) { s.t == "FunctionDef" }),
+    fn(s) { s.name }) in
+  let all_names = list.append(fn_names, "__main__") in
+  // Lower function defs
+  let fns = list.map(
+    list.filter(py_ast.body, fn(s) { s.t == "FunctionDef" }),
+    fn(s) { lower_funcdef(s, all_names) }) in
+  // Lower top-level statements as __main__
+  let top_stmts = list.filter(py_ast.body, fn(s) { s.t != "FunctionDef" }) in
+  let ctx = make_ctx(all_names) in
+  let ebb = make_bb(0) in
+  let result = lower_stmts(top_stmts, env_empty(), ebb, ctx) in
+  let ret_reg = if result.ret_reg != null then result.ret_reg
+    else
+      let r = env_get(result.env, "result") in
+      if r != null then r
+      else 0 in
+  let fblk = bb_finish(result.bb, uvir.term_ret(ret_reg)) in
+  let all_blocks = list.concat([result.extra, [fblk]]) in
+  let sorted = list.sort_int(list.map(all_blocks, fn(b) { b.label })) in
+  let bmap = list.fold(all_blocks, {}, fn(acc, b) { rec.set(acc, str.from(b.label), b) }) in
+  let ordered = list.map(sorted, fn(l) { rec.get(bmap, str.from(l)) }) in
+  let main_fn = uvir.func("__main__", [], uvir.ty_any(), ordered, uvir.func_attrs(false, false)) in
+  uvir.module("python", list.append(fns, main_fn), "__main__", [], [])
+}
+
+export { lower_module, lower_funcdef, lower_expr }
