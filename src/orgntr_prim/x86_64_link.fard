@@ -33,20 +33,22 @@ fn build_symbol_table(laid_out) {
 // patch.next_ip = local pc after the call instruction
 // base = base address of this function in the linked text
 // Returns { resolved: bool, text: patched_text }
-fn text_vmaddr() { 4294971392 }  // 0x100001000
+fn text_vmaddr() { 4294971392 }  // 0x100001000 (Mach-O default)
 fn alloc_stub_size() { 34 }
 fn entry_stub_size() { 24 }
 fn fn_vmaddr(base_in_linked_text) {
-  // Convert offset in linked.text to absolute vmaddr
   text_vmaddr() + entry_stub_size() + alloc_stub_size() + base_in_linked_text
 }
+fn fn_vmaddr_with_base(base_in_linked_text, base_vmaddr) {
+  base_vmaddr + entry_stub_size() + alloc_stub_size() + base_in_linked_text
+}
 
-fn resolve_call_patch(text, base, patch, sym_table) {
+fn resolve_call_patch_with_vmaddr(text, base, patch, sym_table, base_vmaddr) {
   if rec.has(sym_table, patch.symbol) then
     if patch.kind == "AbsReloc" then
       // 64-bit absolute address
       let target_offset = rec.get(sym_table, patch.symbol) in
-      let target_vmaddr = fn_vmaddr(target_offset) in
+      let target_vmaddr = base_vmaddr + entry_stub_size() + alloc_stub_size() + target_offset in
       {
         resolved: true,
         text: fix.replace8(text, patch.at, target_vmaddr)
@@ -64,6 +66,10 @@ fn resolve_call_patch(text, base, patch, sym_table) {
 }
 
 // Resolve all CallReloc patches in one function.
+fn resolve_call_patch(text, base, patch, sym_table) {
+  resolve_call_patch_with_vmaddr(text, base, patch, sym_table, text_vmaddr())
+}
+
 fn resolve_func_relocs(laid_out_entry, sym_table) {
   let base = laid_out_entry.base in
   let f = laid_out_entry.func in
@@ -107,10 +113,33 @@ fn link_module(encoded_module) {
   }
 }
 
+fn resolve_func_relocs_with_vmaddr(laid_out_entry, sym_table, base_vmaddr) {
+  let base = laid_out_entry.base in
+  let f = laid_out_entry.func in
+  let call_relocs = list.filter(f.relocs, fn(p) { p.kind == "CallReloc" || p.kind == "AbsReloc" }) in
+  let result = list.fold(call_relocs, { text: f.text, unresolved: [] }, fn(acc, patch) {
+    let r = resolve_call_patch_with_vmaddr(acc.text, base, patch, sym_table, base_vmaddr) in
+    if r.resolved then { text: r.text, unresolved: acc.unresolved }
+    else { text: r.text, unresolved: list.append(acc.unresolved, patch) }
+  }) in
+  { name: f.name, base: base, frame_size: f.frame_size, text: result.text, labels: f.labels, relocs: result.unresolved }
+}
+
+fn link_module_with_vmaddr(encoded_module, base_vmaddr) {
+  let laid_out = layout_funcs(encoded_module.funcs) in
+  let sym_table_base = build_symbol_table(laid_out) in
+  let sym_table = rec.set(sym_table_base, "fard_alloc", 0 - alloc_stub_size()) in
+  let linked_funcs = list.map(laid_out, fn(entry) { resolve_func_relocs_with_vmaddr(entry, sym_table, base_vmaddr) }) in
+  let text = list.flatten(list.map(linked_funcs, fn(f) { f.text })) in
+  let unresolved = list.flatten(list.map(linked_funcs, fn(f) { f.relocs })) in
+  { entry: encoded_module.entry, funcs: linked_funcs, text: text, sym_table: sym_table, unresolved_relocs: unresolved }
+}
+
 export {
   layout_funcs,
   build_symbol_table,
   resolve_call_patch,
   resolve_func_relocs,
+  link_module_with_vmaddr,
   link_module
 }

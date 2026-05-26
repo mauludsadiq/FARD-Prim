@@ -1,0 +1,166 @@
+/// elf_exe — ELF64 executable emitter for Linux x86-64
+/// Produces a minimal statically-linked ELF binary.
+///
+/// Layout:
+///   0x000000: ELF header (64 bytes)
+///   0x000040: Program header - PT_LOAD RX text (56 bytes)
+///   0x000078: Program header - PT_LOAD RW data (56 bytes)
+///   0x001000: text section (entry stub + alloc stub + code)
+///   0x002000: data section (heap bump pointer + heap)
+
+import("std/list") as list
+import("std/rec")  as rec
+import("../orgntr_prim/x86_64_encode") as enc
+
+fn le16(n) { [n % 256, (n / 256) % 256] }
+fn le32(n) { enc.le32(n) }
+fn le64(n) { enc.le64(n) }
+fn zeros(n) { list.build(n, fn(_) { 0 }) }
+
+// ── Memory layout ─────────────────────────────────────────────────────────────
+
+fn load_addr()          { 4194304 }      // 0x400000 — standard Linux base
+fn text_file_offset()   { 4096 }         // 0x1000
+fn text_vmaddr()        { 4198400 }      // 0x401000
+fn data_file_offset()   { 8192 }         // 0x2000
+fn data_vmaddr()        { 4202496 }      // 0x402000
+fn data_size()          { 4096 }
+fn heap_bump_ptr_vmaddr() { 4202496 }    // first 8 bytes of data
+fn heap_base_vmaddr()   { 4202504 }      // bump_ptr + 8
+
+// ── ELF header (64 bytes) ─────────────────────────────────────────────────────
+
+fn elf_header(entry_vmaddr, phoff, phnum) {
+  list.concat([
+    // e_ident (16 bytes)
+    [127, 69, 76, 70],   // magic: 0x7f ELF
+    [2],                  // EI_CLASS: ELFCLASS64
+    [1],                  // EI_DATA: ELFDATA2LSB (little-endian)
+    [1],                  // EI_VERSION: EV_CURRENT
+    [0],                  // EI_OSABI: ELFOSABI_NONE
+    zeros(8),             // EI_ABIVERSION + padding
+    // e_type (2): ET_EXEC
+    le16(2),
+    // e_machine (2): EM_X86_64
+    le16(62),
+    // e_version (4): EV_CURRENT
+    le32(1),
+    // e_entry (8): entry point vmaddr
+    le64(entry_vmaddr),
+    // e_phoff (8): program header offset (right after elf header = 64)
+    le64(phoff),
+    // e_shoff (8): section header offset (none)
+    le64(0),
+    // e_flags (4)
+    le32(0),
+    // e_ehsize (2): size of this header
+    le16(64),
+    // e_phentsize (2): size of program header entry
+    le16(56),
+    // e_phnum (2): number of program headers
+    le16(phnum),
+    // e_shentsize (2)
+    le16(64),
+    // e_shnum (2)
+    le16(0),
+    // e_shstrndx (2)
+    le16(0)
+  ])
+}
+
+// ── Program header (56 bytes each) ────────────────────────────────────────────
+
+fn pt_load(flags, offset, vaddr, filesz, memsz, align) {
+  list.concat([
+    le32(1),          // p_type: PT_LOAD
+    le32(flags),      // p_flags: 5=RX, 6=RW
+    le64(offset),     // p_offset
+    le64(vaddr),      // p_vaddr
+    le64(vaddr),      // p_paddr
+    le64(filesz),     // p_filesz
+    le64(memsz),      // p_memsz
+    le64(align)       // p_align
+  ])
+}
+
+// ── Entry stub (Linux syscalls) ───────────────────────────────────────────────
+// push rbp; mov rbp,rsp; call entry_func; mov rdi,rax; mov rax,60; syscall
+// Linux exit syscall = 60 (vs macOS 0x2000001)
+
+fn entry_stub_linux(fn_offset) {
+  let rel = fn_offset - 9 in
+  list.concat([
+    [85, 72, 137, 229],           // push rbp; mov rbp, rsp
+    [232], le32(rel),             // call entry_func
+    [72, 137, 199],               // mov rdi, rax  (exit code)
+    [72, 184, 60, 0, 0, 0, 0, 0, 0, 0],  // mov rax, 60 (sys_exit)
+    [15, 5]                       // syscall
+  ])
+}
+
+// ── Alloc stub ────────────────────────────────────────────────────────────────
+// Same as macho — bump allocator using heap_bump_ptr_vmaddr
+
+fn alloc_stub_size() { 34 }
+
+fn find_func_offset(funcs, name) {
+  let found = list.find(funcs, fn(f) { f.name == name }) in
+  if rec.has(found, "some") then found.some.base else 0
+}
+
+fn build_text(linked, entry_func) {
+  let stub_size = 24 in
+  let alloc_stub = enc.fard_alloc_stub(heap_bump_ptr_vmaddr()) in
+  let fn_offset = stub_size + alloc_stub_size() + find_func_offset(linked.funcs, entry_func) in
+  let entry_stub = entry_stub_linux(fn_offset) in
+  list.concat([entry_stub, alloc_stub, linked.text])
+}
+
+// ── Data section ──────────────────────────────────────────────────────────────
+// 8 bytes: heap bump pointer (initialized to heap_base_vmaddr)
+// rest: zeroed heap space
+
+fn build_data() {
+  list.concat([le64(heap_base_vmaddr()), zeros(data_size() - 8)])
+}
+
+// ── Padding ───────────────────────────────────────────────────────────────────
+
+fn pad_to(bytes, target) {
+  let n = list.len(bytes) in
+  if n >= target then bytes
+  else list.concat([bytes, zeros(target - n)])
+}
+
+// ── Main emitter ──────────────────────────────────────────────────────────────
+
+fn emit_exe(linked, entry_func) {
+  let text = build_text(linked, entry_func) in
+  let text_size = list.len(text) in
+  let data = build_data() in
+
+  // Entry point = text_vmaddr (entry stub is first)
+  let entry_vmaddr = text_vmaddr() in
+  let phoff = 64 in
+  let phnum = 2 in
+
+  let ehdr = elf_header(entry_vmaddr, phoff, phnum) in
+
+  // First PT_LOAD: offset 0, covers entire first page (header + text)
+  // vaddr = load_addr() = 0x400000, maps from file offset 0
+  // text starts at file offset 0x1000 = vaddr 0x401000
+  let first_load_size = text_file_offset() + text_size in
+  let phdr_text = pt_load(5, 0, load_addr(), first_load_size, first_load_size, 4096) in
+
+  // Second PT_LOAD: data (RW = 6)
+  let phdr_data = pt_load(6, data_file_offset(), data_vmaddr(),
+    data_size(), data_size(), 4096) in
+
+  // File layout: [header+phdrs padded to 0x1000][text][pad to 0x2000][data]
+  let header_section = list.concat([ehdr, phdr_text, phdr_data]) in
+  let padded_header = pad_to(header_section, text_file_offset()) in
+  let padded_text = pad_to(list.concat([padded_header, text]), data_file_offset()) in
+  list.concat([padded_text, data])
+}
+
+export { emit_exe, text_vmaddr, heap_bump_ptr_vmaddr, heap_base_vmaddr }
