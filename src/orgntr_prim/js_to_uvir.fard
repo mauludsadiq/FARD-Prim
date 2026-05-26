@@ -1,0 +1,270 @@
+/// js_to_uvir — lowers JavaScript (Acorn AST) to UVIR
+/// Subset: literals, identifiers, binary ops, if/else,
+///         function declarations, return, call, var/const/let, while
+
+import("std/list")  as list
+import("std/rec")   as rec
+import("std/str")   as str
+import("std/type")  as type
+import("std/array") as array
+import("../orgntr_prim/uvir") as uvir
+
+fn make_ctx(fn_names) {
+  { next_reg: array.from_list([0]), fn_names: fn_names,
+    lifted_fns: array.from_list([]) }
+}
+fn alloc_reg(ctx) {
+  let r = array.get(ctx.next_reg, 0) in
+  let _ = array.set(ctx.next_reg, 0, r + 1) in r
+}
+fn alloc_label(ctx) {
+  let r = array.get(ctx.next_reg, 0) in
+  let _ = array.set(ctx.next_reg, 0, r + 1) in r
+}
+fn env_empty() { null }
+fn env_set(env, name, reg) { { name: name, reg: reg, next: env } }
+fn env_get(env, name) {
+  if env == null then null
+  else if env.name == name then env.reg
+  else env_get(env.next, name)
+}
+fn make_bb(label) { { label: label, insts: [] } }
+fn bb_emit(bb, inst) { { label: bb.label, insts: list.append(bb.insts, inst) } }
+fn bb_finish(bb, term) { uvir.block(bb.label, bb.insts, term) }
+
+fn js_op(op) {
+  if op == "===" || op == "==" then "=="
+  else if op == "!==" || op == "!=" then "!="
+  else if op == "<"  then "<"
+  else if op == "<=" then "<="
+  else if op == ">"  then ">"
+  else if op == ">=" then ">="
+  else if op == "+"  then "+"
+  else if op == "-"  then "-"
+  else if op == "*"  then "*"
+  else if op == "/"  then "/"
+  else if op == "%"  then "%"
+  else "+"
+}
+
+fn lower_expr(node, env, bb, ctx) {
+  let t = node.type in
+  if t == "Literal" then
+    let dst = alloc_reg(ctx) in
+    let v = node.value in
+    let ins = if type.of(v) == "int" then uvir.inst_const(dst, uvir.val_int(v))
+      else if type.of(v) == "float" then uvir.inst_const(dst, uvir.val_int(v))
+      else if type.of(v) == "bool"   then uvir.inst_const(dst, uvir.val_bool(v))
+      else if type.of(v) == "string" then uvir.inst_str_const(dst, v)
+      else if v == null then uvir.inst_const(dst, uvir.val_null())
+      else uvir.inst_const(dst, uvir.val_int(0)) in
+    { reg: dst, bb: bb_emit(bb, ins), extra: [] }
+  else if t == "Identifier" then
+    let vr = env_get(env, node.name) in
+    if vr != null then { reg: vr, bb: bb, extra: [] }
+    else let dst = alloc_reg(ctx) in
+      { reg: dst, bb: bb_emit(bb, uvir.inst_const(dst, uvir.val_int(0))), extra: [] }
+  else if t == "BinaryExpression" then
+    let lv = lower_expr(node.left, env, bb, ctx) in
+    let rv = lower_expr(node.right, env, lv.bb, ctx) in
+    let dst = alloc_reg(ctx) in
+    let op = js_op(node.operator) in
+    let is_cmp = op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=" in
+    let ins = if is_cmp then uvir.inst_int_cmp(dst, op, lv.reg, rv.reg)
+      else if op == "+" then uvir.inst_int_add(dst, lv.reg, rv.reg)
+      else if op == "-" then uvir.inst_int_sub(dst, lv.reg, rv.reg)
+      else if op == "*" then uvir.inst_int_mul(dst, lv.reg, rv.reg)
+      else if op == "/" then uvir.inst_int_div(dst, lv.reg, rv.reg)
+      else if op == "%" then uvir.inst_int_mod(dst, lv.reg, rv.reg)
+      else uvir.inst_int_add(dst, lv.reg, rv.reg) in
+    { reg: dst, bb: bb_emit(rv.bb, ins), extra: list.concat([lv.extra, rv.extra]) }
+  else if t == "LogicalExpression" then
+    // && and || — treat as arithmetic for now
+    let lv = lower_expr(node.left, env, bb, ctx) in
+    let rv = lower_expr(node.right, env, lv.bb, ctx) in
+    let dst = alloc_reg(ctx) in
+    { reg: dst, bb: bb_emit(rv.bb, uvir.inst_int_add(dst, lv.reg, rv.reg)),
+      extra: list.concat([lv.extra, rv.extra]) }
+  else if t == "UnaryExpression" then
+    let v = lower_expr(node.argument, env, bb, ctx) in
+    let dst = alloc_reg(ctx) in
+    let z = alloc_reg(ctx) in
+    let b1 = bb_emit(v.bb, uvir.inst_const(z, uvir.val_int(0))) in
+    { reg: dst, bb: bb_emit(b1, uvir.inst_int_sub(dst, z, v.reg)), extra: v.extra }
+  else if t == "CallExpression" then
+    let ar = list.fold(node.arguments, { regs: [], bb: bb, extra: [] }, fn(acc, arg) {
+      let r = lower_expr(arg, env, acc.bb, ctx) in
+      { regs: list.append(acc.regs, r.reg), bb: r.bb, extra: list.concat([acc.extra, r.extra]) }
+    }) in
+    let dst = alloc_reg(ctx) in
+    let fn_name = if node.callee.type == "Identifier" then node.callee.name else "__unknown__" in
+    if list.any(ctx.fn_names, fn(n) { n == fn_name }) then
+      { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, fn_name, ar.regs)), extra: ar.extra }
+    else
+      let fr = lower_expr(node.callee, env, ar.bb, ctx) in
+      { reg: dst, bb: bb_emit(fr.bb, uvir.inst_call_indirect(dst, fr.reg, ar.regs)),
+        extra: list.concat([ar.extra, fr.extra]) }
+  else if t == "ArrayExpression" then
+    let ir = list.fold(node.elements, { regs: [], bb: bb, extra: [] }, fn(acc, elt) {
+      let r = lower_expr(elt, env, acc.bb, ctx) in
+      { regs: list.append(acc.regs, r.reg), bb: r.bb, extra: list.concat([acc.extra, r.extra]) }
+    }) in
+    let dst = alloc_reg(ctx) in
+    let pr = 10000 + dst in
+    let n = list.len(node.elements) in
+    let lr = 10001 + dst in
+    let b0 = bb_emit(ir.bb, uvir.inst_alloc(pr, (1 + n) * 8, "list")) in
+    let b1 = bb_emit(b0, uvir.inst_const(lr, uvir.val_int(n))) in
+    let b2 = bb_emit(b1, uvir.inst_store(pr, 0, lr)) in
+    let b3 = list.fold(list.build(n, fn(i) { i }), b2, fn(bk, i) {
+      bb_emit(bk, uvir.inst_store(pr, 8 + i * 8, list.get(ir.regs, i)))
+    }) in
+    { reg: dst, bb: bb_emit(b3, uvir.inst_copy(dst, pr)), extra: ir.extra }
+  else if t == "MemberExpression" then
+    let ob = lower_expr(node.object, env, bb, ctx) in
+    let dst = alloc_reg(ctx) in
+    if node.computed then
+      let ix = lower_expr(node.property, env, ob.bb, ctx) in
+      { reg: dst, bb: bb_emit(ix.bb, uvir.inst_load_dyn(dst, ob.reg, ix.reg)),
+        extra: list.concat([ob.extra, ix.extra]) }
+    else
+      // Static property — treat as field 0 for now
+      let ir = alloc_reg(ctx) in
+      let b1 = bb_emit(ob.bb, uvir.inst_const(ir, uvir.val_int(0))) in
+      { reg: dst, bb: bb_emit(b1, uvir.inst_load_dyn(dst, ob.reg, ir)), extra: ob.extra }
+  else if t == "ConditionalExpression" then
+    let cr = lower_expr(rec.get(node, "test"), env, bb, ctx) in
+    let lt = alloc_label(ctx) in
+    let lf = alloc_label(ctx) in
+    let lj = alloc_label(ctx) in
+    let cb = bb_finish(cr.bb, uvir.term_br_cond(cr.reg, lt, lf)) in
+    let tb = make_bb(lt) in
+    let tr = lower_expr(node.consequent, env, tb, ctx) in
+    let tblk = bb_finish(tr.bb, uvir.term_br(lj)) in
+    let fb = make_bb(lf) in
+    let fr = lower_expr(node.alternate, env, fb, ctx) in
+    let fblk = bb_finish(fr.bb, uvir.term_br(lj)) in
+    let jd = alloc_reg(ctx) in
+    let phi = uvir.inst_phi(jd, [{ from_label: lt, reg: tr.reg }, { from_label: lf, reg: fr.reg }]) in
+    let jb = bb_emit(make_bb(lj), phi) in
+    { reg: jd, bb: jb,
+      extra: list.concat([cr.extra, [cb, tblk], tr.extra, [fblk], fr.extra]) }
+  else
+    let dst = alloc_reg(ctx) in
+    { reg: dst, bb: bb_emit(bb, uvir.inst_const(dst, uvir.val_int(0))), extra: [] }
+}
+
+fn lower_stmts(stmts, env, bb, ctx) {
+  list.fold(stmts, { bb: bb, extra: [], env: env, ret_reg: null }, fn(acc, stmt) {
+    if acc.ret_reg != null then acc else
+    let t = stmt.type in
+    if t == "ReturnStatement" then
+      let v = if stmt.argument != null
+        then lower_expr(stmt.argument, acc.env, acc.bb, ctx)
+        else { reg: alloc_reg(ctx), bb: bb_emit(acc.bb, uvir.inst_const(alloc_reg(ctx), uvir.val_null())), extra: [] } in
+      { bb: v.bb, extra: list.concat([acc.extra, v.extra]), env: acc.env, ret_reg: v.reg }
+    else if t == "VariableDeclaration" then
+      list.fold(stmt.declarations, acc, fn(a, decl) {
+        if a.ret_reg != null then a else
+        let v = if decl.init != null
+          then lower_expr(decl.init, a.env, a.bb, ctx)
+          else { reg: alloc_reg(ctx), bb: bb_emit(a.bb, uvir.inst_const(alloc_reg(ctx), uvir.val_int(0))), extra: [] } in
+        let name = if decl.id.type == "Identifier" then decl.id.name else "__anon__" in
+        { bb: v.bb, extra: list.concat([a.extra, v.extra]),
+          env: env_set(a.env, name, v.reg), ret_reg: null }
+      })
+    else if t == "ExpressionStatement" then
+      let v = lower_expr(stmt.expression, acc.env, acc.bb, ctx) in
+      { bb: v.bb, extra: list.concat([acc.extra, v.extra]), env: acc.env, ret_reg: null }
+    else if t == "IfStatement" then
+      let cr = lower_expr(rec.get(stmt, "test"), acc.env, acc.bb, ctx) in
+      let lt = alloc_label(ctx) in
+      let lf = alloc_label(ctx) in
+      let lj = alloc_label(ctx) in
+      let cb = bb_finish(cr.bb, uvir.term_br_cond(cr.reg, lt, lf)) in
+      let tb = make_bb(lt) in
+      let cons_stmts = if stmt.consequent.type == "BlockStatement"
+        then stmt.consequent.body else [stmt.consequent] in
+      let tr = lower_stmts(cons_stmts, acc.env, tb, ctx) in
+      // then-branch returns: emit ret directly, else falls to join
+      let tblk = if tr.ret_reg != null
+        then bb_finish(tr.bb, uvir.term_ret(tr.ret_reg))
+        else bb_finish(tr.bb, uvir.term_br(lj)) in
+      let fb = make_bb(lf) in
+      let alt = if rec.has(stmt, "alternate") && stmt.alternate != null
+        then if stmt.alternate.type == "BlockStatement"
+          then stmt.alternate.body else [stmt.alternate]
+        else [] in
+      let fr = lower_stmts(alt, acc.env, fb, ctx) in
+      let fblk = if fr.ret_reg != null
+        then bb_finish(fr.bb, uvir.term_ret(fr.ret_reg))
+        else bb_finish(fr.bb, uvir.term_br(lj)) in
+      let jb = make_bb(lj) in
+      let extra = list.concat([acc.extra, cr.extra, [cb, tblk], tr.extra, [fblk], fr.extra]) in
+      { bb: jb, extra: extra, env: acc.env,
+        ret_reg: if tr.ret_reg != null && fr.ret_reg != null then tr.ret_reg else null }
+    else if t == "WhileStatement" then
+      let loop_label = alloc_label(ctx) in
+      let body_label = alloc_label(ctx) in
+      let exit_label = alloc_label(ctx) in
+      let entry_block = bb_finish(acc.bb, uvir.term_br(loop_label)) in
+      let loop_bb = make_bb(loop_label) in
+      let cr = lower_expr(rec.get(stmt, "test"), acc.env, loop_bb, ctx) in
+      let cond_block = bb_finish(cr.bb, uvir.term_br_cond(cr.reg, body_label, exit_label)) in
+      let body_bb = make_bb(body_label) in
+      let while_stmts = if stmt.body.type == "BlockStatement" then stmt.body.body else [stmt.body] in
+      let br = lower_stmts(while_stmts, acc.env, body_bb, ctx) in
+      let body_block = bb_finish(br.bb, uvir.term_br(loop_label)) in
+      let exit_bb = make_bb(exit_label) in
+      let extra = list.concat([acc.extra, [entry_block, cond_block, body_block], br.extra, cr.extra]) in
+      { bb: exit_bb, extra: extra, env: acc.env, ret_reg: null }
+    else if t == "BlockStatement" then
+      let r = lower_stmts(stmt.body, acc.env, acc.bb, ctx) in
+      { bb: r.bb, extra: list.concat([acc.extra, r.extra]), env: r.env, ret_reg: r.ret_reg }
+    else acc
+  })
+}
+
+fn lower_func_decl(node, fn_names) {
+  let ctx = make_ctx(fn_names) in
+  let param_names = list.map(node.params, fn(p) { p.name }) in
+  let params = list.build(list.len(param_names), fn(i) {
+    uvir.param(i, uvir.ty_any(), list.get(param_names, i))
+  }) in
+  let env = list.fold(list.build(list.len(param_names), fn(i) { i }), env_empty(),
+    fn(e, i) { let _ = alloc_reg(ctx) in env_set(e, list.get(param_names, i), i) }) in
+  let ebb = make_bb(0) in
+  let result = lower_stmts(node.body.body, env, ebb, ctx) in
+  let ret_reg = if result.ret_reg != null then result.ret_reg else 0 in
+  let fblk = bb_finish(result.bb, uvir.term_ret(ret_reg)) in
+  let all_blocks = list.concat([result.extra, [fblk]]) in
+  let sorted = list.sort_int(list.map(all_blocks, fn(b) { b.label })) in
+  let bmap = list.fold(all_blocks, {}, fn(acc, b) { rec.set(acc, str.from(b.label), b) }) in
+  let ordered = list.map(sorted, fn(l) { rec.get(bmap, str.from(l)) }) in
+  uvir.func(node.id.name, params, uvir.ty_any(), ordered, uvir.func_attrs(false, false))
+}
+
+fn lower_module(js_ast) {
+  let fn_names = list.map(
+    list.filter(js_ast.body, fn(s) { s.type == "FunctionDeclaration" }),
+    fn(s) { s.id.name }) in
+  let all_names = list.append(fn_names, "__main__") in
+  let fns = list.map(
+    list.filter(js_ast.body, fn(s) { s.type == "FunctionDeclaration" }),
+    fn(s) { lower_func_decl(s, all_names) }) in
+  let top_stmts = list.filter(js_ast.body, fn(s) { s.type != "FunctionDeclaration" }) in
+  let ctx = make_ctx(all_names) in
+  let ebb = make_bb(0) in
+  let result = lower_stmts(top_stmts, env_empty(), ebb, ctx) in
+  let ret_reg = if result.ret_reg != null then result.ret_reg
+    else env_get(result.env, "result") ?? 0 in
+  let fblk = bb_finish(result.bb, uvir.term_ret(ret_reg)) in
+  let all_blocks = list.concat([result.extra, [fblk]]) in
+  let sorted = list.sort_int(list.map(all_blocks, fn(b) { b.label })) in
+  let bmap = list.fold(all_blocks, {}, fn(acc, b) { rec.set(acc, str.from(b.label), b) }) in
+  let ordered = list.map(sorted, fn(l) { rec.get(bmap, str.from(l)) }) in
+  let main_fn = uvir.func("__main__", [], uvir.ty_any(), ordered, uvir.func_attrs(false, false)) in
+  uvir.module("javascript", list.append(fns, main_fn), "__main__", [], [])
+}
+
+export { lower_module, lower_func_decl, lower_expr }
