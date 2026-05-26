@@ -104,8 +104,13 @@ No linker. No C driver. No libSystem. No dyld.
             UNDEF_REG, INT_ARITH_TYPE, CALL_ARITY_MISMATCH, BRCOND_COND_TYPE
             BR_TARGET_MISSING, DUPLICATE_FUNC, phi defines dst as Int
             dataflow env propagation + predecessor intersection
-    [next]  Python subset frontend -> UVIR
+    [done]  Python subset frontend -> UVIR -> native x86-64
+            python_to_uvir.fard: Python JSON AST -> UVIR
+            bridge: py_to_json.py (Python stdlib ast -> JSON)
+            fact(5)=120, fib(10)=55, max(10,42)=42 from Python source
+            macho_exe: entry_func now parameterized (not hardcoded fard_main)
     [next]  stdlib native -> fard_eval native -> delete Rust eval loop
+    [next]  JavaScript subset frontend -> UVIR
     [next]  UVIR — Universal Verified IR
             language-neutral: functions, closures, heap objects, effects,
             direct/indirect calls, phi/join values, module boundaries
