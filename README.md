@@ -110,7 +110,11 @@ No linker. No C driver. No libSystem. No dyld.
             fact(5)=120, fib(10)=55, max(10,42)=42 from Python source
             macho_exe: entry_func now parameterized (not hardcoded fard_main)
     [next]  stdlib native -> fard_eval native -> delete Rust eval loop
-    [next]  JavaScript subset frontend -> UVIR
+    [done]  JavaScript subset frontend -> UVIR -> native x86-64
+            js_to_uvir.fard: Acorn AST JSON -> UVIR
+            bridge: js_to_json.js (Acorn parser)
+            fact(5)=120, fib(10)=55, max(10,42)=42 from JS source
+            early-return fix: then-branch with return gets RetI64 directly
     [next]  UVIR — Universal Verified IR
             language-neutral: functions, closures, heap objects, effects,
             direct/indirect calls, phi/join values, module boundaries
