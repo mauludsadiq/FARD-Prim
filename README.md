@@ -112,7 +112,11 @@ No linker. No C driver. No libSystem. No dyld.
     [done]  SSA optimization passes: copy prop, const fold, DCE
             ocir_opt.fard (211 lines): within-block copy elimination, const folding
             fact(5): 11 -> 10 instructions. Regression: 10/10 PASS
-    [next]  stdlib native -> fard_eval native -> delete Rust eval loop
+    [done]  ELF64 backend: Linux x86-64 native executables
+           elf_exe.fard: ELF header, PT_LOAD segments, Linux syscall stub
+           link_module_with_vmaddr: parameterized linker for non-Mach-O
+           Verified on Ubuntu 22.04: add=42, max=42, fact=120, fib=55, closure=42
+   [next]  stdlib native -> fard_eval native -> delete Rust eval loop
     [done]  JavaScript subset frontend -> UVIR -> native x86-64
             js_to_uvir.fard: Acorn AST JSON -> UVIR
             bridge: js_to_json.js (Acorn parser)
