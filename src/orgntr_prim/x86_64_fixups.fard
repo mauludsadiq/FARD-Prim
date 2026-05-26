@@ -38,7 +38,7 @@ fn scan_labels_and_patches(insts) {
       // placeholder starts at pc + 4 + 2 = pc + 6
       { pc: acc.pc + 17,
         labels: acc.labels,
-        patches: list.append(acc.patches, { kind: "AbsReloc", at: acc.pc + 6, symbol: inst.fn_name }) }
+        patches: list.append(acc.patches, { kind: "AbsReloc", at: acc.pc + 6, symbol: inst.fn_name, next_ip: acc.pc + 14 }) }
     else if inst.op == "CallReloc" then
       {
         pc: acc.pc + size_of_inst(inst),
