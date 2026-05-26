@@ -109,6 +109,9 @@ No linker. No C driver. No libSystem. No dyld.
             bridge: py_to_json.py (Python stdlib ast -> JSON)
             fact(5)=120, fib(10)=55, max(10,42)=42 from Python source
             macho_exe: entry_func now parameterized (not hardcoded fard_main)
+    [done]  SSA optimization passes: copy prop, const fold, DCE
+            ocir_opt.fard (211 lines): within-block copy elimination, const folding
+            fact(5): 11 -> 10 instructions. Regression: 10/10 PASS
     [next]  stdlib native -> fard_eval native -> delete Rust eval loop
     [done]  JavaScript subset frontend -> UVIR -> native x86-64
             js_to_uvir.fard: Acorn AST JSON -> UVIR
