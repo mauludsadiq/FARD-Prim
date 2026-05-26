@@ -21,7 +21,7 @@ fn lower_expr(node) {
   else if t == "fn"     then hir.hir_fn(node.params, lower_expr(node.body))
   else if t == "call"   then hir.hir_call(lower_expr(node.fn_n), list.map(node.args, fn(a) { lower_expr(a) }))
   else if t == "get_field" || t == "get"  then hir.hir_get_field(lower_expr(node.obj), node.field)
-  else if t == "get_index"  then hir.hir_get_index(lower_expr(node.obj), lower_expr(node.idx))
+  else if t == "get_index" || t == "index" then hir.hir_get_index(lower_expr(node.obj), lower_expr(node.idx))
   else if t == "list"   then hir.hir_make_list(list.map(node.items, fn(i) { lower_expr(i) }))
   else if t == "rec"    then hir.hir_make_rec(list.map(node.fields, fn(f) { { key: f.k, val: lower_expr(f.v) } }))
   else { t: "hir_todo", node_t: t }
