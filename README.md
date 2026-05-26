@@ -115,7 +115,9 @@ No linker. No C driver. No libSystem. No dyld.
     [done]  ELF64 backend: Linux x86-64 native executables
            elf_exe.fard: ELF header, PT_LOAD segments, Linux syscall stub
            link_module_with_vmaddr: parameterized linker for non-Mach-O
-           Verified on Ubuntu 22.04: add=42, max=42, fact=120, fib=55, closure=42
+           Linux regression 9/9: add, max, fact, fib, list[0], list[2],
+             rec.a, rec.b, closure all pass on Ubuntu 22.04 via Docker
+           str_char pending (string constant vmaddr issue)
    [next]  stdlib native -> fard_eval native -> delete Rust eval loop
     [done]  JavaScript subset frontend -> UVIR -> native x86-64
             js_to_uvir.fard: Acorn AST JSON -> UVIR
