@@ -1,0 +1,148 @@
+/// arm64_fixups — label resolution and relocation patching for ARM64
+/// ARM64 uses fixed 4-byte instructions. Branch offsets are in units of 4 bytes.
+/// B:   26-bit signed offset (±128MB)
+/// B.cc: 19-bit signed offset (±1MB)
+/// BL:  26-bit signed offset (±128MB)
+
+import("std/list") as list
+import("std/str")  as str
+import("std/rec")  as rec
+import("std/bits") as bits
+import("../orgntr_prim/arm64_encode") as enc
+
+fn key_label(id) { str.concat(["L", str.from(id)]) }
+
+// Patch a 26-bit branch offset into a B or BL instruction
+fn patch_b26(bytes, at, byte_offset) {
+  // byte_offset / 4 = instruction offset
+  let instr_off = byte_offset / 4 in
+  let masked = bits.band(instr_off, 67108863) in  // 26 bits
+  let old_enc = bits.bor(
+    bits.bor(bits.bshl(list.get(bytes, at + 3), 24),
+             bits.bshl(list.get(bytes, at + 2), 16)),
+    bits.bor(bits.bshl(list.get(bytes, at + 1), 8),
+             list.get(bytes, at))) in
+  let opcode = bits.band(old_enc, 4227858432) in  // top 6 bits
+  let new_enc = bits.bor(opcode, masked) in
+  let b0 = bits.band(new_enc, 255) in
+  let b1 = bits.band(bits.bshr(new_enc, 8), 255) in
+  let b2 = bits.band(bits.bshr(new_enc, 16), 255) in
+  let b3 = bits.band(bits.bshr(new_enc, 24), 255) in
+  list.concat([
+    list.build(at, fn(i) { list.get(bytes, i) }),
+    [b0, b1, b2, b3],
+    list.build(list.len(bytes) - at - 4, fn(i) { list.get(bytes, at + 4 + i) })
+  ])
+}
+
+// Patch a 19-bit conditional branch offset into B.cc instruction
+fn patch_bcond19(bytes, at, byte_offset) {
+  let instr_off = byte_offset / 4 in
+  let masked = bits.band(instr_off, 524287) in  // 19 bits
+  let old_b0 = list.get(bytes, at) in
+  let old_b1 = list.get(bytes, at + 1) in
+  let old_b2 = list.get(bytes, at + 2) in
+  let old_b3 = list.get(bytes, at + 3) in
+  let old_enc = bits.bor(bits.bor(bits.bshl(old_b3, 24), bits.bshl(old_b2, 16)),
+    bits.bor(bits.bshl(old_b1, 8), old_b0)) in
+  // Clear imm19 field (bits 5-23), set new value
+  let cleared = bits.band(old_enc, 4278190113) in  // ~(134217696) & 4294967295... approx
+  let new_enc = bits.bor(cleared, bits.bshl(masked, 5)) in
+  let b0 = bits.band(new_enc, 255) in
+  let b1 = bits.band(bits.bshr(new_enc, 8), 255) in
+  let b2 = bits.band(bits.bshr(new_enc, 16), 255) in
+  let b3 = bits.band(bits.bshr(new_enc, 24), 255) in
+  list.concat([
+    list.build(at, fn(i) { list.get(bytes, i) }),
+    [b0, b1, b2, b3],
+    list.build(list.len(bytes) - at - 4, fn(i) { list.get(bytes, at + 4 + i) })
+  ])
+}
+
+fn replace4(bytes, at, val) {
+  let b = enc.le32(val) in
+  list.concat([
+    list.build(at, fn(i) { list.get(bytes, i) }),
+    b,
+    list.build(list.len(bytes) - at - 4, fn(i) { list.get(bytes, at + 4 + i) })
+  ])
+}
+
+fn replace8(bytes, at, val) {
+  let b = enc.le64(val) in
+  list.concat([
+    list.build(at, fn(i) { list.get(bytes, i) }),
+    b,
+    list.build(list.len(bytes) - at - 8, fn(i) { list.get(bytes, at + 8 + i) })
+  ])
+}
+
+fn scan_labels_and_patches(insts) {
+  list.fold(insts, { pc: 0, labels: {}, patches: [] }, fn(acc, inst) {
+    let op = inst.op in
+    if op == "Label" then
+      { pc: acc.pc, labels: rec.set(acc.labels, key_label(inst.target.id), acc.pc),
+        patches: acc.patches }
+    else if op == "Jne" then
+      { pc: acc.pc + 4, labels: acc.labels,
+        patches: list.append(acc.patches,
+          { kind: "Bcond", at: acc.pc, next_ip: acc.pc + 4, target: inst.target.id }) }
+    else if op == "Jmp" then
+      { pc: acc.pc + 4, labels: acc.labels,
+        patches: list.append(acc.patches,
+          { kind: "B", at: acc.pc, next_ip: acc.pc + 4, target: inst.target.id }) }
+    else if op == "CallReloc" then
+      { pc: acc.pc + 4, labels: acc.labels,
+        patches: list.append(acc.patches,
+          { kind: "BL", at: acc.pc, next_ip: acc.pc + 4, symbol: inst.name }) }
+    else if op == "StoreFnPtr" then
+      { pc: acc.pc + 16, labels: acc.labels,
+        patches: list.append(acc.patches,
+          { kind: "AbsReloc64", at: acc.pc, symbol: inst.fn_name, next_ip: acc.pc + 16 }) }
+    else
+      let encoded = enc.encode_inst(inst, 256) in
+      let sz = list.len(encoded) in
+      let extra = if (op == "AllocHeap" || op == "MakeClosure") && sz >= 4
+        then [{ kind: "BL", at: acc.pc + sz - 4, next_ip: acc.pc + sz, symbol: "fard_alloc" }]
+        else [] in
+      { pc: acc.pc + sz, labels: acc.labels,
+        patches: list.concat([acc.patches, extra]) }
+  })
+}
+
+
+fn apply_label_patches(bytes, labels, patches) {
+  list.fold(patches, bytes, fn(bs, patch) {
+    if patch.kind == "Bcond" then
+      let target_pc = rec.get(labels, key_label(patch.target)) in
+      let rel = target_pc - patch.at in
+      patch_bcond19(bs, patch.at, rel)
+    else if patch.kind == "B" then
+      let target_pc = rec.get(labels, key_label(patch.target)) in
+      let rel = target_pc - patch.at in
+      patch_b26(bs, patch.at, rel)
+    else bs
+  })
+}
+
+fn unresolved_relocs(patches) {
+  list.filter(patches, fn(p) { p.kind == "BL" || p.kind == "AbsReloc64" })
+}
+
+fn encode_func_with_fixups(f) {
+  let raw = enc.encode_func(f) in
+  let scan = scan_labels_and_patches(f.insts) in
+  let patched = apply_label_patches(raw, scan.labels, scan.patches) in
+  { name: f.name, text: patched, relocs: unresolved_relocs(scan.patches),
+    frame_size: f.frame_size }
+}
+
+fn encode_module_with_fixups(m) {
+  { funcs: list.map(m.funcs, fn(f) { encode_func_with_fixups(f) }) }
+}
+
+export {
+  encode_func_with_fixups, encode_module_with_fixups,
+  patch_b26, patch_bcond19, replace4, replace8,
+  scan_labels_and_patches, apply_label_patches, unresolved_relocs, key_label
+}

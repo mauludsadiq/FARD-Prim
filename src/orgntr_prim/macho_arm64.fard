@@ -1,0 +1,175 @@
+/// macho_arm64 — Mach-O ARM64 emitter
+/// Uses hardcoded segment name bytes to avoid str import ordering issues.
+
+import("std/list") as list
+import("std/rec")  as rec
+import("std/bits") as bits
+import("../orgntr_prim/arm64_encode") as enc
+
+fn le32(n) { enc.le32(n) }
+fn le64(n) { enc.le64(n) }
+fn zeros(n) { list.build(n, fn(_) { 0 }) }
+
+fn pad_to(bytes, target) {
+  let n = list.len(bytes) in
+  if n >= target then bytes
+  else list.concat([bytes, zeros(target - n)])
+}
+
+// Hardcoded 16-byte segment/section names
+fn seg_text()  { [95,95,84,69,88,84, 0,0,0,0,0,0,0,0,0,0] }  // __TEXT
+fn seg_data()  { [95,95,68,65,84,65, 0,0,0,0,0,0,0,0,0,0] }  // __DATA
+fn sec_text()  { [95,95,116,101,120,116, 0,0,0,0,0,0,0,0,0,0] } // __text
+fn sec_data()  { [95,95,100,97,116,97, 0,0,0,0,0,0,0,0,0,0] }   // __data
+
+fn text_vmaddr()          { 4294971392 }  // 0x100001000
+fn data_vmaddr()          { 4294975488 }  // 0x100002000
+fn heap_bump_ptr_vmaddr() { 4294975488 }
+fn heap_base_vmaddr()     { 4294975496 }
+fn image_base()           { 4294967296 }  // 0x100000000
+
+fn exe_header(ncmds, sizeofcmds) {
+  list.concat([
+    le32(4277009103),  // MH_MAGIC_64
+    le32(16777228),    // CPU_TYPE_ARM64
+    le32(0),           // cpusubtype
+    le32(2),           // MH_EXECUTE
+    le32(ncmds),
+    le32(sizeofcmds),
+    le32(33029),       // flags
+    le32(0)            // reserved
+  ])
+}
+
+fn lc_pagezero() {
+  list.concat([
+    le32(25), le32(72),
+    zeros(16),
+    le64(0), le64(4294967296),
+    le64(0), le64(0),
+    le32(0), le32(0),
+    le32(0), le32(0)
+  ])
+}
+
+fn lc_text(text_size) {
+  // LC_SEGMENT_64 with 1 section = 64 + 80 + 4*padding = no, fixed 232 bytes
+  // segment: 64 bytes header
+  // section: 80 bytes
+  // total: 144... but standard is 72 (seg) + 80 (sect) = 152? No.
+  // LC_SEGMENT_64 header = 8 (cmd+size) + 16 (name) + 8+8+8+8 (vm+file) + 4+4+4+4 = 72
+  // Section64 = 16+16+8+8+4+4+4+4+4+4+4 = 80
+  // cmdsize = 72 + 80 = 152
+  list.concat([
+    // Segment header (72 bytes)
+    le32(25), le32(152),
+    seg_text(),
+    le64(image_base()),
+    le64(8192),
+    le64(0),
+    le64(4096 + text_size),
+    le32(7), le32(5),
+    le32(1), le32(0),
+    // Section (80 bytes)
+    sec_text(),
+    seg_text(),
+    le64(text_vmaddr()),
+    le64(text_size),
+    le32(4096), le32(2),
+    le32(0), le32(0),
+    le32(2147484672),
+    le32(0), le32(0), le32(0)
+  ])
+}
+
+fn lc_data() {
+  list.concat([
+    le32(25), le32(152),
+    seg_data(),
+    le64(data_vmaddr()),
+    le64(4096),
+    le64(8192),
+    le64(4096),
+    le32(3), le32(3),
+    le32(1), le32(0),
+    sec_data(),
+    seg_data(),
+    le64(data_vmaddr()),
+    le64(4096),
+    le32(8192), le32(3),
+    le32(0), le32(0),
+    le32(0),
+    le32(0), le32(0), le32(0)
+  ])
+}
+
+fn lc_build_version() {
+  // LC_BUILD_VERSION = 0x32, platform=1 (macOS), minos=14.0, sdk=14.0
+  list.concat([
+    le32(50), le32(24),   // LC_BUILD_VERSION=0x32, cmdsize
+    le32(1),              // platform: PLATFORM_MACOS
+    le32(917504),         // minos: 14.0.0 = 0x000E0000
+    le32(917504),         // sdk:   14.0.0
+    le32(0)               // ntools
+  ])
+}
+
+fn lc_main(entry_file_offset) {
+  list.concat([
+    le32(2147483688),
+    le32(24),
+    le64(entry_file_offset),
+    le64(0)
+  ])
+}
+
+fn entry_stub_size() { 20 }
+fn alloc_stub_size() { enc.alloc_stub_size() }
+
+fn find_func_offset(funcs, name) {
+  let found = list.find(funcs, fn(f) { f.name == name }) in
+  if rec.has(found, "some") then found.some.base else 0
+}
+
+fn entry_stub_arm64(fn_offset) {
+  let rel_bytes = fn_offset - 8 in
+  let bl_instr_off = rel_bytes / 4 in
+  let bl_enc = bits.bor(2483027968, bits.band(bl_instr_off, 67108863)) in
+  list.concat([
+    enc.stp_fp_lr(),           // stp x29, x30, [sp, #-16]!
+    enc.mov_fp_sp(),           // mov x29, sp
+    enc.le32(bl_enc),          // bl entry_func
+    enc.movz(16, 1),           // movz x16, #1
+    enc.le32(3556769793)       // svc #0x80  (0xD4001001)
+  ])
+}
+
+fn build_text(linked, entry_func) {
+  let fn_offset = entry_stub_size() + alloc_stub_size() +
+    find_func_offset(linked.funcs, entry_func) in
+  let stub = entry_stub_arm64(fn_offset) in
+  let alloc = enc.fard_alloc_stub(heap_bump_ptr_vmaddr()) in
+  list.concat([stub, alloc, linked.text])
+}
+
+fn build_data() {
+  list.concat([le64(heap_base_vmaddr()), zeros(4088)])
+}
+
+fn emit_exe(linked, entry_func) {
+  let text = build_text(linked, entry_func) in
+  let text_size = list.len(text) in
+  let lc_pz = lc_pagezero() in
+  let lc_tx = lc_text(text_size) in
+  let lc_da = lc_data() in
+  let lc_bv = lc_build_version() in
+  let lc_mn = lc_main(4096) in
+  let cmds = list.concat([lc_pz, lc_tx, lc_da, lc_bv, lc_mn]) in
+  let hdr = exe_header(5, list.len(cmds)) in
+  let header_section = pad_to(list.concat([hdr, cmds]), 4096) in
+  let text_section = pad_to(list.concat([header_section, text]), 8192) in
+  list.concat([text_section, build_data()])
+}
+
+export { emit_exe, text_vmaddr, heap_bump_ptr_vmaddr, heap_base_vmaddr,
+         entry_stub_size, alloc_stub_size }

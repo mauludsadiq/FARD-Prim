@@ -1,0 +1,118 @@
+/// elf_arm64 — ELF64 executable emitter for Linux ARM64
+/// Same structure as elf_exe.fard but ARM64 entry stub.
+/// Exit syscall on Linux ARM64 = 93 (not 60 like x86-64).
+
+import("std/list") as list
+import("std/rec")  as rec
+import("std/bits") as bits
+import("../orgntr_prim/arm64_encode") as enc
+
+fn le32(n) { enc.le32(n) }
+fn le64(n) { enc.le64(n) }
+fn zeros(n) { list.build(n, fn(_) { 0 }) }
+
+fn load_addr()          { 4194304 }      // 0x400000
+fn text_file_offset()   { 4096 }
+fn text_vmaddr()        { 4198400 }      // 0x401000
+fn data_file_offset()   { 8192 }
+fn data_vmaddr()        { 4202496 }      // 0x402000
+fn data_size()          { 4096 }
+fn heap_bump_ptr_vmaddr() { 4202496 }
+fn heap_base_vmaddr()   { 4202504 }
+
+fn elf_header(entry_vmaddr, phoff, phnum) {
+  list.concat([
+    [127, 69, 76, 70],   // magic
+    [2],                  // 64-bit
+    [1],                  // little-endian
+    [1],                  // version
+    [0],                  // OS/ABI
+    zeros(8),
+    le16(2),              // ET_EXEC
+    le16(183),            // EM_AARCH64 = 183
+    le32(1),              // version
+    le64(entry_vmaddr),
+    le64(phoff),
+    le64(0),              // shoff
+    le32(0),              // flags
+    le16(64),             // ehsize
+    le16(56),             // phentsize
+    le16(phnum),
+    le16(64),             // shentsize
+    le16(0),              // shnum
+    le16(0)               // shstrndx
+  ])
+}
+
+fn le16(n) { [bits.band(n, 255), bits.band(bits.bshr(n, 8), 255)] }
+
+fn pt_load(flags, offset, vaddr, filesz, memsz, align) {
+  list.concat([
+    le32(1),          // PT_LOAD
+    le32(flags),      // 5=RX, 6=RW
+    le64(offset),
+    le64(vaddr),
+    le64(vaddr),
+    le64(filesz),
+    le64(memsz),
+    le64(align)
+  ])
+}
+
+fn entry_stub_linux_arm64(fn_offset) {
+  // ARM64 Linux exit syscall = 93
+  // Entry: stp x29,x30,[sp,#-16]!; mov x29,sp; bl fn; mov x8,#93; svc #0
+  let rel_bytes = fn_offset - 8 in
+  let bl_instr_off = rel_bytes / 4 in
+  let bl_enc = bits.bor(2483027968, bits.band(bl_instr_off, 67108863)) in
+  list.concat([
+    enc.stp_fp_lr(),                    // stp x29, x30, [sp, #-16]!
+    enc.mov_fp_sp(),                    // mov x29, sp
+    enc.le32(bl_enc),                   // bl fn  (result in x0)
+    enc.movz(8, 93),                    // movz x8, #93 (sys_exit)
+    enc.le32(3556769793)                // svc #0
+  ])
+}
+
+fn entry_stub_size() { 5 * 4 }   // 5 instructions
+fn alloc_stub_size() { enc.alloc_stub_size() }
+
+fn find_func_offset(funcs, name) {
+  let found = list.find(funcs, fn(f) { f.name == name }) in
+  if rec.has(found, "some") then found.some.base else 0
+}
+
+fn build_text(linked, entry_func) {
+  let fn_offset = entry_stub_size() + alloc_stub_size() +
+    find_func_offset(linked.funcs, entry_func) in
+  let stub = entry_stub_linux_arm64(fn_offset) in
+  let alloc = enc.fard_alloc_stub(heap_bump_ptr_vmaddr()) in
+  list.concat([stub, alloc, linked.text])
+}
+
+fn build_data() {
+  list.concat([le64(heap_base_vmaddr()), zeros(data_size() - 8)])
+}
+
+fn pad_to(bytes, target) {
+  let n = list.len(bytes) in
+  if n >= target then bytes
+  else list.concat([bytes, zeros(target - n)])
+}
+
+fn emit_exe(linked, entry_func) {
+  let text = build_text(linked, entry_func) in
+  let text_size = list.len(text) in
+  let entry_vmaddr = text_vmaddr() in
+  let first_load_size = text_file_offset() + text_size in
+  let phdr_text = pt_load(5, 0, load_addr(), first_load_size, first_load_size, 4096) in
+  let phdr_data = pt_load(6, data_file_offset(), data_vmaddr(), data_size(), data_size(), 4096) in
+  let ehdr = elf_header(entry_vmaddr, 64, 2) in
+  let header_section = list.concat([ehdr, phdr_text, phdr_data]) in
+  let padded_header = pad_to(header_section, text_file_offset()) in
+  let padded_text = pad_to(list.concat([padded_header, text]), data_file_offset()) in
+  list.concat([padded_text, build_data()])
+}
+
+export { emit_exe, text_vmaddr, heap_bump_ptr_vmaddr, heap_base_vmaddr,
+         entry_stub_size, alloc_stub_size }

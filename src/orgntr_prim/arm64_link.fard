@@ -1,0 +1,97 @@
+/// arm64_link — resolve BL relocations for ARM64
+/// BL uses 26-bit PC-relative offset in instruction units (÷4).
+
+import("std/list") as list
+import("std/rec")  as rec
+import("std/str")  as str
+import("std/bits") as bits
+import("../orgntr_prim/arm64_fixups") as fix
+import("../orgntr_prim/arm64_encode") as enc
+
+fn text_vmaddr()      { 4294971392 }  // placeholder, overridden by link_with_vmaddr
+fn entry_stub_size()  { 20 }          // bytes: stp+mov+bl+mov+mov+svc = 6 insts * 4
+fn alloc_stub_size()  { enc.alloc_stub_size() }
+
+fn layout_funcs(encoded_funcs) {
+  let r = list.fold(encoded_funcs, { offset: 0, funcs: [] }, fn(acc, f) {
+    { offset: acc.offset + list.len(f.text),
+      funcs: list.append(acc.funcs, { name: f.name, base: acc.offset, func: f }) }
+  }) in
+  r.funcs
+}
+
+fn build_symbol_table(laid_out) {
+  list.fold(laid_out, {}, fn(sym, entry) {
+    rec.set(sym, entry.func.name, entry.base)
+  })
+}
+
+fn patch_bl(text, at, byte_offset) {
+  // byte_offset = target_addr - at_addr (both absolute)
+  // BL encodes (byte_offset/4) in 26 bits
+  fix.patch_b26(text, at, byte_offset)
+}
+
+fn patch_abs64(text, at, vmaddr) {
+  // Patch a mov_imm64 sequence (4 instructions) with the actual address
+  // MOVZ x9, #w0
+  // MOVK x9, #w1, LSL #16
+  // MOVK x9, #w2, LSL #32
+  // MOVK x9, #w3, LSL #48
+  let w0 = bits.band(vmaddr, 65535) in
+  let w1 = bits.band(bits.bshr(vmaddr, 16), 65535) in
+  let w2 = bits.band(bits.bshr(vmaddr, 32), 65535) in
+  let w3 = bits.band(bits.bshr(vmaddr, 48), 65535) in
+  let movz_enc = bits.bor(bits.bor(3531603968, bits.bshl(bits.band(w0, 65535), 5)), 9) in
+  let movk1_enc = bits.bor(bits.bor(bits.bor(4068474880, bits.bshl(1, 21)), bits.bshl(bits.band(w1, 65535), 5)), 9) in
+  let movk2_enc = bits.bor(bits.bor(bits.bor(4068474880, bits.bshl(2, 21)), bits.bshl(bits.band(w2, 65535), 5)), 9) in
+  let movk3_enc = bits.bor(bits.bor(bits.bor(4068474880, bits.bshl(3, 21)), bits.bshl(bits.band(w3, 65535), 5)), 9) in
+  let t1 = fix.replace4(text, at,      movz_enc) in
+  let t2 = fix.replace4(t1,   at + 4,  movk1_enc) in
+  let t3 = fix.replace4(t2,   at + 8,  movk2_enc) in
+  fix.replace4(t3, at + 12, movk3_enc)
+}
+
+fn fn_vmaddr_with_base(base_in_linked, base_vmaddr) {
+  base_vmaddr + entry_stub_size() + alloc_stub_size() + base_in_linked
+}
+
+fn resolve_func_relocs(entry, sym_table, base_vmaddr) {
+  let base = entry.base in
+  let f = entry.func in
+  let result = list.fold(f.relocs, { text: f.text, unresolved: [] }, fn(acc, patch) {
+    if patch.kind == "BL" && rec.has(sym_table, patch.symbol) then
+      let target_offset = rec.get(sym_table, patch.symbol) in
+      let target_vmaddr = fn_vmaddr_with_base(target_offset, base_vmaddr) in
+      let patch_vmaddr = fn_vmaddr_with_base(base + patch.at, base_vmaddr) in
+      let byte_offset = target_vmaddr - patch_vmaddr in
+      { text: patch_bl(acc.text, patch.at, byte_offset), unresolved: acc.unresolved }
+    else if patch.kind == "AbsReloc64" && rec.has(sym_table, patch.symbol) then
+      let target_offset = rec.get(sym_table, patch.symbol) in
+      let target_vmaddr = fn_vmaddr_with_base(target_offset, base_vmaddr) in
+      { text: patch_abs64(acc.text, patch.at, target_vmaddr), unresolved: acc.unresolved }
+    else
+      { text: acc.text, unresolved: list.append(acc.unresolved, patch) }
+  }) in
+  { name: f.name, base: base, text: result.text, relocs: result.unresolved }
+}
+
+fn link_module_with_vmaddr(encoded_module, base_vmaddr) {
+  let laid_out = layout_funcs(encoded_module.funcs) in
+  let sym_table_base = build_symbol_table(laid_out) in
+  let alloc_offset = 0 - alloc_stub_size() in
+  let sym_table = rec.set(sym_table_base, "fard_alloc", alloc_offset) in
+  let linked_funcs = list.map(laid_out, fn(entry) {
+    resolve_func_relocs(entry, sym_table, base_vmaddr)
+  }) in
+  let linked_text = list.flatten(list.map(linked_funcs, fn(f) { f.text })) in
+  { funcs: linked_funcs, text: linked_text, unresolved_relocs: [] }
+}
+
+
+fn link_module_elf_arm64(encoded_module) {
+  // ELF ARM64 text vmaddr = 0x401000 = 4198400
+  link_module_with_vmaddr(encoded_module, 4198400)
+}
+
+export { link_module_with_vmaddr, link_module_elf_arm64, layout_funcs, build_symbol_table, fn_vmaddr_with_base }

@@ -1,0 +1,576 @@
+/// arm64_encode — AArch64 instruction encoder
+/// Fixed 4-byte instructions, little-endian.
+/// Calling convention: args x0-x7, return x0, fp x29, lr x30, sp aligned 16.
+/// Stack slots: negative offsets from x29 (frame pointer).
+
+import("std/list") as list
+import("std/rec")  as rec
+import("std/bits") as bits
+import("../orgntr_prim/omir") as omir
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn le32(n) {
+  let n = if n < 0 then n + 4294967296 else n in
+  [bits.band(n, 255),
+   bits.band(bits.bshr(n, 8), 255),
+   bits.band(bits.bshr(n, 16), 255),
+   bits.band(bits.bshr(n, 24), 255)]
+}
+
+fn le64(n) {
+  list.concat([le32(bits.band(n, 4294967295)), le32(bits.bshr(n, 32))])
+}
+
+fn zeros(n) { list.build(n, fn(_) { 0 }) }
+
+// ── Register numbers ──────────────────────────────────────────────────────────
+// x0-x7: args/return, x8-x15: scratch, x16-x17: intra-call scratch
+// x19-x28: callee-saved, x29: fp, x30: lr, xzr=31: zero register
+
+fn xreg(n) { n }
+// ── x86 register name -> ARM64 register mapping ───────────────────────────────
+// OMIR uses x86 register names; map them to ARM64 equivalents
+fn x86_to_arm64(name) {
+  if name == "rdi" then x0()
+  else if name == "rsi" then x1()
+  else if name == "rdx" then x2()
+  else if name == "rcx" then x3()
+  else if name == "r8"  then x4()
+  else if name == "r9"  then x5()
+  else if name == "rax" then x0()   // return register
+  else if name == "rbx" then x19()  // callee-saved
+  else if name == "r10" then x10()
+  else if name == "r11" then x11()
+  else x9()  // default scratch
+}
+
+fn x19() { 19 }
+
+   // just the number 0-30
+fn x0()  { 0 }  fn x1()  { 1 }  fn x2()  { 2 }  fn x3()  { 3 }
+fn x4()  { 4 }  fn x5()  { 5 }  fn x6()  { 6 }  fn x7()  { 7 }
+fn x8()  { 8 }  fn x9()  { 9 }  fn x10() { 10 } fn x11() { 11 } fn x16() { 16 }
+fn x17() { 17 } fn x29() { 29 } fn x30() { 30 } fn xzr() { 31 }
+
+fn arg_reg(i) {
+  if i == 0 then x0() else if i == 1 then x1()
+  else if i == 2 then x2() else if i == 3 then x3()
+  else if i == 4 then x4() else if i == 5 then x5()
+  else if i == 6 then x6() else x7()
+}
+
+// ── Instruction encoding ──────────────────────────────────────────────────────
+
+// MOV xN, #imm16  (MOVZ: zero-extend 16-bit immediate)
+fn movz(rd, imm16) {
+  // encoding: 1 10 100101 hw imm16 Rd
+  // hw=00 (shift 0), 64-bit
+  let enc = bits.bor(
+    bits.bor(3531603968, bits.bshl(bits.band(imm16, 65535), 5)),
+    bits.band(rd, 31)) in
+  le32(enc)
+}
+
+// MOVK xN, #imm16, LSL #shift  (keep other bits)
+fn movk(rd, imm16, shift) {
+  // shift: 0,16,32,48 -> hw: 0,1,2,3
+  let hw = shift / 16 in
+  let enc = bits.bor(bits.bor(bits.bor(
+    4068474880,
+    bits.bshl(bits.band(hw, 3), 21)),
+    bits.bshl(bits.band(imm16, 65535), 5)),
+    bits.band(rd, 31)) in
+  le32(enc)
+}
+
+// MOV xDst, xSrc  (ORR xDst, xzr, xSrc)
+fn mov_reg(rd, rn) {
+  let enc = bits.bor(bits.bor(bits.bor(
+    2852126720,
+    bits.bshl(bits.band(rn, 31), 16)),
+    bits.bshl(31, 5)),   // xzr
+    bits.band(rd, 31)) in
+  le32(enc)
+}
+
+// Load 64-bit immediate into register using MOVZ + up to 3 MOVKs
+fn mov_imm64(rd, val) {
+  let w0 = bits.band(val, 65535) in
+  let w1 = bits.band(bits.bshr(val, 16), 65535) in
+  let w2 = bits.band(bits.bshr(val, 32), 65535) in
+  let w3 = bits.band(bits.bshr(val, 48), 65535) in
+  let base = movz(rd, w0) in
+  let p1 = if w1 != 0 then movk(rd, w1, 16) else [] in
+  let p2 = if w2 != 0 then movk(rd, w2, 32) else [] in
+  let p3 = if w3 != 0 then movk(rd, w3, 48) else [] in
+  list.concat([base, p1, p2, p3])
+}
+
+// LDR xDst, [x29, #offset]  (load from stack)
+fn ldr_fp(rd, offset) {
+  // LDR (immediate, unsigned offset): size=11, V=0, opc=01
+  // offset must be positive multiple of 8, imm12 = offset/8
+  let imm12 = offset / 8 in
+  let enc = bits.bor(bits.bor(bits.bor(
+    4181721088,
+    bits.bshl(bits.band(imm12, 4095), 10)),
+    bits.bshl(x29(), 5)),
+    bits.band(rd, 31)) in
+  le32(enc)
+}
+
+// STR xSrc, [x29, #offset]  (store to stack)
+fn str_fp(rs, offset) {
+  let imm12 = offset / 8 in
+  let enc = bits.bor(bits.bor(bits.bor(
+    4177526784,
+    bits.bshl(bits.band(imm12, 4095), 10)),
+    bits.bshl(x29(), 5)),
+    bits.band(rs, 31)) in
+  le32(enc)
+}
+
+// ADD xDst, xLhs, xRhs
+fn add_reg(rd, rn, rm) {
+  let enc = bits.bor(bits.bor(bits.bor(
+    2332033024, bits.bshl(bits.band(rm, 31), 16)),
+    bits.bshl(bits.band(rn, 31), 5)),
+    bits.band(rd, 31)) in
+  le32(enc)
+}
+
+// SUB xDst, xLhs, xRhs
+fn sub_reg(rd, rn, rm) {
+  let enc = bits.bor(bits.bor(bits.bor(
+    3405774848, bits.bshl(bits.band(rm, 31), 16)),
+    bits.bshl(bits.band(rn, 31), 5)),
+    bits.band(rd, 31)) in
+  le32(enc)
+}
+
+// MUL xDst, xLhs, xRhs  (MADD with xzr)
+fn mul_reg(rd, rn, rm) {
+  let enc = bits.bor(bits.bor(bits.bor(bits.bor(
+    2600468480,
+    bits.bshl(bits.band(rm, 31), 16)),
+    bits.bshl(31, 10)),   // Ra = xzr
+    bits.bshl(bits.band(rn, 31), 5)),
+    bits.band(rd, 31)) in
+  le32(enc)
+}
+
+// CMP xLhs, xRhs  (SUBS xzr, lhs, rhs)
+fn cmp_reg(rn, rm) {
+  let enc = bits.bor(bits.bor(bits.bor(
+    3942645760, bits.bshl(bits.band(rm, 31), 16)),
+    bits.bshl(bits.band(rn, 31), 5)),
+    31) in   // rd = xzr
+  le32(enc)
+}
+
+// CMP xN, #0  (SUBS xzr, xN, #0)
+fn cmp_zero(rn) {
+  // SUBS xzr, rn, #0
+  let enc = bits.bor(bits.bor(4043309087, bits.bshl(bits.band(rn, 31), 5)), 0) in
+  le32(enc)
+}
+
+// Conditional branch placeholders (4 bytes each, patched later)
+// B.NE #offset  (branch if not equal)
+fn bne_placeholder() { le32(1409286145) }  // B.NE +0 (patched)
+// B #offset  (unconditional)
+fn b_placeholder()   { le32(335544320) }  // B +0 (patched)
+// BL #offset  (branch with link = call)
+fn bl_placeholder()  { le32(2483027968) }  // BL +0 (patched)
+
+// CSET xDst, cond  — set register to 0 or 1 based on condition
+fn cset(rd, cond) {
+  // CSINC rd, xzr, xzr, invert(cond)
+  // cond codes: EQ=0, NE=1, LT=10, LE=13, GT=12, GE=11
+  let inv_cond = if cond == 0 then 1   // EQ -> NE
+    else if cond == 1 then 0           // NE -> EQ
+    else if cond == 10 then 11         // LT -> GE
+    else if cond == 11 then 10         // GE -> LT
+    else if cond == 12 then 13         // GT -> LE
+    else if cond == 13 then 12         // LE -> GT
+    else 1 in
+  let enc = bits.bor(bits.bor(bits.bor(bits.bor(
+    2594113504,
+    bits.bshl(bits.band(inv_cond, 15), 12)),
+    bits.bshl(31, 16)),  // Rm = xzr
+    bits.bshl(31, 5)),   // Rn = xzr
+    bits.band(rd, 31)) in
+  le32(enc)
+}
+
+fn cond_eq() { 0 } fn cond_ne() { 1 }
+fn cond_lt() { 11 } fn cond_le() { 13 }
+fn cond_gt() { 12 } fn cond_ge() { 10 }
+
+// ADRP + ADD for large addresses (page-relative)
+// For heap ptr: we use absolute addresses via mov_imm64
+
+// LDR xDst, [xBase, xIdx, LSL #3]  (load heap dynamic)
+fn ldr_reg_shifted(rd, rn, rm) {
+  // LDR xd, [xn, xm, LSL #3]
+  let enc = bits.bor(bits.bor(bits.bor(bits.bor(
+    4167071744,
+    bits.bshl(bits.band(rm, 31), 16)),
+    bits.bshl(bits.band(rn, 31), 5)),
+    bits.band(rd, 31)),
+    0) in
+  le32(enc)
+}
+
+// LDR xDst, [xBase, #8]  (load with immediate offset)
+fn ldr_imm(rd, rn, offset) {
+  let imm12 = offset / 8 in
+  let enc = bits.bor(bits.bor(bits.bor(
+    4181721088,
+    bits.bshl(bits.band(imm12, 4095), 10)),
+    bits.bshl(bits.band(rn, 31), 5)),
+    bits.band(rd, 31)) in
+  le32(enc)
+}
+
+// STR xSrc, [xBase, #offset]
+fn str_imm(rs, rn, offset) {
+  let imm12 = offset / 8 in
+  let enc = bits.bor(bits.bor(bits.bor(
+    4177526784,
+    bits.bshl(bits.band(imm12, 4095), 10)),
+    bits.bshl(bits.band(rn, 31), 5)),
+    bits.band(rs, 31)) in
+  le32(enc)
+}
+
+// STR xSrc, [xBase, xIdx, LSL #3]
+fn str_reg_shifted(rs, rn, rm) {
+  let enc = bits.bor(bits.bor(bits.bor(bits.bor(
+    4162877440,
+    bits.bshl(bits.band(rm, 31), 16)),
+    bits.bshl(bits.band(rn, 31), 5)),
+    bits.band(rs, 31)),
+    0) in
+  le32(enc)
+}
+
+// SUB sp, sp, #imm  (allocate stack frame)
+fn sub_sp_imm(imm) {
+  // SUB SP, SP, #imm  (imm must be multiple of 16, max 4095*16)
+  let enc = bits.bor(3506439167, bits.bshl(bits.band(imm, 4095), 10)) in
+  le32(enc)
+}
+
+// ADD sp, sp, #imm  (deallocate stack frame)
+fn add_sp_imm(imm) {
+  let enc = bits.bor(2432697343, bits.bshl(bits.band(imm, 4095), 10)) in
+  le32(enc)
+}
+
+// STP x29, x30, [sp, #-16]!  (push fp and lr)
+fn stp_fp_lr() {
+  // STP x29, x30, [sp, #-16]!  pre-index
+  le32(2847898621)
+}
+
+// LDP x29, x30, [sp], #16  (pop fp and lr)
+fn ldp_fp_lr() {
+  le32(2831252477)
+}
+
+// MOV x29, sp  (set frame pointer)
+fn mov_fp_sp() {
+  // ADD x29, sp, #0
+  le32(2432697341)
+}
+
+// RET  (return via x30)
+fn ret_inst() { le32(3596551104) }
+
+// NOP
+fn nop() { le32(3573751839) }
+
+// BLR xN  (call register)
+fn blr(rn) {
+  let enc = bits.bor(3594452992, bits.bshl(bits.band(rn, 31), 5)) in
+  le32(enc)
+}
+
+// ── Frame layout helpers ──────────────────────────────────────────────────────
+// Stack slots are negative offsets from x29 in x86-64 convention.
+// ARM64: x29 points to saved {x29, x30} at [x29], [x29+8].
+// Variables start at x29 - 8, x29 - 16, etc.
+// But OMIR uses positive slot numbers stored as negative offsets.
+// slot.slot is negative (e.g. -8, -16).
+// For LDR/STR we need positive offsets: use abs(slot) and address as [x29, #-N].
+// ARM64 LDR with negative offset uses pre/post-index or LDUR.
+
+// LDUR xDst, [x29, #offset]  (unscaled offset, can be negative, -256..255)
+fn ldur_fp(rd, offset) {
+  // LDUR: size=11, V=0, opc=01, imm9 signed
+  let imm9 = if offset < 0 then offset + 512 else offset in
+  let enc = bits.bor(bits.bor(bits.bor(
+    4164943872,
+    bits.bshl(bits.band(imm9, 511), 12)),
+    bits.bshl(x29(), 5)),
+    bits.band(rd, 31)) in
+  le32(enc)
+}
+
+// STUR xSrc, [x29, #offset]  (unscaled store, can be negative)
+fn stur_fp(rs, offset) {
+  let imm9 = if offset < 0 then offset + 512 else offset in
+  let enc = bits.bor(bits.bor(bits.bor(
+    4160749568,
+    bits.bshl(bits.band(imm9, 511), 12)),
+    bits.bshl(x29(), 5)),
+    bits.band(rs, 31)) in
+  le32(enc)
+}
+
+// ── Prologue / Epilogue ───────────────────────────────────────────────────────
+
+fn prologue(frame_size) {
+  // stp x29, x30, [sp, #-16]!
+  // mov x29, sp
+  // sub sp, sp, #frame_size  (if frame_size > 0)
+  let base = list.concat([stp_fp_lr(), mov_fp_sp()]) in
+  if frame_size > 0
+    then list.concat([base, sub_sp_imm(frame_size)])
+    else base
+}
+
+fn epilogue(frame_size) {
+  // add sp, sp, #frame_size  (if needed)
+  // ldp x29, x30, [sp], #16
+  // ret
+  let restore = if frame_size > 0
+    then list.concat([add_sp_imm(frame_size), ldp_fp_lr()])
+    else ldp_fp_lr() in
+  list.concat([restore, ret_inst()])
+}
+
+// ── Full instruction encoder ──────────────────────────────────────────────────
+
+fn slot_of(v) { if v.k == "stack" then v.slot else 0 }
+
+fn encode_inst(inst, frame_size) {
+  let op = inst.op in
+  if op == "Prologue" then prologue(frame_size)
+  else if op == "Epilogue" then epilogue(frame_size)
+  else if op == "MovImm64" then
+    // dst is a register in OMIR - just load into that register
+    let dr = if rec.has(inst, "dst") && inst.dst.k == "reg"
+      then x86_to_arm64(inst.dst.name) else x9() in
+    mov_imm64(dr, inst.val)
+  else if op == "MovStackToReg" then
+    let r = if inst.dst.k == "reg" then x86_to_arm64(inst.dst.name) else x9() in
+    ldur_fp(r, slot_of(inst.src))
+  else if op == "MovRegToStack" then
+    let r = if inst.src.k == "reg" then x86_to_arm64(inst.src.name) else x9() in
+    stur_fp(r, slot_of(inst.dst))
+  else if op == "AddRegStack" then
+    let dr = if inst.dst.k == "reg" then x86_to_arm64(inst.dst.name) else x9() in
+    list.concat([
+      ldur_fp(x10(), slot_of(inst.src)),
+      add_reg(dr, dr, x10())
+    ])
+  else if op == "CmpStackZero" then
+    let sv = if inst.src.k == "stack" then slot_of(inst.src) else 0 in
+    list.concat([
+      ldur_fp(x9(), sv),
+      cmp_zero(x9())
+    ])
+  else if op == "Jne" then bne_placeholder()
+  else if op == "Jmp" then b_placeholder()
+  else if op == "CallReloc" then bl_placeholder()
+  else if op == "StoreParam" then
+    [stur_fp(arg_reg(inst.arg_idx), inst.slot)]
+  else if op == "LoadArg" then
+    list.concat([
+      ldur_fp(x9(), inst.slot),
+      mov_reg(arg_reg(inst.arg_idx), x9())
+    ])
+  else if op == "Ret" then []
+  else if op == "Label" then []
+  else if op == "CopyI64" then
+    list.concat([
+      ldur_fp(x9(), slot_of(inst.src)),
+      stur_fp(x9(), slot_of(inst.dst))
+    ])
+  else if op == "SubI64" then
+    list.concat([
+      ldur_fp(x9(), slot_of(inst.lhs)),
+      ldur_fp(x10(), slot_of(inst.rhs)),
+      sub_reg(x9(), x9(), x10()),
+      stur_fp(x9(), slot_of(inst.dst))
+    ])
+  else if op == "MulI64" then
+    list.concat([
+      ldur_fp(x9(), slot_of(inst.lhs)),
+      ldur_fp(x10(), slot_of(inst.rhs)),
+      mul_reg(x9(), x9(), x10()),
+      stur_fp(x9(), slot_of(inst.dst))
+    ])
+  else if op == "ImmI64" then
+    list.concat([
+      mov_imm64(x9(), inst.val),
+      stur_fp(x9(), slot_of(inst.dst))
+    ])
+  else if op == "AddI64" then
+    list.concat([
+      ldur_fp(x9(), slot_of(inst.lhs)),
+      ldur_fp(x10(), slot_of(inst.rhs)),
+      add_reg(x9(), x9(), x10()),
+      stur_fp(x9(), slot_of(inst.dst))
+    ])
+  else if op == "CmpI64" then
+    let cond = if inst.cmp == "eq" then cond_eq()
+      else if inst.cmp == "ne" then cond_ne()
+      else if inst.cmp == "lt" then cond_lt()
+      else if inst.cmp == "le" then cond_le()
+      else if inst.cmp == "gt" then cond_gt()
+      else cond_ge() in
+    list.concat([
+      ldur_fp(x9(), slot_of(inst.lhs)),
+      ldur_fp(x10(), slot_of(inst.rhs)),
+      cmp_reg(x9(), x10()),
+      cset(x9(), cond),
+      stur_fp(x9(), slot_of(inst.dst))
+    ])
+  else if op == "ImmBool" then
+    list.concat([
+      mov_imm64(x9(), if inst.val then 1 else 0),
+      stur_fp(x9(), slot_of(inst.dst))
+    ])
+  else if op == "AllocHeap" then
+    list.concat([
+      mov_imm64(x0(), inst.size),
+      bl_placeholder(),   // call fard_alloc
+      stur_fp(x0(), slot_of(inst.dst))
+    ])
+  else if op == "StoreHeap" then
+    list.concat([
+      ldur_fp(x9(), slot_of(inst.ptr)),
+      ldur_fp(x10(), slot_of(inst.src)),
+      str_imm(x10(), x9(), inst.offset)
+    ])
+  else if op == "LoadHeapDyn" then
+    list.concat([
+      ldur_fp(x9(), slot_of(inst.ptr)),
+      ldur_fp(x10(), slot_of(inst.idx)),
+      // x9 = x9 + x10*8 + 8
+      mov_imm64(x8(), 8),
+      mul_reg(x10(), x10(), x8()),
+      add_reg(x9(), x9(), x10()),
+      ldr_imm(x9(), x9(), 8),
+      stur_fp(x9(), slot_of(inst.dst))
+    ])
+  else if op == "LoadHeapStaticIdx" then
+    list.concat([
+      ldur_fp(x9(), slot_of(inst.ptr)),
+      ldr_imm(x9(), x9(), 8 + inst.field_idx * 8),
+      stur_fp(x9(), slot_of(inst.dst))
+    ])
+  else if op == "StoreFnPtr" then
+    // Store function pointer into closure slot 0
+    // Uses AbsReloc: mov x9, #fn_addr (patched); str x9, [closure_ptr]
+    list.concat([
+      mov_imm64(x9(), 0),    // placeholder, patched by linker as AbsReloc
+      ldur_fp(x10(), slot_of(inst.ptr)),
+      str_imm(x9(), x10(), 0)
+    ])
+  else if op == "CallIndirect" then
+    // Load closure ptr, load fn_ptr from slot 0, call it
+    list.concat([
+      ldur_fp(x0(), slot_of(inst.closure)),   // x0 = closure ptr (first arg)
+      ldr_imm(x9(), x0(), 0),                  // x9 = fn_ptr
+      blr(x9())                                 // call
+    ])
+  else if op == "MakeClosure" then
+    list.concat([
+      mov_imm64(x0(), inst.size),
+      bl_placeholder(),                         // call fard_alloc -> x0 = ptr
+      stur_fp(x0(), slot_of(inst.ptr))
+    ])
+  else if op == "LeaRdiBrp" then
+    // ARM64: load address of stack slot into x0
+    list.concat([
+      mov_imm64(x9(), 0),  // placeholder for slot address
+      mov_reg(x0(), x9())
+    ])
+  else []
+}
+
+fn encode_func(f) {
+  // f.frame_size is already positive (e.g. 32)
+  let fs = f.frame_size in
+  list.flatten(list.map(f.insts, fn(inst) { encode_inst(inst, fs) }))
+}
+
+fn fard_alloc_stub_arm64(bump_ptr_vmaddr) {
+  // fard_alloc(x0=size) -> x0=ptr
+  // Bump allocator: load bump_ptr, return it, add size
+  // mov x9, #bump_ptr_vmaddr
+  // ldr x10, [x9]       -- load current bump ptr
+  // mov x0, x10         -- return value
+  // add x10, x10, x0_size ... actually we need size in x0
+  // Let's do: ptr = *bump; *bump = ptr + size; return ptr
+  // x9 = bump_ptr addr, x10 = *x9 (current ptr), x0 = return, then *x9 += size
+  let w0 = bits.band(bump_ptr_vmaddr, 65535) in
+  let w1 = bits.band(bits.bshr(bump_ptr_vmaddr, 16), 65535) in
+  let w2 = bits.band(bits.bshr(bump_ptr_vmaddr, 32), 65535) in
+  let w3 = bits.band(bits.bshr(bump_ptr_vmaddr, 48), 65535) in
+  list.concat([
+    movz(x9(), w0),
+    if w1 != 0 then movk(x9(), w1, 16) else [],
+    if w2 != 0 then movk(x9(), w2, 32) else [],
+    if w3 != 0 then movk(x9(), w3, 48) else [],
+    ldr_imm(x10(), x9(), 0),     // x10 = *bump_ptr
+    mov_reg(x0(), x10()),        // return value = old bump_ptr
+    add_reg(x10(), x10(), x0()), // new_ptr = old_ptr + size... wait x0 is now return
+    // Need size in a temp: save x0 first
+    // Better: use x11 for size
+    // Redo: x11=size(=x0 on entry), x10=old_ptr, x0=old_ptr, *bump=old_ptr+x11
+    // But we already clobbered x0... use different approach:
+    // x9=bump_addr, ldr x10,[x9]; mov x0,x10; add x10,x10,x11; str x10,[x9]; ret
+    // We need x11=size before clobbering x0
+    // Actually encode differently:
+    str_imm(x10(), x9(), 0),     // placeholder - will redo below
+    ret_inst()
+  ])
+}
+
+// Correct alloc stub
+fn fard_alloc_stub(bump_ptr_vmaddr) {
+  let w0 = bits.band(bump_ptr_vmaddr, 65535) in
+  let w1 = bits.band(bits.bshr(bump_ptr_vmaddr, 16), 65535) in
+  let w2 = bits.band(bits.bshr(bump_ptr_vmaddr, 32), 65535) in
+  let w3 = bits.band(bits.bshr(bump_ptr_vmaddr, 48), 65535) in
+  list.concat([
+    // x0 = size (argument)
+    // x9 = bump_ptr address
+    movz(x9(), w0),
+    if w1 != 0 then movk(x9(), w1, 16) else [],
+    if w2 != 0 then movk(x9(), w2, 32) else [],
+    if w3 != 0 then movk(x9(), w3, 48) else [],
+    ldr_imm(x11(), x9(), 0),    // x11 = old bump ptr (return value)
+    add_reg(x10(), x11(), x0()), // x10 = old_ptr + size
+    str_imm(x10(), x9(), 0),    // *bump_ptr = new ptr
+    mov_reg(x0(), x11()),        // x0 = old ptr (return)
+    ret_inst()
+  ])
+}
+
+fn alloc_stub_size() { 7 * 4 }   // 7 instructions * 4 bytes
+
+export {
+  encode_func, encode_inst, fard_alloc_stub, alloc_stub_size,
+  prologue, epilogue, stp_fp_lr, mov_fp_sp, movz, mov_reg, mov_imm64, ldr_imm, str_imm, ldur_fp, stur_fp,
+  bl_placeholder, b_placeholder, bne_placeholder, blr,
+  le32, le64, ret_inst, nop, zeros,
+  x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x16, x17, x19, x29, x30, xzr, xreg,
+  arg_reg, cond_eq, cond_ne, cond_lt, cond_le, cond_gt, cond_ge
+}
