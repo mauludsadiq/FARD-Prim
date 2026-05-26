@@ -1,0 +1,212 @@
+/// uvir_verify — type verifier for UVIR
+/// Checks before lowering to OCIR.
+
+import("std/list") as list
+import("std/rec")  as rec
+import("std/str")  as str
+import("../orgntr_prim/uvir") as uvir
+
+fn ok(v)           { { t: "ok", v: v } }
+fn err(code, data) { { t: "err", code: code, data: data } }
+
+fn put_ty(env, r, ty) { rec.set(env, str.from(r), ty) }
+fn get_ty(env, r)     {
+  let k = str.from(r) in
+  if rec.has(env, k) then rec.get(env, k) else null
+}
+fn has_reg(env, r) { rec.has(env, str.from(r)) }
+
+fn require_ty(env, r, ty, code, func, block) {
+  if !has_reg(env, r) then
+    err("UNDEF_REG", { reg: r, expected: ty, func: func, block: block })
+  else if get_ty(env, r) != ty then
+    err(code, { reg: r, got: get_ty(env, r), expected: ty, func: func, block: block })
+  else ok(env)
+}
+
+fn require_defined(env, r, func, block) {
+  if !has_reg(env, r)
+    then err("UNDEF_REG", { reg: r, func: func, block: block })
+    else ok(env)
+}
+
+fn verify_inst(inst, env, func, block, func_arities) {
+  let op = inst.op in
+  if op == "Const" then
+    let ty = if inst.val.t == "VInt" then uvir.ty_int()
+      else if inst.val.t == "VBool" then uvir.ty_bool()
+      else if inst.val.t == "VStr"  then uvir.ty_str()
+      else if inst.val.t == "VNull" then uvir.ty_unit()
+      else uvir.ty_any() in
+    ok(put_ty(env, inst.dst, ty))
+  else if op == "IntAdd" || op == "IntSub" || op == "IntMul" || op == "IntDiv" || op == "IntMod" then
+    if !has_reg(env, inst.a) then err("UNDEF_REG", { reg: inst.a, func: func, block: block })
+    else if !has_reg(env, inst.b) then err("UNDEF_REG", { reg: inst.b, func: func, block: block })
+    else
+      let aty = get_ty(env, inst.a) in
+      let bty = get_ty(env, inst.b) in
+      if aty != uvir.ty_int() && aty != uvir.ty_any()
+        then err("INT_ARITH_TYPE", { reg: inst.a, got: aty, expected: uvir.ty_int(), func: func, block: block })
+      else if bty != uvir.ty_int() && bty != uvir.ty_any()
+        then err("INT_ARITH_TYPE", { reg: inst.b, got: bty, expected: uvir.ty_int(), func: func, block: block })
+      else ok(put_ty(env, inst.dst, uvir.ty_int()))
+  else if op == "IntCmp" then
+    if !has_reg(env, inst.a) then err("UNDEF_REG", { reg: inst.a, func: func, block: block })
+    else if !has_reg(env, inst.b) then err("UNDEF_REG", { reg: inst.b, func: func, block: block })
+    else ok(put_ty(env, inst.dst, uvir.ty_bool()))
+  else if op == "Copy" then
+    let s = require_defined(env, inst.src, func, block) in
+    if s.t == "err" then s else
+    ok(put_ty(s.v, inst.dst, get_ty(s.v, inst.src)))
+  else if op == "StrConst" then
+    ok(put_ty(env, inst.dst, uvir.ty_str()))
+  else if op == "StrLen" then
+    let s = require_ty(env, inst.s, uvir.ty_str(), "STR_LEN_TYPE", func, block) in
+    if s.t == "err" then s else ok(put_ty(s.v, inst.dst, uvir.ty_int()))
+  else if op == "Alloc" then
+    ok(put_ty(env, inst.dst, uvir.ty_ref()))
+  else if op == "Load" then
+    let p = require_ty(env, inst.ptr, uvir.ty_ref(), "LOAD_PTR_TYPE", func, block) in
+    if p.t == "err" then p else ok(put_ty(p.v, inst.dst, uvir.ty_any()))
+  else if op == "Store" then
+    require_ty(env, inst.ptr, uvir.ty_ref(), "STORE_PTR_TYPE", func, block)
+  else if op == "LoadDyn" then
+    ok(put_ty(env, inst.dst, uvir.ty_any()))
+  else if op == "MakeClosure" then
+    ok(put_ty(env, inst.dst, uvir.ty_fn()))
+  else if op == "CallDirect" then
+    let n_args = list.len(inst.args) in
+    let arity_ok = if rec.has(func_arities, inst.callee)
+      then rec.get(func_arities, inst.callee) == n_args
+      else true in
+    if !arity_ok then
+      err("CALL_ARITY_MISMATCH", { func: func, block: block,
+            callee: inst.callee,
+            expected: rec.get(func_arities, inst.callee), got: n_args })
+    else
+      let args_ok = list.fold(inst.args, ok(env), fn(state, r) {
+        if state.t == "err" then state
+        else if !has_reg(state.v, r)
+          then err("UNDEF_REG", { reg: r, func: func, block: block, in_call: true })
+          else ok(state.v)
+      }) in
+      if args_ok.t == "err" then args_ok
+      else
+        // Use callee return type if available, default Int for FARD
+        ok(put_ty(args_ok.v, inst.dst, uvir.ty_int()))
+  else if op == "CallIndirect" then
+    ok(put_ty(env, inst.dst, uvir.ty_any()))
+  else if op == "CallForeign" then
+    ok(put_ty(env, inst.dst, uvir.ty_any()))
+  else if op == "TypeOf" then
+    ok(put_ty(env, inst.dst, uvir.ty_str()))
+  else if op == "Coerce" then
+    ok(put_ty(env, inst.dst, inst.to_ty))
+  else if op == "IsTruthy" then
+    ok(put_ty(env, inst.dst, uvir.ty_bool()))
+  else if op == "Phi" then
+    // Phi incoming regs are from predecessor blocks - just define the dst
+    // Full predecessor env checking requires a two-pass approach
+    ok(put_ty(env, inst.dst, uvir.ty_int()))
+  else if op == "ImmBool" then ok(put_ty(env, inst.dst, uvir.ty_bool()))
+  else ok(env)
+}
+
+fn verify_term(term, env, labels, func, block) {
+  let op = term.op in
+  if op == "Ret" then
+    require_defined(env, term.src, func, block)
+  else if op == "RetVoid" then ok(env)
+  else if op == "Br" then
+    if !rec.has(labels, str.from(term.to))
+      then err("BR_TARGET_MISSING", { func: func, block: block, target: term.to })
+      else ok(env)
+  else if op == "BrCond" then
+    let c = require_ty(env, term.cond, uvir.ty_bool(), "BRCOND_COND_TYPE", func, block) in
+    if c.t == "err" then c else
+    if !rec.has(labels, str.from(term.then_blk))
+      then err("BRCOND_THEN_MISSING", { func: func, block: block, target: term.then_blk })
+    else if !rec.has(labels, str.from(term.else_blk))
+      then err("BRCOND_ELSE_MISSING", { func: func, block: block, target: term.else_blk })
+    else ok(c.v)
+  else if op == "Unreachable" then ok(env)
+  else ok(env)
+}
+
+fn verify_insts(insts, env, func, block, func_arities) {
+  list.fold(insts, ok(env), fn(state, inst) {
+    if state.t == "err" then state
+    else verify_inst(inst, state.v, func, block, func_arities)
+  })
+}
+
+fn build_label_record(blocks) {
+  list.fold(blocks, {}, fn(acc, b) { rec.set(acc, str.from(b.label), true) })
+}
+
+fn verify_func(f, func_arities) {
+  if list.len(f.blocks) == 0 then
+    err("FUNC_HAS_NO_BLOCKS", { func: f.name })
+  else
+    let labels = build_label_record(f.blocks) in
+    let init_env = if rec.has(f, "params")
+      then list.fold(f.params, {}, fn(env, p) { put_ty(env, p.reg, p.ty) })
+      else {} in
+    // Dataflow: each block's entry env = intersection of predecessor outputs
+    let pred_map = list.fold(f.blocks, {}, fn(acc, b) {
+      let succs = if b.term.op == "Br" then [b.term.to]
+        else if b.term.op == "BrCond" then [b.term.then_blk, b.term.else_blk]
+        else [] in
+      list.fold(succs, acc, fn(a, succ) {
+        let key = str.from(succ) in
+        let existing = if rec.has(a, key) then rec.get(a, key) else [] in
+        rec.set(a, key, list.append(existing, b.label))
+      })
+    }) in
+    let result = list.fold(f.blocks, { err: null, block_envs: {} }, fn(acc, b) {
+      if acc.err != null then acc else
+      let pred_labels = if rec.has(pred_map, str.from(b.label))
+        then rec.get(pred_map, str.from(b.label)) else [] in
+      let entry_env = if list.len(pred_labels) == 0 then init_env
+        else list.fold(pred_labels, null, fn(merged, pl) {
+          let pk = str.from(pl) in
+          if !rec.has(acc.block_envs, pk) then merged
+          else
+            let pe = rec.get(acc.block_envs, pk) in
+            if merged == null then pe
+            else
+              let keys = rec.keys(merged) in
+              list.fold(keys, {}, fn(a, k) {
+                if rec.has(pe, k) && rec.get(merged, k) == rec.get(pe, k)
+                  then rec.set(a, k, rec.get(merged, k))
+                  else a
+              })
+        }) ?? init_env in
+      let inst_state = verify_insts(b.insts, entry_env, f.name, b.label, func_arities) in
+      if inst_state.t == "err" then { err: inst_state, block_envs: acc.block_envs }
+      else
+        let term_state = verify_term(b.term, inst_state.v, labels, f.name, b.label) in
+        if term_state.t == "err" then { err: term_state, block_envs: acc.block_envs }
+        else { err: null, block_envs: rec.set(acc.block_envs, str.from(b.label), inst_state.v) }
+    }) in
+    if result.err != null then result.err else ok(result.block_envs)
+}
+
+fn verify_module(umod) {
+  let dup = list.fold(umod.funcs, { seen: {}, dup: null }, fn(acc, f) {
+    if acc.dup != null then acc
+    else if rec.has(acc.seen, f.name) then { seen: acc.seen, dup: f.name }
+    else { seen: rec.set(acc.seen, f.name, true), dup: null }
+  }) in
+  if dup.dup != null then err("DUPLICATE_FUNC", { name: dup.dup })
+  else
+    let func_arities = list.fold(umod.funcs, {}, fn(acc, f) {
+      let arity = if rec.has(f, "params") then list.len(f.params) else 0 in
+      rec.set(acc, f.name, arity)
+    }) in
+    list.fold(umod.funcs, ok(null), fn(state, f) {
+      if state.t == "err" then state else verify_func(f, func_arities)
+    })
+}
+
+export { verify_module, verify_func, ok, err }
