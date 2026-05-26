@@ -1,0 +1,245 @@
+/// ocir_opt — SSA optimization passes on OCIR
+/// Passes (in order):
+///   1. copy_prop  — CopyI64(dst, src) -> replace all uses of dst with src
+///   2. const_prop — ImmI64(dst, v) -> replace all uses of dst with v in instrs
+///   3. dce        — remove instructions whose dst is never used
+///   4. const_fold — AddI64/SubI64/MulI64 with two ImmI64 operands -> ImmI64
+
+import("std/list") as list
+import("std/rec")  as rec
+import("std/str")  as str
+
+// ── Register substitution map ─────────────────────────────────────────────────
+
+fn subst_reg(r, smap) {
+  let k = str.from(r) in
+  if rec.has(smap, k) then rec.get(smap, k) else r
+}
+
+fn subst_inst(inst, smap) {
+  let op = inst.op in
+  if op == "ImmI64" || op == "ImmBool" || op == "ConstStr" then inst
+  else if op == "CopyI64" then
+    { op: op, dst: inst.dst, src: subst_reg(inst.src, smap) }
+  else if op == "AddI64" || op == "SubI64" || op == "MulI64" then
+    { op: op, dst: inst.dst, lhs: subst_reg(inst.lhs, smap), rhs: subst_reg(inst.rhs, smap) }
+  else if op == "CmpI64" then
+    { op: op, dst: inst.dst, lhs: subst_reg(inst.lhs, smap), rhs: subst_reg(inst.rhs, smap), cmp: inst.cmp }
+  else if op == "CallI64" then
+    { op: op, dst: inst.dst, callee: inst.callee,
+      args: list.map(inst.args, fn(a) { subst_reg(a, smap) }) }
+  else if op == "CallIndirect" then
+    { op: op, dst: inst.dst, closure_reg: subst_reg(inst.closure_reg, smap),
+      args: list.map(inst.args, fn(a) { subst_reg(a, smap) }) }
+  else if op == "StoreHeap" then
+    { op: op, ptr: subst_reg(inst.ptr, smap), offset: inst.offset, src: subst_reg(inst.src, smap) }
+  else if op == "LoadHeapDyn" then
+    { op: op, dst: inst.dst, ptr: subst_reg(inst.ptr, smap), idx: subst_reg(inst.idx, smap) }
+  else if op == "LoadHeapStaticIdx" then
+    { op: op, dst: inst.dst, ptr: subst_reg(inst.ptr, smap), field_idx: inst.field_idx }
+  else if op == "AllocHeap" then inst
+  else if op == "MakeClosure" then
+    { op: op, dst: inst.dst, ptr_reg: inst.ptr_reg, fn_name: inst.fn_name,
+      captures: list.map(inst.captures, fn(c) { subst_reg(c, smap) }) }
+  else inst
+}
+
+fn subst_term(term, smap) {
+  let op = term.op in
+  if op == "RetI64" then { op: op, src: subst_reg(term.src, smap) }
+  else if op == "BrCond" then
+    { op: op, cond: subst_reg(term.cond, smap), then_blk: term.then_blk, else_blk: term.else_blk }
+  else term
+}
+
+// ── Pass 1: Copy propagation ──────────────────────────────────────────────────
+// CopyI64(dst, src) -> add dst->src to smap, remove the copy
+
+fn copy_prop_block(block, cross_block_uses) {
+  // Only eliminate copies NOT used across blocks
+  let result = list.fold(block.insts, { insts: [], smap: {} }, fn(acc, inst) {
+    if inst.op == "CopyI64" then
+      // Only elim if dst not used in other blocks
+      if !rec.has(cross_block_uses, str.from(inst.dst)) then
+        let resolved = subst_reg(inst.src, acc.smap) in
+        { insts: acc.insts, smap: rec.set(acc.smap, str.from(inst.dst), resolved) }
+      else
+        let new_inst = subst_inst(inst, acc.smap) in
+        { insts: list.append(acc.insts, new_inst), smap: acc.smap }
+    else
+      let new_inst = subst_inst(inst, acc.smap) in
+      { insts: list.append(acc.insts, new_inst), smap: acc.smap }
+  }) in
+  let new_term = subst_term(block.term, result.smap) in
+  { label: block.label, insts: result.insts, term: new_term }
+}
+
+fn collect_cross_block_defs(blocks) {
+  // Find regs defined in one block and used in another
+  // Step 1: collect defs per block
+  let block_defs = list.map(blocks, fn(b) {
+    list.fold(b.insts, {}, fn(acc, inst) {
+      if rec.has(inst, "dst") then rec.set(acc, str.from(inst.dst), b.label)
+      else acc
+    })
+  }) in
+  // Step 2: collect all uses per block
+  let all_defs = list.fold(block_defs, {}, fn(acc, bd) {
+    list.fold(rec.keys(bd), acc, fn(a, k) { rec.set(a, k, rec.get(bd, k)) })
+  }) in
+  // Step 3: for each use in a block, check if def is from different block
+  list.fold(blocks, {}, fn(cross, b) {
+    let uses = collect_uses_term(b.term,
+      list.fold(b.insts, {}, fn(acc, inst) { collect_uses_inst(inst, acc) })) in
+    list.fold(rec.keys(uses), cross, fn(acc, k) {
+      if rec.has(all_defs, k) && rec.get(all_defs, k) != b.label
+        then rec.set(acc, k, true)
+        else acc
+    })
+  })
+}
+
+fn copy_prop_func(f) {
+  let cross = collect_cross_block_defs(f.blocks) in
+  let new_blocks = list.map(f.blocks, fn(b) { copy_prop_block(b, cross) }) in
+  { name: f.name, params: f.params, blocks: new_blocks }
+}
+
+// ── Pass 2: Constant propagation ─────────────────────────────────────────────
+// ImmI64(dst, v) -> replace uses of dst with ImmI64 in subsequent instrs
+// Implemented as: build val_map: reg -> ImmI64 value, then substitute
+
+fn const_prop_block(block) {
+  let result = list.fold(block.insts, { insts: [], vmap: {} }, fn(acc, inst) {
+    let new_inst = if inst.op == "ImmI64" then inst
+      else subst_inst(inst, {}) in  // subst_reg won't help here, values not regs
+    // Track ImmI64 definitions
+    let vmap2 = if inst.op == "ImmI64"
+      then rec.set(acc.vmap, str.from(inst.dst), inst.val)
+      else acc.vmap in
+    { insts: list.append(acc.insts, new_inst), vmap: vmap2 }
+  }) in
+  { label: block.label, insts: result.insts, term: block.term }
+}
+
+// ── Pass 3: Dead code elimination ─────────────────────────────────────────────
+// Remove instructions whose dst is never referenced
+
+fn collect_uses_inst(inst, uses) {
+  let op = inst.op in
+  let uses = if op == "CopyI64" then rec.set(uses, str.from(inst.src), true) else uses in
+  let uses = if op == "AddI64" || op == "SubI64" || op == "MulI64"
+    then rec.set(rec.set(uses, str.from(inst.lhs), true), str.from(inst.rhs), true)
+    else uses in
+  let uses = if op == "CmpI64"
+    then rec.set(rec.set(uses, str.from(inst.lhs), true), str.from(inst.rhs), true)
+    else uses in
+  let uses = if op == "CallI64"
+    then list.fold(inst.args, uses, fn(acc, a) { rec.set(acc, str.from(a), true) })
+    else uses in
+  let uses = if op == "CallIndirect"
+    then list.fold(inst.args, rec.set(uses, str.from(inst.closure_reg), true),
+      fn(acc, a) { rec.set(acc, str.from(a), true) })
+    else uses in
+  let uses = if op == "StoreHeap"
+    then rec.set(rec.set(uses, str.from(inst.ptr), true), str.from(inst.src), true)
+    else uses in
+  let uses = if op == "LoadHeapDyn"
+    then rec.set(rec.set(uses, str.from(inst.ptr), true), str.from(inst.idx), true)
+    else uses in
+  let uses = if op == "LoadHeapStaticIdx"
+    then rec.set(uses, str.from(inst.ptr), true)
+    else uses in
+  let uses = if op == "MakeClosure"
+    then list.fold(inst.captures, uses, fn(acc, c) { rec.set(acc, str.from(c), true) })
+    else uses in
+  uses
+}
+
+fn collect_uses_term(term, uses) {
+  let op = term.op in
+  if op == "RetI64" then rec.set(uses, str.from(term.src), true)
+  else if op == "BrCond" then rec.set(uses, str.from(term.cond), true)
+  else uses
+}
+
+fn collect_uses_func(f) {
+  let uses = list.fold(f.blocks, {}, fn(acc, b) {
+    let acc = list.fold(b.insts, acc, fn(a, inst) { collect_uses_inst(inst, a) }) in
+    collect_uses_term(b.term, acc)
+  }) in
+  uses
+}
+
+fn has_side_effects(inst) {
+  let op = inst.op in
+  op == "CallI64" || op == "CallIndirect" || op == "StoreHeap" || op == "MakeClosure"
+}
+
+fn dce_block(block, uses) {
+  let new_insts = list.filter(block.insts, fn(inst) {
+    if !rec.has(inst, "dst") then true  // no dst = side effect only
+    else if has_side_effects(inst) then true
+    else rec.has(uses, str.from(inst.dst))
+  }) in
+  { label: block.label, insts: new_insts, term: block.term }
+}
+
+fn dce_func(f) {
+  let uses = collect_uses_func(f) in
+  let new_blocks = list.map(f.blocks, fn(b) { dce_block(b, uses) }) in
+  { name: f.name, params: f.params, blocks: new_blocks }
+}
+
+// ── Pass 4: Constant folding ──────────────────────────────────────────────────
+// AddI64/SubI64/MulI64 where both operands are known constants
+
+fn const_fold_block(block) {
+  let result = list.fold(block.insts, { insts: [], vmap: {} }, fn(acc, inst) {
+    let vmap2 = if inst.op == "ImmI64"
+      then rec.set(acc.vmap, str.from(inst.dst), inst.val)
+      else acc.vmap in
+    let new_inst =
+      // CopyI64(dst, src) where src is known constant -> ImmI64(dst, val)
+      if inst.op == "CopyI64" && rec.has(acc.vmap, str.from(inst.src)) then
+        { op: "ImmI64", dst: inst.dst, val: rec.get(acc.vmap, str.from(inst.src)) }
+      // Arithmetic with two known constants -> fold
+      else if (inst.op == "AddI64" || inst.op == "SubI64" || inst.op == "MulI64") &&
+         rec.has(acc.vmap, str.from(inst.lhs)) &&
+         rec.has(acc.vmap, str.from(inst.rhs)) then
+        let lv = rec.get(acc.vmap, str.from(inst.lhs)) in
+        let rv = rec.get(acc.vmap, str.from(inst.rhs)) in
+        let fv = if inst.op == "AddI64" then lv + rv
+          else if inst.op == "SubI64" then lv - rv
+          else lv * rv in
+        { op: "ImmI64", dst: inst.dst, val: fv }
+      else inst in
+    let vmap3 = if new_inst.op == "ImmI64"
+      then rec.set(vmap2, str.from(new_inst.dst), new_inst.val)
+      else vmap2 in
+    { insts: list.append(acc.insts, new_inst), vmap: vmap3 }
+  }) in
+  { label: block.label, insts: result.insts, term: block.term }
+}
+
+fn const_fold_func(f) {
+  { name: f.name, params: f.params,
+    blocks: list.map(f.blocks, fn(b) { const_fold_block(b) }) }
+}
+
+// ── Combined optimization pipeline ───────────────────────────────────────────
+
+fn opt_func(f) {
+  let f1 = copy_prop_func(f) in
+  let f2 = const_fold_func(f1) in
+  let f3 = dce_func(f2) in
+  // Second pass to clean up after DCE
+  let f4 = copy_prop_func(f3) in
+  dce_func(f4)
+}
+
+fn opt_module(m) {
+  { entry: m.entry, funcs: list.map(m.funcs, fn(f) { opt_func(f) }) }
+}
+
+export { opt_module, opt_func, copy_prop_func, dce_func, const_fold_func }
