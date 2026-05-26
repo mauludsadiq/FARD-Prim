@@ -118,6 +118,9 @@ No linker. No C driver. No libSystem. No dyld.
            Linux regression 10/10: add, max, fact, fib, list[0], list[2],
              rec.a, rec.b, closure, str_char — full parity with macOS on Ubuntu 22.04 via Docker
            str_char fixed: str.char_code() for integer code point
+    [done]  ARM64 backend: ELF Linux ARM64 (Docker --platform linux/arm64)
+            add=42, max=42, fact=120, fib=55 via Docker ubuntu:22.04
+            macOS ARM64: blocked by AppleSystemPolicy on macOS 15
    [next]  stdlib native -> fard_eval native -> delete Rust eval loop
     [done]  JavaScript subset frontend -> UVIR -> native x86-64
             js_to_uvir.fard: Acorn AST JSON -> UVIR
