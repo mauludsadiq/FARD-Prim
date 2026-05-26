@@ -100,8 +100,12 @@ No linker. No C driver. No libSystem. No dyld.
             uvir_to_ocir.fard: phi elimination via predecessor copies
             Verified: add=42, max=42, fact=120, fib=55, closure=42
             Example: fn max -> phi([%0 from then], [%1 from else])
-    [next]  UVIR verifier — type-check UVIR before lowering to OCIR
+    [done]  UVIR verifier — type-check UVIR before lowering to OCIR
+            UNDEF_REG, INT_ARITH_TYPE, CALL_ARITY_MISMATCH, BRCOND_COND_TYPE
+            BR_TARGET_MISSING, DUPLICATE_FUNC, phi defines dst as Int
+            dataflow env propagation + predecessor intersection
     [next]  Python subset frontend -> UVIR
+    [next]  stdlib native -> fard_eval native -> delete Rust eval loop
     [next]  UVIR — Universal Verified IR
             language-neutral: functions, closures, heap objects, effects,
             direct/indirect calls, phi/join values, module boundaries
