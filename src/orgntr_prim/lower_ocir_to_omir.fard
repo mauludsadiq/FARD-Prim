@@ -253,7 +253,7 @@ fn lower_inst(layout, inst) {
       { op: "StoreHeap", ptr: ptr_slot, offset: 0, src: len_slot }
     ] in
     let char_ops = list.flatten(list.build(n, fn(i) {
-      let ch = str.char_at(s, i) in
+      let ch = str.char_code(str.char_at(s, i)) in
       let cs = list.get(char_slots, i) in
       [
         omir.mov_imm64(omir.reg("rax"), ch),
