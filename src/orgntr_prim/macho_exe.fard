@@ -226,7 +226,6 @@ fn exe_strtab_indices(func_names) {
 // fard_main follows entry stub in text
 
 fn entry_stub_text(fard_main_offset) {
-  // fard_main_offset = byte offset of _fard_main within text section
   // call rel32 = fard_main_offset - 9 (next_ip after call is at byte 9)
   let rel = fard_main_offset - 9 in
   list.concat([
