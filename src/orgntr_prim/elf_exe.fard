@@ -88,20 +88,37 @@ fn pt_load(flags, offset, vaddr, filesz, memsz, align) {
 // Linux exit syscall = 60 (vs macOS 0x2000001)
 
 fn entry_stub_linux(fn_offset) {
-  let rel = fn_offset - 9 in
+  // mmap(0, 64MB, PROT_RW, MAP_PRIVATE|MAP_ANON, -1, 0) -> rbx=heap bump ptr
+  // rax=9, rdi=0, rsi=64MB, rdx=3, r10=34, r8=-1, r9=0
+  // call is at byte 53, rel = fn_offset - 58
+  let rel = fn_offset - 70 in
   list.concat([
-    [85, 72, 137, 229],           // push rbp; mov rbp, rsp
-    [232], le32(rel),             // call entry_func
-    [72, 137, 199],               // mov rdi, rax  (exit code)
-    [72, 184, 60, 0, 0, 0, 0, 0, 0, 0],  // mov rax, 60 (sys_exit)
-    [15, 5]                       // syscall
+    [72, 49, 255],                              // xor rdi,rdi (3)
+    [72, 190], le64(67108864),                  // mov rsi,64MB (10)
+    [72, 186, 3, 0, 0, 0, 0, 0, 0, 0],          // mov rdx,3 (10)
+    [73, 186, 34, 0, 0, 0, 0, 0, 0, 0],         // mov r10,34 (10)
+    [73, 184, 255, 255, 255, 255, 255, 255, 255, 255], // mov r8,-1 (10)
+    [77, 49, 201],                              // xor r9,r9 (3)
+    [72, 184, 9, 0, 0, 0, 0, 0, 0, 0],          // mov rax,9 (10)
+    [15, 5],                                    // syscall (2) -> rax=heap
+    [72, 137, 195],                             // mov rbx,rax (3) save bump ptr
+    [85, 72, 137, 229],                         // push rbp; mov rbp,rsp (4)
+    [232], le32(rel),                           // call fn (5)
+    [72, 137, 199],                             // mov rdi,rax (3)
+    [72, 184, 60, 0, 0, 0, 0, 0, 0, 0],         // mov rax,60 (10)
+    [15, 5]                                     // syscall (2)
   ])
 }
 
-// ── Alloc stub ────────────────────────────────────────────────────────────────
-// Same as macho — bump allocator using heap_bump_ptr_vmaddr
-
-fn alloc_stub_size() { 34 }
+// fard_alloc(rdi=size) -> rax=old_bump; rbx=new_bump
+// mov rax,rbx  (3)
+// add rbx,rdi  (3)
+// ret          (1)
+// = 7 bytes
+fn alloc_stub_x86() {
+  [[72,137,216], [72,1,251], [195]]
+}
+fn alloc_stub_size() { 7 }
 
 fn find_func_offset(funcs, name) {
   let found = list.find(funcs, fn(f) { f.name == name }) in
@@ -109,8 +126,8 @@ fn find_func_offset(funcs, name) {
 }
 
 fn build_text(linked, entry_func) {
-  let stub_size = 24 in
-  let alloc_stub = enc.fard_alloc_stub(heap_bump_ptr_vmaddr()) in
+  let stub_size = 85 in
+  let alloc_stub = list.flatten(alloc_stub_x86()) in
   let fn_offset = stub_size + alloc_stub_size() + find_func_offset(linked.funcs, entry_func) in
   let entry_stub = entry_stub_linux(fn_offset) in
   list.concat([entry_stub, alloc_stub, linked.text])
@@ -121,7 +138,7 @@ fn build_text(linked, entry_func) {
 // rest: zeroed heap space
 
 fn build_data() {
-  list.concat([le64(heap_base_vmaddr()), zeros(data_size() - 8)])
+  zeros(data_size())
 }
 
 // ── Padding ───────────────────────────────────────────────────────────────────

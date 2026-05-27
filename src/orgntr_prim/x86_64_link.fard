@@ -135,11 +135,51 @@ fn link_module_with_vmaddr(encoded_module, base_vmaddr) {
   { entry: encoded_module.entry, funcs: linked_funcs, text: text, sym_table: sym_table, unresolved_relocs: unresolved }
 }
 
+fn elf_entry_stub_size() { 85 }
+fn elf_alloc_stub_size()  { 7 }
+
+fn resolve_call_patch_elf(text, base, patch, sym_table, base_vmaddr) {
+  if rec.has(sym_table, patch.symbol) then
+    if patch.kind == "AbsReloc" then
+      let target_offset = rec.get(sym_table, patch.symbol) in
+      let target_vmaddr = base_vmaddr + elf_entry_stub_size() + elf_alloc_stub_size() + target_offset in
+      { resolved: true, text: fix.replace8(text, patch.at, target_vmaddr) }
+    else
+      let target_addr_offset = rec.get(sym_table, patch.symbol) in
+      let target_vmaddr = base_vmaddr + elf_entry_stub_size() + elf_alloc_stub_size() + target_addr_offset in
+      let call_next_ip_vmaddr = base_vmaddr + elf_entry_stub_size() + elf_alloc_stub_size() + base + patch.next_ip in
+      let rel = target_vmaddr - call_next_ip_vmaddr in
+      { resolved: true, text: fix.replace4(text, patch.at, rel) }
+  else
+    { resolved: false, text: text }
+}
+
+fn link_module_elf_x86(encoded_module, base_vmaddr) {
+  let laid_out = layout_funcs(encoded_module.funcs) in
+  let sym_table_base = build_symbol_table(laid_out) in
+  let sym_table = rec.set(sym_table_base, "fard_alloc", 0 - elf_alloc_stub_size()) in
+  let linked_funcs = list.map(laid_out, fn(entry) {
+    let base = entry.base in
+    let f = entry.func in
+    let call_relocs = list.filter(f.relocs, fn(p) { p.kind == "CallReloc" || p.kind == "AbsReloc" }) in
+    let result = list.fold(call_relocs, { text: f.text, unresolved: [] }, fn(acc, patch) {
+      let r = resolve_call_patch_elf(acc.text, base, patch, sym_table, base_vmaddr) in
+      if r.resolved
+        then { text: r.text, unresolved: acc.unresolved }
+        else { text: acc.text, unresolved: list.append(acc.unresolved, patch) }
+    }) in
+    { name: f.name, base: base, text: result.text, relocs: result.unresolved }
+  }) in
+  let text = list.flatten(list.map(linked_funcs, fn(f) { f.text })) in
+  { funcs: linked_funcs, text: text, unresolved_relocs: [] }
+}
+
 export {
   layout_funcs,
   build_symbol_table,
   resolve_call_patch,
   resolve_func_relocs,
   link_module_with_vmaddr,
+  link_module_elf_x86,
   link_module
 }
