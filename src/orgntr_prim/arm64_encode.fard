@@ -547,29 +547,21 @@ fn fard_alloc_stub_arm64(bump_ptr_vmaddr) {
 
 // Correct alloc stub
 fn fard_alloc_stub(bump_ptr_vmaddr) {
-  let w0 = bits.band(bump_ptr_vmaddr, 65535) in
-  let w1 = bits.band(bits.bshr(bump_ptr_vmaddr, 16), 65535) in
-  let w2 = bits.band(bits.bshr(bump_ptr_vmaddr, 32), 65535) in
-  let w3 = bits.band(bits.bshr(bump_ptr_vmaddr, 48), 65535) in
+  // x19 = bump ptr (callee-saved, set by entry stub via mmap)
+  // fard_alloc(x0=size) -> x0=old_bump, x19 advances
   list.concat([
-    // x0 = size (argument)
-    // x9 = bump_ptr address
-    movz(x9(), w0),
-    if w1 != 0 then movk(x9(), w1, 16) else [],
-    if w2 != 0 then movk(x9(), w2, 32) else [],
-    if w3 != 0 then movk(x9(), w3, 48) else [],
-    ldr_imm(x11(), x9(), 0),    // x11 = old bump ptr (return value)
-    add_reg(x10(), x11(), x0()), // x10 = old_ptr + size
-    str_imm(x10(), x9(), 0),    // *bump_ptr = new ptr
-    mov_reg(x0(), x11()),        // x0 = old ptr (return)
+    mov_reg(x9(), 19),        // mov x9, x19
+    add_reg(19, 19, x0()),    // add x19, x19, x0
+    mov_reg(x0(), x9()),      // mov x0, x9
     ret_inst()
   ])
 }
 
-fn alloc_stub_size() { 7 * 4 }   // 7 instructions * 4 bytes
+fn alloc_stub_size() { 4 * 4 }   // 4 instructions: mov x9,x19; add x19,x19,x0; mov x0,x9; ret
 
 export {
   encode_func, encode_inst, fard_alloc_stub, alloc_stub_size,
+  movk, add_reg,
   prologue, epilogue, stp_fp_lr, mov_fp_sp, movz, mov_reg, mov_imm64, ldr_imm, str_imm, ldur_fp, stur_fp,
   bl_placeholder, b_placeholder, bne_placeholder, blr,
   le32, le64, ret_inst, nop, zeros,

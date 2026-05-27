@@ -9,7 +9,7 @@ import("../orgntr_prim/arm64_fixups") as fix
 import("../orgntr_prim/arm64_encode") as enc
 
 fn text_vmaddr()      { 4294971392 }  // placeholder, overridden by link_with_vmaddr
-fn entry_stub_size()  { 20 }          // bytes: stp+mov+bl+mov+mov+svc = 6 insts * 4
+fn entry_stub_size()  { 60 }          // bytes: mmap(9)+mov_x19+stp+mov+bl+movz+svc = 15 insts * 4
 fn alloc_stub_size()  { enc.alloc_stub_size() }
 
 fn layout_funcs(encoded_funcs) {
