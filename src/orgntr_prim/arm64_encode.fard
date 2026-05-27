@@ -475,10 +475,12 @@ fn encode_inst(inst, frame_size) {
       stur_fp(x9(), slot_of(inst.dst))
     ])
   else if op == "StoreFnPtr" then
-    // Store function pointer into closure slot 0
-    // Uses AbsReloc: mov x9, #fn_addr (patched); str x9, [closure_ptr]
+    // Always emit 4 instructions (16 bytes) for fn_ptr placeholder + ldur + str = 24 bytes
     list.concat([
-      mov_imm64(x9(), 0),    // placeholder, patched by linker as AbsReloc
+      movz(x9(), 0),         // placeholder word 0
+      movk(x9(), 0, 16),     // placeholder word 1
+      movk(x9(), 0, 32),     // placeholder word 2
+      movk(x9(), 0, 48),     // placeholder word 3
       ldur_fp(x10(), slot_of(inst.ptr)),
       str_imm(x9(), x10(), 0)
     ])

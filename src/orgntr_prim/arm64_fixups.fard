@@ -96,9 +96,10 @@ fn scan_labels_and_patches(insts) {
         patches: list.append(acc.patches,
           { kind: "BL", at: acc.pc, next_ip: acc.pc + 4, symbol: inst.name }) }
     else if op == "StoreFnPtr" then
-      { pc: acc.pc + 16, labels: acc.labels,
+      // mov_imm64(x9,0)=16 + ldur_fp(x10,slot)=4 + str_imm(x9,x10,0)=4 = 24 bytes
+      { pc: acc.pc + 24, labels: acc.labels,
         patches: list.append(acc.patches,
-          { kind: "AbsReloc64", at: acc.pc, symbol: inst.fn_name, next_ip: acc.pc + 16 }) }
+          { kind: "AbsReloc64", at: acc.pc, symbol: inst.fn_name, next_ip: acc.pc + 24 }) }
     else
       let encoded = enc.encode_inst(inst, 256) in
       let sz = list.len(encoded) in
