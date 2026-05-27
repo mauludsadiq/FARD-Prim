@@ -73,7 +73,7 @@ No external linker. No C runtime. No libSystem.
 
 ## Source
 
-6,674 lines of FARD across 31 files in src/orgntr_prim/.
+6,659 lines of FARD across 31 files in src/orgntr_prim/.
 
    arm64_encode.fard     ARM64 instruction encoding (560 lines)
    elf_arm64.fard        ELF64 AArch64 emitter
@@ -87,7 +87,7 @@ No external linker. No C runtime. No libSystem.
 
 ## Next
 
-   growable heap (mmap) -> prerequisite for self-hosting
+   growable heap (mmap) -> done for Linux ARM64; x86-64 ELF next
    stdlib native (list.map, str.concat, rec.get)
    fardlex + fardparse + fard_eval compile natively
    delete Rust eval loop
