@@ -73,7 +73,7 @@ No external linker. No C runtime. No libSystem.
 
 ## Source
 
-6,839 lines of FARD across 32 files in src/orgntr_prim/.
+6,892 lines of FARD across 32 files in src/orgntr_prim/.
 
    arm64_encode.fard     ARM64 instruction encoding (560 lines)
    elf_arm64.fard        ELF64 AArch64 emitter
