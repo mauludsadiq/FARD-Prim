@@ -1,0 +1,108 @@
+/// omir_tco — tail call optimization pass on OMIR
+/// Detects self-tail-calls and replaces them with arg stores + jump to entry.
+///
+/// Pattern to detect in instruction list:
+///   LoadArg(arg_idx=0, slot=S0)
+///   LoadArg(arg_idx=1, slot=S1)  (0 or more)
+///   CallReloc(name=current_fn)
+///   MovRegToStack(...)
+///   CopyI64(...)
+///   Jmp(target=epilogue)
+///   ...epilogue...
+///
+/// Replace with:
+///   MovStackToReg(src=S0) -> x0/rdi
+///   MovStackToReg(src=S1) -> x1/rsi  (for each arg)
+///   StoreParam(arg_idx=0, slot=S0)   (write new args to param slots)
+///   Jmp(target=entry_label)
+
+import("std/list") as list
+import("std/rec")  as rec
+
+fn entry_label(insts) {
+  // First Label instruction after Prologue is the entry
+  let found = list.find(insts, fn(i) { i.op == "Label" }) in
+  if rec.has(found, "some") then found.some else { op: "Label", target: { k: "label", id: 0 } }
+}
+
+fn param_slots(insts) {
+  // Collect MovRegToStack instructions at start (param stores)
+  list.filter(insts, fn(i) {
+    i.op == "MovRegToStack" && rec.has(i, "src") && i.src.k == "reg" &&
+    (i.src.name == "rdi" || i.src.name == "rsi" || i.src.name == "rdx" ||
+     i.src.name == "rcx" || i.src.name == "r8"  || i.src.name == "r9")
+  })
+}
+
+fn arg_idx_for_reg(name) {
+  if name == "rdi" then 0
+  else if name == "rsi" then 1
+  else if name == "rdx" then 2
+  else if name == "rcx" then 3
+  else if name == "r8"  then 4
+  else 5
+}
+
+fn is_self_tail_call(insts, i, fn_name) {
+  // Check if inst at i is CallReloc to fn_name
+  // and is followed by the tail pattern
+  if i >= list.len(insts) then false
+  else
+    let inst = list.get(insts, i) in
+    inst.op == "CallReloc" && inst.name == fn_name
+}
+
+fn collect_loadargs_before(insts, call_idx) {
+  // Collect LoadArg instructions immediately before call_idx
+  list.filter(
+    list.build(call_idx, fn(i) { list.get(insts, i) }),
+    fn(i) { i.op == "LoadArg" }
+  )
+}
+
+fn transform_func(f) {
+  let fn_name = f.name in
+  let insts = f.insts in
+  let n = list.len(insts) in
+  let entry = entry_label(insts) in
+  let params = param_slots(insts) in
+
+  // Find all self-tail-calls
+  let result = list.fold(
+    list.build(n, fn(i) { i }),
+    { out: [], skip_until: 0 },
+    fn(acc, i) {
+      if i < acc.skip_until then acc
+      else if is_self_tail_call(insts, i, fn_name) then
+        // Found tail call - collect args and build jump
+        let load_args = collect_loadargs_before(insts, i) in
+        // Build: store each arg into its original param slot
+        let param_stores = list.map(load_args, fn(la) {
+          // Find param slot for this arg index
+          let matching = list.find(params, fn(p) {
+            arg_idx_for_reg(p.src.name) == la.arg_idx
+          }) in
+          if rec.has(matching, "some")
+            then { op: "MovStackToStack",
+                   src: { k: "stack", slot: la.slot },
+                   dst: matching.some.dst }
+            else { op: "Nop" }
+        }) in
+        let jmp = { op: "Jmp", target: entry.target } in
+        // Skip: CallReloc + MovRegToStack + CopyI64 + Jmp = 4 insts
+        { out: list.concat([acc.out, param_stores, [jmp]]),
+          skip_until: i + 4 }
+      else
+        // Keep epilogue/ret but remove if already jumped
+        { out: list.append(acc.out, list.get(insts, i)),
+          skip_until: acc.skip_until }
+    }
+  ) in
+  { name: f.name, frame_size: f.frame_size, insts: result.out }
+}
+
+fn tco_module(m) {
+  { funcs: list.map(m.funcs, fn(f) { transform_func(f) }) }
+}
+
+export { tco_module }

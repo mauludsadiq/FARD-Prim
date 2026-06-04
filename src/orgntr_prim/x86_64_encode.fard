@@ -329,6 +329,12 @@ fn encode_inst(inst) {
       [72, 139, 0],                 // mov rax, [rax]  (load fn_ptr)
       [255, 208]                    // call rax
     ])
+  else if inst.op == "MovStackToStack" then
+    // mov rax,[rbp+src]; mov [rbp+dst],rax
+    list.concat([
+      mov_stack_to_reg({ slot: inst.src.slot }, "rax"),
+      mov_reg_to_stack(inst.dst, "rax")
+    ])
   else if inst.op == "CopyI64" then
     let rax = { k: "reg", name: "rax" } in
     list.concat([

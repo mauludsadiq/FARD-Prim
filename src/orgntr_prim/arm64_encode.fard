@@ -395,6 +395,11 @@ fn encode_inst(inst, frame_size) {
     ])
   else if op == "Ret" then []
   else if op == "Label" then []
+  else if op == "MovStackToStack" then
+    list.concat([
+      ldur_fp(x9(), slot_of(inst.src)),
+      stur_fp(x9(), slot_of(inst.dst))
+    ])
   else if op == "CopyI64" then
     list.concat([
       ldur_fp(x9(), slot_of(inst.src)),
