@@ -47,12 +47,10 @@ fn arg_idx_for_reg(name) {
 }
 
 fn is_self_tail_call(insts, i, fn_name) {
-  // Check if inst at i is CallReloc to fn_name
-  // and is followed by the tail pattern
   if i >= list.len(insts) then false
   else
     let inst = list.get(insts, i) in
-    inst.op == "CallReloc" && inst.name == fn_name
+    inst.op == "CallReloc" && rec.has(inst, "name") && inst.name == fn_name
 }
 
 fn collect_loadargs_before(insts, call_idx) {
@@ -64,7 +62,7 @@ fn collect_loadargs_before(insts, call_idx) {
 }
 
 fn transform_func(f) {
-  let fn_name = f.name in
+  let fn_name = if rec.has(f, "name") then f.name else "" in
   let insts = f.insts in
   let n = list.len(insts) in
   let entry = entry_label(insts) in
