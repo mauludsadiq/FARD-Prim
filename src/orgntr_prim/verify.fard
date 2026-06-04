@@ -99,6 +99,8 @@ fn verify_inst(inst, env, func_name, block_label, func_arities) {
     ok(env)
   else if inst.op == "StoreHeap" then
     ok(env)
+  else if inst.op == "ListLen" then
+    ok(put_ty(env, inst.dst, "I64"))
   else if inst.op == "LoadHeap" then
     ok(put_ty(env, inst.dst, "I64"))
   else if inst.op == "LoadHeapDyn" then

@@ -57,6 +57,7 @@ fn collect_inst_dst(acc, inst) {
     rec.set(base, str.from(inst.dst), "I64")
   else if inst.op == "LoadHeap" then rec.set(acc, str.from(inst.dst), "I64")
   else if inst.op == "LoadHeapDyn" then rec.set(acc, str.from(inst.dst), "I64")
+  else if inst.op == "ListLen" then rec.set(acc, str.from(inst.dst), "I64")
   else if inst.op == "LoadHeapStaticIdx" then rec.set(acc, str.from(inst.dst), "I64")
   else if inst.op == "StoreHeap" then acc
   else if inst.op == "CmpI64" then rec.set(acc, str.from(inst.dst), "Bool")
@@ -277,6 +278,11 @@ fn lower_inst(layout, inst) {
     let ptr_slot = stack_for(layout, inst.ptr) in
     let src_slot = stack_for(layout, inst.src) in
     [{ op: "StoreHeap", ptr: ptr_slot, offset: inst.offset, src: src_slot }]
+  else if inst.op == "ListLen" then
+    // list.len(xs) = heap[xs + 0]  (length stored at offset 0)
+    let ptr_slot = stack_for(layout, inst.ptr) in
+    let dst_slot = stack_for(layout, inst.dst) in
+    [{ op: "LoadHeap", dst: dst_slot, ptr: ptr_slot, offset: 0 }]
   else if inst.op == "LoadHeap" then
     let ptr_slot = stack_for(layout, inst.ptr) in
     let dst_slot = stack_for(layout, inst.dst) in

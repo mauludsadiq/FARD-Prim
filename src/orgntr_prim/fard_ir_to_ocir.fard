@@ -12,9 +12,33 @@ import("std/rec")  as rec
 import("std/str")  as str
 import("../orgntr_prim/ocir") as ocir
 
+
+// ── Stdlib register tracking ──────────────────────────────────────────────────
+// Pre-pass: identify registers holding stdlib function references
+// e.g. global_load "list" -> r1; get_field "len" r1 -> r2  =>  r2 = "list.len"
+
+fn build_stdlib_reg_map(code) {
+  let pass1 = list.fold(code, {}, fn(acc, instr) {
+    if instr.op == "global_load" then
+      rec.set(acc, str.from(instr.dst), instr.name)
+    else acc
+  }) in
+  list.fold(code, {}, fn(acc, instr) {
+    if instr.op == "get_field" && rec.has(pass1, str.from(instr.obj)) then
+      let mod_name = rec.get(pass1, str.from(instr.obj)) in
+      rec.set(acc, str.from(instr.dst), str.concat([mod_name, ".", instr.field]))
+    else acc
+  })
+}
+
+fn stdlib_name_for(reg, stdlib_regs) {
+  let key = str.from(reg) in
+  if rec.has(stdlib_regs, key) then rec.get(stdlib_regs, key) else ""
+}
+
 // ── Instruction lowering ──────────────────────────────────────────────────────
 
-fn lower_instr_one(instr, fn_names, field_order) {
+fn lower_instr_one(instr, fn_names, field_order, stdlib_regs) {
   let op = instr.op in
   if op == "const" then
     let v = instr.val in
@@ -33,11 +57,17 @@ fn lower_instr_one(instr, fn_names, field_order) {
   else if op == "ne" then { op: "CmpI64", dst: instr.dst, lhs: instr.a, rhs: instr.b, cmp: "ne" }
   else if op == "load" then { op: "CopyI64", dst: instr.dst, src: instr.src }
   else if op == "call" then
-    let callee = if instr.fn_id >= 0
-      then list.get(fn_names, instr.fn_id)
-      else { ok: false, err: "fard_ir_to_ocir: indirect calls not yet supported" }
-    in
-    ocir.inst_call_i64(instr.dst, callee, instr.args)
+    if instr.fn_id >= 0 then
+      let callee = list.get(fn_names, instr.fn_id) in
+      ocir.inst_call_i64(instr.dst, callee, instr.args)
+    else
+      let sname = stdlib_name_for(instr.fn_r, stdlib_regs) in
+      if sname == "list.len" then
+        { op: "ListLen", dst: instr.dst, ptr: list.get(instr.args, 0) }
+      else if sname == "list.get" then
+        { op: "LoadHeapDyn", dst: instr.dst, ptr: list.get(instr.args, 0), idx: list.get(instr.args, 1) }
+      else
+        ocir.inst_call_i64(instr.dst, sname, instr.args)
   else if op == "call_direct" then
     let callee = if rec.has(instr, "callee_name") then instr.callee_name
                  else list.get(fn_names, instr.fn_id) in
@@ -52,7 +82,14 @@ fn lower_instr_one(instr, fn_names, field_order) {
     // Global stores not yet supported — emit a no-op ImmI64 0
     ocir.inst_imm_i64(0, 0)
   else if op == "call_global" then
-    ocir.inst_call_i64(instr.dst, instr.name, instr.args)
+    if instr.name == "list.len" then
+      // list.len(xs) -> load length from heap[xs+0]
+      { op: "ListLen", dst: instr.dst, ptr: list.get(instr.args, 0) }
+    else if instr.name == "list.get" then
+      // list.get(xs, i) -> LoadHeapDyn
+      { op: "LoadHeapDyn", dst: instr.dst, ptr: list.get(instr.args, 0), idx: list.get(instr.args, 1) }
+    else
+      ocir.inst_call_i64(instr.dst, instr.name, instr.args)
   else if op == "neg" then
     // Negate: emit 0 - src
     ocir.inst_add_i64(instr.dst, 0, instr.src)
@@ -87,7 +124,7 @@ fn lower_instr_one(instr, fn_names, field_order) {
     { ok: false, err: str.concat(["fard_ir_to_ocir: unsupported op: ", op]) }
 }
 
-fn lower_instr(instr, fn_names, field_order) {
+fn lower_instr(instr, fn_names, field_order, stdlib_regs) {
   let op = instr.op in
   if op == "const" && type.of(instr.val) == "text" then
     // String constant: allocate on heap [len, char0, char1, ...]
@@ -171,7 +208,7 @@ fn lower_instr(instr, fn_names, field_order) {
     [{ op: "CallIndirect", dst: instr.dst,
        closure_reg: instr.closure_reg, args: instr.args }]
   else
-    [lower_instr_one(instr, fn_names, field_order)]
+    [lower_instr_one(instr, fn_names, field_order, stdlib_regs)]
 }
 
 fn lower_term(instr, fn_names) {
@@ -189,14 +226,14 @@ fn is_term(instr) {
   op == "return" || op == "jump" || op == "branch"
 }
 
-fn lower_block(label, instrs, fn_names, field_order) {
+fn lower_block(label, instrs, fn_names, field_order, stdlib_regs) {
   let body = list.filter(instrs, fn(i) { !is_term(i) }) in
   let terms = list.filter(instrs, fn(i) { is_term(i) }) in
   let term = if list.len(terms) == 0
     then { ok: false, err: str.concat(["fard_ir_to_ocir: block has no terminator at label ", str.from(label)]) }
     else lower_term(list.get(terms, 0), fn_names)
   in
-  ocir.block(label, list.flatten(list.map(body, fn(i) { lower_instr(i, fn_names, field_order) })), term)
+  ocir.block(label, list.flatten(list.map(body, fn(i) { lower_instr(i, fn_names, field_order, stdlib_regs) })), term)
 }
 
 // ── Function lowering ─────────────────────────────────────────────────────────
@@ -260,7 +297,7 @@ fn split_into_blocks(code) {
   })
 }
 
-fn lower_block_from_flat(blk, fn_names, subst, arity, all_blocks, patches, field_order) {
+fn lower_block_from_flat(blk, fn_names, subst, arity, all_blocks, patches, field_order, stdlib_regs) {
   let code = blk.code in
   let label = blk.label in
   
@@ -309,7 +346,7 @@ fn lower_block_from_flat(blk, fn_names, subst, arity, all_blocks, patches, field
     else ocir.term_ret_i64(0)
   in
   
-  let body_insts = list.map(list.flatten(list.map(body, fn(i) { lower_instr(i, fn_names, field_order) })), fn(i) { subst_instr(i, subst, arity) }) in
+  let body_insts = list.map(list.flatten(list.map(body, fn(i) { lower_instr(i, fn_names, field_order, stdlib_regs) })), fn(i) { subst_instr(i, subst, arity) }) in
   
   ocir.block(label, body_insts, term)
 }
@@ -419,6 +456,7 @@ fn build_name_map(instrs, fn_names) {
 fn lower_fn(f, fn_names, mod_field_order) {
   let arity = f.arity in
   let all_instrs = f.code in
+  let stdlib_regs = build_stdlib_reg_map(all_instrs) in
   let subst = build_subst(all_instrs, arity) in
   let name_map = build_name_map(all_instrs, fn_names) in
   let field_order = mod_field_order in
@@ -445,12 +483,20 @@ fn lower_fn(f, fn_names, mod_field_order) {
     let all_instrs = list.map(all_instrs, fn(i) {
       if type.of(i) == "record" && rec.has(i, "op") && i.op == "call" && i.fn_id == -1 && rec.has(i, "fn_r") && i.fn_r >= 0 then
         let key = str.from(i.fn_r) in
-        let closure_reg = subst_reg(i.fn_r, subst) in
-        let n_caps = if rec.has(closure_caps, str.from(closure_reg)) then rec.get(closure_caps, str.from(closure_reg)) else 0 in
-        if rec.has(name_map, key) then
-          { op: "call_direct", fn_id: 0, dst: i.dst, args: i.args, callee_name: rec.get(name_map, key) }
+        let sname = stdlib_name_for(i.fn_r, stdlib_regs) in
+        if sname == "list.len" then
+          { op: "call_global", name: "list.len", dst: i.dst, args: i.args }
+        else if sname == "list.get" then
+          { op: "call_global", name: "list.get", dst: i.dst, args: i.args }
         else
-          { op: "CallIndirect", dst: i.dst, closure_reg: closure_reg, args: i.args, n_caps: n_caps }
+          let closure_reg = subst_reg(i.fn_r, subst) in
+          let n_caps = if rec.has(closure_caps, str.from(closure_reg)) then rec.get(closure_caps, str.from(closure_reg)) else 0 in
+          if rec.has(name_map, key) then
+            { op: "call_direct", fn_id: 0, dst: i.dst, args: i.args, callee_name: rec.get(name_map, key) }
+          else if sname != "" then
+            ocir.inst_call_i64(i.dst, sname, i.args)
+          else
+            { op: "CallIndirect", dst: i.dst, closure_reg: closure_reg, args: i.args, n_caps: n_caps }
       else i
     }) in
 
@@ -463,7 +509,7 @@ fn lower_fn(f, fn_names, mod_field_order) {
     ) in
     let flat_blocks = split_into_blocks(all_instrs) in
     let ocir_blocks = list.map(flat_blocks, fn(blk) {
-      lower_block_from_flat(blk, fn_names, subst, arity, flat_blocks, patches, field_order)
+      lower_block_from_flat(blk, fn_names, subst, arity, flat_blocks, patches, field_order, stdlib_regs)
     }) in
     ocir.func_with_params(f.name, params, ocir_blocks)
   else
@@ -479,7 +525,7 @@ fn lower_fn(f, fn_names, mod_field_order) {
     let term = if term_raw.op == "RetI64"
       then ocir.term_ret_i64(term_raw.src)
       else term_raw    in
-    let body_insts = list.map(list.flatten(list.map(body, fn(i) { lower_instr(i, fn_names, field_order) })), fn(i) { subst_instr(i, subst, arity) }) in
+    let body_insts = list.map(list.flatten(list.map(body, fn(i) { lower_instr(i, fn_names, field_order, stdlib_regs) })), fn(i) { subst_instr(i, subst, arity) }) in
     let block0 = ocir.block(0, body_insts, term) in
     ocir.func_with_params(f.name, params, [block0])
 }

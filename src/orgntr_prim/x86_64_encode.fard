@@ -265,6 +265,14 @@ fn encode_inst(inst) {
       // mov [rax + offset], rcx: REX.W 89 /r ModRM(disp8) = 72 137 104 offset
       [72, 137, 72, inst.offset]
     ])
+  else if inst.op == "LoadHeap" then
+    // dst = [ptr + offset]: mov rax,[rbp+ptr]; mov rax,[rax+disp32]; mov [rbp+dst],rax
+    let rax = { k: "reg", name: "rax" } in
+    list.concat([
+      mov_stack_to_reg(rax, inst.ptr),
+      [72, 139, 128], le32(inst.offset),  // mov rax,[rax+offset]
+      mov_reg_to_stack(inst.dst, rax)
+    ])
   else if inst.op == "LoadHeapDyn" then
     // dst = [ptr + 8 + idx*8]
     // mov rax, [rbp+ptr]   -- load ptr
@@ -282,15 +290,6 @@ fn encode_inst(inst) {
       [72, 193, 225, 3],             // shl rcx, 3
       [72, 1, 200],                  // add rax, rcx
       [72, 139, 64, 8],              // mov rax, [rax+8]
-      mov_reg_to_stack(inst.dst, rax)
-    ])
-  else if inst.op == "LoadHeap" then
-    // mov rax, [rbp+ptr]; mov rax, [rax+offset]; mov [rbp+dst], rax
-    let rax = { k: "reg", name: "rax" } in
-    list.concat([
-      mov_stack_to_reg(rax, inst.ptr),
-      // mov rax, [rax+offset]: REX.W 8B /r ModRM(disp8) = 72 139 64 offset
-      [72, 139, 64, inst.offset],
       mov_reg_to_stack(inst.dst, rax)
     ])
   else if inst.op == "StoreFnPtr" then
