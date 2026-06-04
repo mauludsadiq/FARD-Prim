@@ -26,9 +26,12 @@ fn entry_label(insts) {
 }
 
 fn param_slots(insts) {
-  // Collect MovRegToStack instructions at start (param stores)
   list.filter(insts, fn(i) {
-    i.op == "MovRegToStack" && rec.has(i, "src") && i.src.k == "reg" &&
+    i.op == "MovRegToStack" &&
+    rec.has(i, "src") &&
+    rec.has(i.src, "k") &&
+    i.src.k == "reg" &&
+    rec.has(i.src, "name") &&
     (i.src.name == "rdi" || i.src.name == "rsi" || i.src.name == "rdx" ||
      i.src.name == "rcx" || i.src.name == "r8"  || i.src.name == "r9")
   })
@@ -102,7 +105,7 @@ fn transform_func(f) {
 }
 
 fn tco_module(m) {
-  { funcs: list.map(m.funcs, fn(f) { transform_func(f) }) }
+  { entry: m.entry, funcs: list.map(m.funcs, fn(f) { transform_func(f) }) }
 }
 
 export { tco_module }
