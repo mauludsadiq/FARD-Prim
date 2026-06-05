@@ -1,0 +1,38 @@
+import("../src/orgntr_prim/omir_tco") as tco
+import("std/list") as list
+
+fn mod_with(insts) {
+  { entry: "f", funcs: [{ name: "f", frame_size: 32, insts: insts }] }
+}
+
+test "self tail call becomes jump" {
+  let m = mod_with([
+    { op: "Label", target: { k: "label", id: 0 } },
+    { op: "MovRegToStack", src: { k: "reg", name: "rdi" }, dst: { k: "stack", slot: -8 } },
+    { op: "LoadArg", arg_idx: 0, slot: -16 },
+    { op: "CallReloc", name: "f" },
+    { op: "MovRegToStack", src: { k: "reg", name: "rax" }, dst: { k: "stack", slot: -24 } },
+    { op: "CopyI64", src: { k: "stack", slot: -24 }, dst: { k: "stack", slot: -32 } },
+    { op: "Jmp", target: { k: "label", id: 99 } }
+  ]) in
+
+  let out = list.get(tco.tco_module(m).funcs, 0).insts in
+  list.any(out, fn(i) { i.op == "Jmp" && i.target.id == 0 }) &&
+  !list.any(out, fn(i) { i.op == "CallReloc" })
+}
+
+test "non tail self call is preserved" {
+  let m = mod_with([
+    { op: "Label", target: { k: "label", id: 0 } },
+    { op: "MovRegToStack", src: { k: "reg", name: "rdi" }, dst: { k: "stack", slot: -8 } },
+    { op: "LoadArg", arg_idx: 0, slot: -16 },
+    { op: "CallReloc", name: "f" },
+    { op: "MovRegToStack", src: { k: "reg", name: "rax" }, dst: { k: "stack", slot: -24 } },
+    { op: "MulStack", a: { k: "stack", slot: -8 }, b: { k: "stack", slot: -24 }, dst: { k: "stack", slot: -32 } },
+    { op: "CopyI64", src: { k: "stack", slot: -32 }, dst: { k: "stack", slot: -40 } },
+    { op: "Jmp", target: { k: "label", id: 99 } }
+  ]) in
+
+  let out = list.get(tco.tco_module(m).funcs, 0).insts in
+  list.any(out, fn(i) { i.op == "CallReloc" && i.name == "f" })
+}

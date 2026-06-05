@@ -47,10 +47,18 @@ fn arg_idx_for_reg(name) {
 }
 
 fn is_self_tail_call(insts, i, fn_name) {
-  if i >= list.len(insts) then false
+  if i + 3 >= list.len(insts) then false
   else
-    let inst = list.get(insts, i) in
-    inst.op == "CallReloc" && rec.has(inst, "name") && inst.name == fn_name
+    let call = list.get(insts, i) in
+    let a = list.get(insts, i + 1) in
+    let b = list.get(insts, i + 2) in
+    let c = list.get(insts, i + 3) in
+    call.op == "CallReloc" &&
+    rec.has(call, "name") &&
+    call.name == fn_name &&
+    a.op == "MovRegToStack" &&
+    b.op == "CopyI64" &&
+    c.op == "Jmp"
 }
 
 fn collect_loadargs_before(insts, call_idx) {

@@ -17,9 +17,13 @@ import("../orgntr_prim/ocir") as ocir
 // Pre-pass: identify registers holding stdlib function references
 // e.g. global_load "list" -> r1; get_field "len" r1 -> r2  =>  r2 = "list.len"
 
+fn is_stdlib_module(name) {
+  name == "list" || name == "str" || name == "rec" || name == "math"
+}
+
 fn build_stdlib_reg_map(code) {
   let pass1 = list.fold(code, {}, fn(acc, instr) {
-    if instr.op == "global_load" then
+    if instr.op == "global_load" && is_stdlib_module(instr.name) then
       rec.set(acc, str.from(instr.dst), instr.name)
     else acc
   }) in

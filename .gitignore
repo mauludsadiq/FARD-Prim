@@ -11,3 +11,13 @@ debug_*.fard
 dump_*.fard
 probe_*.fard
 check_*.fard
+
+# local scratch / JS tooling
+main
+node_modules/
+package-lock.json
+package.json
+
+# local FARD Prim scratch programs
+programs/test_closure_42.fard
+programs/test_fact120.fard

@@ -53,9 +53,9 @@ fn compile_and_emit(src, out_path) {
 
   // Stage 10: write to disk
   let binary_bytes = bytes.of_list(binary) in
-  let _ = fs.write_bytes(out_path, binary_bytes) in
+  let wrote = fs.write_bytes(out_path, binary_bytes) in
 
-  { ok: true, out: out_path, ocir_hash: ocir.digest(ocir_mod) }
+  { ok: true, out: out_path, wrote: wrote, ocir_hash: ocir.digest(ocir_mod) }
 }
 
 export { compile_and_emit }
