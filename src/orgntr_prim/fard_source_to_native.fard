@@ -9,6 +9,7 @@ import("../orgntr_prim/ocir")            as ocir
 import("../orgntr_prim/verify")          as verify
 import("../orgntr_prim/lower_ocir_to_omir") as omir_lower
 import("../orgntr_prim/omir_tco")           as tco
+import("../orgntr_prim/omir_peephole")      as peep
 import("../orgntr_prim/x86_64_encode")   as encode
 import("../orgntr_prim/x86_64_fixups")   as fixups
 import("../orgntr_prim/x86_64_link")     as link

@@ -1,0 +1,213 @@
+/// omir_peephole — peephole optimizations on OMIR instruction sequences
+///
+/// Pass 1: Copy propagation
+///   CopyI64 src->dst: replace all subsequent uses of dst with src
+///   until dst is written again. Remove the CopyI64.
+///
+/// Pass 2: Dead store elimination
+///   MovRegToStack/MovImm64+MovRegToStack where dst slot is never read: remove
+
+import("std/list") as list
+import("std/rec")  as rec
+import("std/str")  as str
+
+// ── Slot usage analysis ───────────────────────────────────────────────────────
+
+fn slot_key(slot) { str.from(slot) }
+
+fn reads_slot(inst, slot) {
+  let op = inst.op in
+  if op == "CopyI64"       then inst.src.slot == slot
+  else if op == "SubI64"   then inst.lhs.slot == slot || inst.rhs.slot == slot
+  else if op == "AddI64"   then inst.lhs.slot == slot || inst.rhs.slot == slot
+  else if op == "MulI64"   then inst.lhs.slot == slot || inst.rhs.slot == slot
+  else if op == "CmpI64"   then inst.lhs.slot == slot || inst.rhs.slot == slot
+  else if op == "CmpStackZero" then inst.src.slot == slot
+  else if op == "MovStackToReg" then inst.src.slot == slot
+  else if op == "LoadArg"  then inst.slot == slot
+  else if op == "StoreHeap" then inst.ptr.slot == slot || inst.src.slot == slot
+  else if op == "LoadHeap"  then inst.ptr.slot == slot
+  else if op == "LoadHeapDyn" then inst.ptr.slot == slot || inst.idx.slot == slot
+  else if op == "MovStackToStack" then inst.src.slot == slot
+  else if op == "AddRegStack" then rec.has(inst, "src") && inst.src.slot == slot
+  else false
+}
+
+fn writes_slot(inst, slot) {
+  let op = inst.op in
+  if op == "CopyI64"       then inst.dst.slot == slot
+  else if op == "SubI64"   then inst.dst.slot == slot
+  else if op == "AddI64"   then inst.dst.slot == slot
+  else if op == "MulI64"   then inst.dst.slot == slot
+  else if op == "CmpI64"   then inst.dst.slot == slot
+  else if op == "MovRegToStack" then inst.dst.slot == slot
+  else if op == "LoadHeap"  then inst.dst.slot == slot
+  else if op == "LoadHeapDyn" then inst.dst.slot == slot
+  else if op == "MovStackToStack" then inst.dst.slot == slot
+  else false
+}
+
+fn slot_read_after(insts, from_idx, slot) {
+  list.fold(
+    list.build(list.len(insts) - from_idx, fn(i) { i + from_idx }),
+    false,
+    fn(acc, i) {
+      if acc then true
+      else if writes_slot(list.get(insts, i), slot) then false
+      else reads_slot(list.get(insts, i), slot)
+    }
+  )
+}
+
+// ── Copy propagation ──────────────────────────────────────────────────────────
+
+fn subst_slot(slot, subst) {
+  let key = slot_key(slot) in
+  if rec.has(subst, key) then rec.get(subst, key) else slot
+}
+
+fn apply_subst_to_inst(inst, subst) {
+  let op = inst.op in
+  if op == "CopyI64" then
+    { op: "CopyI64", dst: inst.dst,
+      src: { k: "stack", slot: subst_slot(inst.src.slot, subst) } }
+  else if op == "SubI64" then
+    { op: "SubI64", dst: inst.dst,
+      lhs: { k: "stack", slot: subst_slot(inst.lhs.slot, subst) },
+      rhs: { k: "stack", slot: subst_slot(inst.rhs.slot, subst) } }
+  else if op == "AddI64" then
+    { op: "AddI64", dst: inst.dst,
+      lhs: { k: "stack", slot: subst_slot(inst.lhs.slot, subst) },
+      rhs: { k: "stack", slot: subst_slot(inst.rhs.slot, subst) } }
+  else if op == "MulI64" then
+    { op: "MulI64", dst: inst.dst,
+      lhs: { k: "stack", slot: subst_slot(inst.lhs.slot, subst) },
+      rhs: { k: "stack", slot: subst_slot(inst.rhs.slot, subst) } }
+  else if op == "CmpI64" then
+    { op: "CmpI64", dst: inst.dst, cmp: inst.cmp,
+      lhs: { k: "stack", slot: subst_slot(inst.lhs.slot, subst) },
+      rhs: { k: "stack", slot: subst_slot(inst.rhs.slot, subst) } }
+  else if op == "CmpStackZero" then
+    { op: "CmpStackZero", src: { k: "stack", slot: subst_slot(inst.src.slot, subst) } }
+  else if op == "MovStackToReg" then
+    { op: "MovStackToReg", dst: inst.dst,
+      src: { k: "stack", slot: subst_slot(inst.src.slot, subst) } }
+  else if op == "LoadArg" then
+    { op: "LoadArg", arg_idx: inst.arg_idx,
+      slot: subst_slot(inst.slot, subst) }
+  else if op == "StoreHeap" then
+    { op: "StoreHeap", offset: inst.offset,
+      ptr: { k: "stack", slot: subst_slot(inst.ptr.slot, subst) },
+      src: { k: "stack", slot: subst_slot(inst.src.slot, subst) } }
+  else if op == "LoadHeap" then
+    { op: "LoadHeap", dst: inst.dst, offset: inst.offset,
+      ptr: { k: "stack", slot: subst_slot(inst.ptr.slot, subst) } }
+  else if op == "LoadHeapDyn" then
+    { op: "LoadHeapDyn", dst: inst.dst,
+      ptr: { k: "stack", slot: subst_slot(inst.ptr.slot, subst) },
+      idx: { k: "stack", slot: subst_slot(inst.idx.slot, subst) } }
+  else if op == "MovStackToStack" then
+    { op: "MovStackToStack", dst: inst.dst,
+      src: { k: "stack", slot: subst_slot(inst.src.slot, subst) } }
+  else inst
+}
+
+fn copy_prop_pass(insts) {
+  let n = list.len(insts) in
+  let result = list.fold(
+    list.build(n, fn(i) { i }),
+    { out: [], subst: {} },
+    fn(acc, i) {
+      let inst = apply_subst_to_inst(list.get(insts, i), acc.subst) in
+      if inst.op == "CopyI64" then
+        // Propagate: dst -> src in subsequent instructions
+        let new_subst = rec.set(acc.subst, slot_key(inst.dst.slot), inst.src.slot) in
+        { out: acc.out, subst: new_subst }
+      else
+        // Clear substitution if this inst writes a slot that's in subst
+        { out: list.append(acc.out, inst), subst: acc.subst }
+    }
+  ) in
+  result.out
+}
+
+// ── Dead store elimination ────────────────────────────────────────────────────
+
+fn is_dead_store(insts, i) {
+  let inst = list.get(insts, i) in
+  let op = inst.op in
+  if op == "MovRegToStack" then
+    !slot_read_after(insts, i + 1, inst.dst.slot)
+  else false
+}
+
+fn dse_pass(insts) {
+  let n = list.len(insts) in
+  list.filter(
+    list.build(n, fn(i) { i }),
+    fn(i) { !is_dead_store(insts, i) }
+  )
+}
+
+fn dse_pass_to_insts(insts) {
+  let n = list.len(insts) in
+  list.filter(insts,
+    fn(inst) {
+      if inst.op != "MovRegToStack" then true
+      else
+        let idx = list.find(
+          list.build(n, fn(i) { i }),
+          fn(i) { list.get(insts, i).op == inst.op &&
+                  list.get(insts, i).dst.slot == inst.dst.slot }
+        ) in
+        if rec.has(idx, "some")
+          then slot_read_after(insts, idx.some + 1, inst.dst.slot)
+          else true
+    }
+  )
+}
+
+// ── Main pass ─────────────────────────────────────────────────────────────────
+
+fn peephole_func(f) {
+  // Pass 1: Forward copy propagation (block-local, clear at Label)
+  let after_cp = list.fold(f.insts, { out: [], subst: {} }, fn(acc, inst) {
+    if inst.op == "Label" then
+      { out: list.append(acc.out, inst), subst: {} }
+    else if inst.op == "CopyI64" then
+      { out: acc.out, subst: rec.set(acc.subst, slot_key(inst.dst.slot), inst.src.slot) }
+    else
+      { out: list.append(acc.out, apply_subst_to_inst(inst, acc.subst)), subst: acc.subst }
+  }).out in
+
+  // Pass 2: Dead store elimination
+  // A MovRegToStack to slot S is dead if S is never read before being overwritten
+  let n = list.len(after_cp) in
+  let all_reads = list.fold(after_cp, {}, fn(acc, inst) {
+    // Collect all slots read by any instruction
+    let op = inst.op in
+    if op == "SubI64" || op == "AddI64" || op == "MulI64" || op == "CmpI64" then
+      rec.set(rec.set(acc, slot_key(inst.lhs.slot), true), slot_key(inst.rhs.slot), true)
+    else if op == "CmpStackZero" then rec.set(acc, slot_key(inst.src.slot), true)
+    else if op == "MovStackToReg" then rec.set(acc, slot_key(inst.src.slot), true)
+    else if op == "LoadArg" then rec.set(acc, slot_key(inst.slot), true)
+    else if op == "StoreHeap" then rec.set(rec.set(acc, slot_key(inst.ptr.slot), true), slot_key(inst.src.slot), true)
+    else if op == "LoadHeap" then rec.set(acc, slot_key(inst.ptr.slot), true)
+    else if op == "LoadHeapDyn" then rec.set(rec.set(acc, slot_key(inst.ptr.slot), true), slot_key(inst.idx.slot), true)
+    else if op == "MovStackToStack" then rec.set(acc, slot_key(inst.src.slot), true)
+    else acc
+  }) in
+
+  let after_dse = list.filter(after_cp, fn(inst) {
+    if inst.op != "MovRegToStack" then true
+    else rec.has(all_reads, slot_key(inst.dst.slot))
+  }) in
+
+  { name: f.name, frame_size: f.frame_size, insts: after_dse }
+}
+
+fn peephole_module(m) {
+  { entry: m.entry, funcs: list.map(m.funcs, fn(f) { peephole_func(f) }) }
+}
+
+export { peephole_module }

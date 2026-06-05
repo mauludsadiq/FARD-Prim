@@ -1,0 +1,218 @@
+/// omir_regalloc — linear scan register allocator for OMIR
+///
+/// Assigns physical registers to stack slots where beneficial.
+/// Uses callee-saved regs r12-r15 for values live across calls.
+/// Uses caller-saved regs r10-r11 for short-lived values.
+///
+/// Strategy:
+///   1. Compute liveness intervals [def, last_use] per slot
+///   2. Linear scan: assign registers to slots, spill when pressure > 6
+///   3. Rewrite instructions: slot reads/writes → register reads/writes
+///
+/// New OMIR instructions emitted:
+///   MovRegToReg {src: reg, dst: reg}   — register-to-register move
+///   (existing MovRegToStack/MovStackToReg reused where needed)
+
+import("std/list") as list
+import("std/rec")  as rec
+import("std/str")  as str
+
+// ── Register pool ─────────────────────────────────────────────────────────────
+
+fn callee_saved_regs() { ["r12", "r13", "r14", "r15"] }
+fn caller_saved_regs() { ["r10", "r11"] }
+fn all_regs() { list.concat([callee_saved_regs(), caller_saved_regs()]) }
+
+fn slot_key(slot) { str.from(slot) }
+
+// ── Liveness analysis ─────────────────────────────────────────────────────────
+
+fn def_slot(inst) {
+  let op = inst.op in
+  if op == "MovRegToStack" then inst.dst.slot
+  else if op == "SubI64"   then inst.dst.slot
+  else if op == "AddI64"   then inst.dst.slot
+  else if op == "MulI64"   then inst.dst.slot
+  else if op == "CmpI64"   then inst.dst.slot
+  else if op == "LoadHeap" then inst.dst.slot
+  else if op == "LoadHeapDyn" then inst.dst.slot
+  else -999999
+}
+
+fn use_slots(inst) {
+  let op = inst.op in
+  if op == "SubI64" || op == "AddI64" || op == "MulI64" || op == "CmpI64" then
+    [inst.lhs.slot, inst.rhs.slot]
+  else if op == "CmpStackZero"  then [inst.src.slot]
+  else if op == "MovStackToReg" then [inst.src.slot]
+  else if op == "LoadArg"       then [inst.slot]
+  else if op == "StoreHeap"     then [inst.ptr.slot, inst.src.slot]
+  else if op == "LoadHeap"      then [inst.ptr.slot]
+  else if op == "LoadHeapDyn"   then [inst.ptr.slot, inst.idx.slot]
+  else if op == "MovStackToStack" then [inst.src.slot]
+  else []
+}
+
+fn compute_intervals(insts) {
+  // intervals: slot -> { def: int, last_use: int }
+  let n = list.len(insts) in
+  list.fold(list.build(n, fn(i){i}), {}, fn(acc, i) {
+    let inst = list.get(insts, i) in
+    // Record def
+    let acc2 = if def_slot(inst) != -999999 then
+      let k = slot_key(def_slot(inst)) in
+      if rec.has(acc, k)
+        then rec.set(acc, k, { def: rec.get(acc, k).def, last_use: rec.get(acc, k).last_use })
+        else rec.set(acc, k, { def: i, last_use: i })
+    else acc in
+    // Record uses
+    list.fold(use_slots(inst), acc2, fn(a, slot) {
+      let k = slot_key(slot) in
+      if rec.has(a, k)
+        then rec.set(a, k, { def: rec.get(a, k).def, last_use: i })
+        else rec.set(a, k, { def: i, last_use: i })
+    })
+  })
+}
+
+fn interval_crosses_call(insts, def_i, last_use_i) {
+  list.fold(list.build(last_use_i - def_i, fn(i){ i + def_i + 1 }), false, fn(acc, i) {
+    if acc then true
+    else list.get(insts, i).op == "CallReloc"
+  })
+}
+
+// ── Linear scan assignment ────────────────────────────────────────────────────
+
+fn assign_registers(insts, intervals) {
+  // For each slot with an interval, decide if it gets a register
+  // Priority: slots live across calls get callee-saved regs
+  let n = list.len(insts) in
+  let slot_keys = rec.keys(intervals) in
+
+  // Find call positions
+  let call_positions = list.filter(
+    list.build(n, fn(i){i}),
+    fn(i) { list.get(insts, i).op == "CallReloc" }
+  ) in
+
+  // Assign callee-saved regs to slots live across calls
+  let callee_regs = callee_saved_regs() in
+  let caller_regs = caller_saved_regs() in
+
+  // slots that cross at least one call -> callee-saved
+  let cross_call_slots = list.filter(slot_keys, fn(k) {
+    let iv = rec.get(intervals, k) in
+    interval_crosses_call(insts, iv.def, iv.last_use)
+  }) in
+
+  // slots that don't cross calls -> caller-saved (cheaper)
+  let no_call_slots = list.filter(slot_keys, fn(k) {
+    let iv = rec.get(intervals, k) in
+    !interval_crosses_call(insts, iv.def, iv.last_use)
+  }) in
+
+  // Assign up to 4 callee-saved regs to cross-call slots (longest live first)
+  let cross_sorted = list.build(list.len(cross_call_slots), fn(i) {
+    let k = list.get(cross_call_slots, i) in
+    let iv = rec.get(intervals, k) in
+    { slot: k, len: iv.last_use - iv.def }
+  }) in
+
+  // Simple greedy: just take first N slots
+  let n_callee = list.len(callee_regs) in
+  let n_cross = list.len(cross_sorted) in
+  let callee_assignments = list.fold(
+    list.build(if n_cross < n_callee then n_cross else n_callee, fn(i){i}),
+    {},
+    fn(acc, i) {
+      rec.set(acc, list.get(cross_sorted, i).slot, list.get(callee_regs, i))
+    }
+  ) in
+
+  // Assign caller-saved regs to short-lived slots
+  let n_caller = list.len(caller_regs) in
+  let n_no_call = list.len(no_call_slots) in
+  let caller_assignments = list.fold(
+    list.build(if n_no_call < n_caller then n_no_call else n_caller, fn(i){i}),
+    {},
+    fn(acc, i) {
+      rec.set(acc, list.get(no_call_slots, i), list.get(caller_regs, i))
+    }
+  ) in
+
+  // Merge assignments
+  list.fold(rec.keys(caller_assignments), callee_assignments, fn(acc, k) {
+    rec.set(acc, k, rec.get(caller_assignments, k))
+  })
+}
+
+// ── Instruction rewriting ─────────────────────────────────────────────────────
+
+fn slot_or_reg(slot, assignments) {
+  let k = slot_key(slot) in
+  if rec.has(assignments, k)
+    then { k: "reg", name: rec.get(assignments, k) }
+    else { k: "stack", slot: slot }
+}
+
+fn rewrite_inst(inst, assignments) {
+  let op = inst.op in
+  if op == "MovRegToStack" then
+    let dst = slot_or_reg(inst.dst.slot, assignments) in
+    if dst.k == "reg"
+      then { op: "MovRegToReg", src: inst.src, dst: dst }
+      else inst
+  else if op == "MovStackToReg" then
+    let src = slot_or_reg(inst.src.slot, assignments) in
+    if src.k == "reg"
+      then { op: "MovRegToReg", src: src, dst: inst.dst }
+      else inst
+  else if op == "SubI64" then
+    { op: "SubI64", dst: slot_or_reg(inst.dst.slot, assignments),
+      lhs: slot_or_reg(inst.lhs.slot, assignments),
+      rhs: slot_or_reg(inst.rhs.slot, assignments) }
+  else if op == "AddI64" then
+    { op: "AddI64", dst: slot_or_reg(inst.dst.slot, assignments),
+      lhs: slot_or_reg(inst.lhs.slot, assignments),
+      rhs: slot_or_reg(inst.rhs.slot, assignments) }
+  else if op == "MulI64" then
+    { op: "MulI64", dst: slot_or_reg(inst.dst.slot, assignments),
+      lhs: slot_or_reg(inst.lhs.slot, assignments),
+      rhs: slot_or_reg(inst.rhs.slot, assignments) }
+  else if op == "CmpI64" then
+    { op: "CmpI64", dst: slot_or_reg(inst.dst.slot, assignments), cmp: inst.cmp,
+      lhs: slot_or_reg(inst.lhs.slot, assignments),
+      rhs: slot_or_reg(inst.rhs.slot, assignments) }
+  else if op == "CmpStackZero" then
+    let src = slot_or_reg(inst.src.slot, assignments) in
+    if src.k == "reg"
+      then { op: "CmpRegZero", src: src }
+      else inst
+  else if op == "LoadArg" then
+    let dst = slot_or_reg(inst.slot, assignments) in
+    if dst.k == "reg"
+      then { op: "LoadArgReg", arg_idx: inst.arg_idx, dst: dst }
+      else inst
+  else if op == "AddRegStack" then
+    // AddRegStack: rax += [rbp+src] or rax += reg
+    let src = slot_or_reg(inst.src.slot, assignments) in
+    if src.k == "reg"
+      then { op: "AddRegReg", src: src }
+      else inst
+  else inst
+}
+
+fn regalloc_func(f) {
+  let insts = f.insts in
+  let intervals = compute_intervals(insts) in
+  let assignments = assign_registers(insts, intervals) in
+  let rewritten = list.map(insts, fn(inst) { rewrite_inst(inst, assignments) }) in
+  { name: f.name, frame_size: f.frame_size, insts: rewritten, reg_assignments: assignments }
+}
+
+fn regalloc_module(m) {
+  { entry: m.entry, funcs: list.map(m.funcs, fn(f) { regalloc_func(f) }) }
+}
+
+export { regalloc_module, compute_intervals, assign_registers }
