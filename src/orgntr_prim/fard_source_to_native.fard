@@ -9,7 +9,6 @@ import("../orgntr_prim/ocir")            as ocir
 import("../orgntr_prim/verify")          as verify
 import("../orgntr_prim/lower_ocir_to_omir") as omir_lower
 import("../orgntr_prim/omir_tco")           as tco
-import("../orgntr_prim/omir_peephole")      as peep
 import("../orgntr_prim/x86_64_encode")   as encode
 import("../orgntr_prim/x86_64_fixups")   as fixups
 import("../orgntr_prim/x86_64_link")     as link
@@ -20,43 +19,25 @@ import("std/list")  as list
 import("std/str") as str
 
 fn compile_and_emit(src, out_path) {
-  // Stage 1: lex + parse
   let tokens = lex.tokenize(src) in
   let parsed = par.parse_module(tokens, 0) in
   if !parsed.ok then { ok: false, err: str.concat(["parse error: ", parsed.err]) } else
 
-  // Stage 2: lower AST to v0.5 IR
   let ir = lower.lower_program(parsed.node) in
-
-  // Stage 3: bridge v0.5 IR to OCIR
   let ocir_mod = bridge.lower_module(ir) in
-  // ocir_mod stage done
-
-  // Stage 4: verify OCIR
   let v = verify.verify_module(ocir_mod) in
   if v.t != "ok" then { ok: false, stage: "verify", err: v } else
 
-  // Stage 5: lower OCIR to OMIR
   let omir_mod = omir_lower.lower_module(ocir_mod) in
-
-  // Stage 5b: TCO — self-tail-calls -> Jmp (default, not optional)
   let omir_mod = tco.tco_module(omir_mod) in
 
-  // Stage 6: encode to x86-64 bytes
-  // Stage 6+7: encode and fix branches
   let fixed = fixups.encode_module_with_fixups(omir_mod) in
-
-  // Stage 8: resolve call relocs
   let linked = link.link_module(fixed) in
-
-  // Stage 9: emit MH_EXECUTE
   let binary = exe.emit_exe(linked, "fard_main") in
-
-  // Stage 10: write to disk
   let binary_bytes = bytes.of_list(binary) in
-  let wrote = fs.write_bytes(out_path, binary_bytes) in
+  let _ = fs.write_bytes(out_path, binary_bytes) in
 
-  { ok: true, out: out_path, wrote: wrote, ocir_hash: ocir.digest(ocir_mod) }
+  { ok: true, out: out_path, ocir_hash: ocir.digest(ocir_mod) }
 }
 
 export { compile_and_emit }

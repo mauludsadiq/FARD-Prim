@@ -1,4 +1,4 @@
-/// omir_peephole — peephole optimizations on OMIR instruction sequences
+/// omir_peephole v2
 ///
 /// Pass 1: Copy propagation
 ///   CopyI64 src->dst: replace all subsequent uses of dst with src
@@ -15,35 +15,39 @@ import("std/str")  as str
 
 fn slot_key(slot) { str.from(slot) }
 
+fn slot_eq(operand, slot) {
+  rec.has(operand, "slot") && operand.slot == slot
+}
+
 fn reads_slot(inst, slot) {
   let op = inst.op in
-  if op == "CopyI64"       then inst.src.slot == slot
-  else if op == "SubI64"   then inst.lhs.slot == slot || inst.rhs.slot == slot
-  else if op == "AddI64"   then inst.lhs.slot == slot || inst.rhs.slot == slot
-  else if op == "MulI64"   then inst.lhs.slot == slot || inst.rhs.slot == slot
-  else if op == "CmpI64"   then inst.lhs.slot == slot || inst.rhs.slot == slot
-  else if op == "CmpStackZero" then inst.src.slot == slot
-  else if op == "MovStackToReg" then inst.src.slot == slot
-  else if op == "LoadArg"  then inst.slot == slot
-  else if op == "StoreHeap" then inst.ptr.slot == slot || inst.src.slot == slot
-  else if op == "LoadHeap"  then inst.ptr.slot == slot
-  else if op == "LoadHeapDyn" then inst.ptr.slot == slot || inst.idx.slot == slot
-  else if op == "MovStackToStack" then inst.src.slot == slot
-  else if op == "AddRegStack" then rec.has(inst, "src") && inst.src.slot == slot
+  if op == "CopyI64"       then slot_eq(inst.src, slot)
+  else if op == "SubI64"   then slot_eq(inst.lhs, slot) || slot_eq(inst.rhs, slot)
+  else if op == "AddI64"   then slot_eq(inst.lhs, slot) || slot_eq(inst.rhs, slot)
+  else if op == "MulI64"   then slot_eq(inst.lhs, slot) || slot_eq(inst.rhs, slot)
+  else if op == "CmpI64"   then slot_eq(inst.lhs, slot) || slot_eq(inst.rhs, slot)
+  else if op == "CmpStackZero" then slot_eq(inst.src, slot)
+  else if op == "MovStackToReg" then slot_eq(inst.src, slot)
+  else if op == "LoadArg"  then rec.has(inst, "slot") && inst.slot == slot
+  else if op == "StoreHeap" then slot_eq(inst.ptr, slot) || slot_eq(inst.src, slot)
+  else if op == "LoadHeap"  then slot_eq(inst.ptr, slot)
+  else if op == "LoadHeapDyn" then slot_eq(inst.ptr, slot) || slot_eq(inst.idx, slot)
+  else if op == "MovStackToStack" then slot_eq(inst.src, slot)
+  else if op == "AddRegStack" then rec.has(inst, "src") && slot_eq(inst.src, slot)
   else false
 }
 
 fn writes_slot(inst, slot) {
   let op = inst.op in
-  if op == "CopyI64"       then inst.dst.slot == slot
-  else if op == "SubI64"   then inst.dst.slot == slot
-  else if op == "AddI64"   then inst.dst.slot == slot
-  else if op == "MulI64"   then inst.dst.slot == slot
-  else if op == "CmpI64"   then inst.dst.slot == slot
-  else if op == "MovRegToStack" then inst.dst.slot == slot
-  else if op == "LoadHeap"  then inst.dst.slot == slot
-  else if op == "LoadHeapDyn" then inst.dst.slot == slot
-  else if op == "MovStackToStack" then inst.dst.slot == slot
+  if op == "CopyI64"       then slot_eq(inst.dst, slot)
+  else if op == "SubI64"   then slot_eq(inst.dst, slot)
+  else if op == "AddI64"   then slot_eq(inst.dst, slot)
+  else if op == "MulI64"   then slot_eq(inst.dst, slot)
+  else if op == "CmpI64"   then slot_eq(inst.dst, slot)
+  else if op == "MovRegToStack" then slot_eq(inst.dst, slot)
+  else if op == "LoadHeap"  then slot_eq(inst.dst, slot)
+  else if op == "LoadHeapDyn" then slot_eq(inst.dst, slot)
+  else if op == "MovStackToStack" then slot_eq(inst.dst, slot)
   else false
 }
 
@@ -66,49 +70,48 @@ fn subst_slot(slot, subst) {
   if rec.has(subst, key) then rec.get(subst, key) else slot
 }
 
+fn is_stack(operand) { rec.has(operand, "slot") }
+
+fn safe_subst(operand, subst) {
+  if is_stack(operand)
+    then { k: "stack", slot: subst_slot(operand.slot, subst) }
+    else operand
+}
+
 fn apply_subst_to_inst(inst, subst) {
   let op = inst.op in
   if op == "CopyI64" then
-    { op: "CopyI64", dst: inst.dst,
-      src: { k: "stack", slot: subst_slot(inst.src.slot, subst) } }
+    { op: "CopyI64", dst: inst.dst, src: safe_subst(inst.src, subst) }
   else if op == "SubI64" then
     { op: "SubI64", dst: inst.dst,
-      lhs: { k: "stack", slot: subst_slot(inst.lhs.slot, subst) },
-      rhs: { k: "stack", slot: subst_slot(inst.rhs.slot, subst) } }
+      lhs: safe_subst(inst.lhs, subst), rhs: safe_subst(inst.rhs, subst) }
   else if op == "AddI64" then
     { op: "AddI64", dst: inst.dst,
-      lhs: { k: "stack", slot: subst_slot(inst.lhs.slot, subst) },
-      rhs: { k: "stack", slot: subst_slot(inst.rhs.slot, subst) } }
+      lhs: safe_subst(inst.lhs, subst), rhs: safe_subst(inst.rhs, subst) }
   else if op == "MulI64" then
     { op: "MulI64", dst: inst.dst,
-      lhs: { k: "stack", slot: subst_slot(inst.lhs.slot, subst) },
-      rhs: { k: "stack", slot: subst_slot(inst.rhs.slot, subst) } }
+      lhs: safe_subst(inst.lhs, subst), rhs: safe_subst(inst.rhs, subst) }
   else if op == "CmpI64" then
     { op: "CmpI64", dst: inst.dst, cmp: inst.cmp,
-      lhs: { k: "stack", slot: subst_slot(inst.lhs.slot, subst) },
-      rhs: { k: "stack", slot: subst_slot(inst.rhs.slot, subst) } }
+      lhs: safe_subst(inst.lhs, subst), rhs: safe_subst(inst.rhs, subst) }
   else if op == "CmpStackZero" then
-    { op: "CmpStackZero", src: { k: "stack", slot: subst_slot(inst.src.slot, subst) } }
+    { op: "CmpStackZero", src: safe_subst(inst.src, subst) }
   else if op == "MovStackToReg" then
-    { op: "MovStackToReg", dst: inst.dst,
-      src: { k: "stack", slot: subst_slot(inst.src.slot, subst) } }
+    { op: "MovStackToReg", dst: inst.dst, src: safe_subst(inst.src, subst) }
   else if op == "LoadArg" then
     { op: "LoadArg", arg_idx: inst.arg_idx,
-      slot: subst_slot(inst.slot, subst) }
+      slot: if rec.has(inst, "slot") then subst_slot(inst.slot, subst) else inst.slot }
   else if op == "StoreHeap" then
     { op: "StoreHeap", offset: inst.offset,
-      ptr: { k: "stack", slot: subst_slot(inst.ptr.slot, subst) },
-      src: { k: "stack", slot: subst_slot(inst.src.slot, subst) } }
+      ptr: safe_subst(inst.ptr, subst), src: safe_subst(inst.src, subst) }
   else if op == "LoadHeap" then
     { op: "LoadHeap", dst: inst.dst, offset: inst.offset,
-      ptr: { k: "stack", slot: subst_slot(inst.ptr.slot, subst) } }
+      ptr: safe_subst(inst.ptr, subst) }
   else if op == "LoadHeapDyn" then
     { op: "LoadHeapDyn", dst: inst.dst,
-      ptr: { k: "stack", slot: subst_slot(inst.ptr.slot, subst) },
-      idx: { k: "stack", slot: subst_slot(inst.idx.slot, subst) } }
+      ptr: safe_subst(inst.ptr, subst), idx: safe_subst(inst.idx, subst) }
   else if op == "MovStackToStack" then
-    { op: "MovStackToStack", dst: inst.dst,
-      src: { k: "stack", slot: subst_slot(inst.src.slot, subst) } }
+    { op: "MovStackToStack", dst: inst.dst, src: safe_subst(inst.src, subst) }
   else inst
 }
 
@@ -187,14 +190,19 @@ fn peephole_func(f) {
     // Collect all slots read by any instruction
     let op = inst.op in
     if op == "SubI64" || op == "AddI64" || op == "MulI64" || op == "CmpI64" then
-      rec.set(rec.set(acc, slot_key(inst.lhs.slot), true), slot_key(inst.rhs.slot), true)
-    else if op == "CmpStackZero" then rec.set(acc, slot_key(inst.src.slot), true)
-    else if op == "MovStackToReg" then rec.set(acc, slot_key(inst.src.slot), true)
-    else if op == "LoadArg" then rec.set(acc, slot_key(inst.slot), true)
-    else if op == "StoreHeap" then rec.set(rec.set(acc, slot_key(inst.ptr.slot), true), slot_key(inst.src.slot), true)
-    else if op == "LoadHeap" then rec.set(acc, slot_key(inst.ptr.slot), true)
-    else if op == "LoadHeapDyn" then rec.set(rec.set(acc, slot_key(inst.ptr.slot), true), slot_key(inst.idx.slot), true)
-    else if op == "MovStackToStack" then rec.set(acc, slot_key(inst.src.slot), true)
+      let a2 = if is_stack(inst.lhs) then rec.set(acc, slot_key(inst.lhs.slot), true) else acc in
+      if is_stack(inst.rhs) then rec.set(a2, slot_key(inst.rhs.slot), true) else a2
+    else if op == "CmpStackZero" then if is_stack(inst.src) then rec.set(acc, slot_key(inst.src.slot), true) else acc
+    else if op == "MovStackToReg" then if is_stack(inst.src) then rec.set(acc, slot_key(inst.src.slot), true) else acc
+    else if op == "LoadArg" then if rec.has(inst, "slot") then rec.set(acc, slot_key(inst.slot), true) else acc
+    else if op == "StoreHeap" then
+      let a2 = if is_stack(inst.ptr) then rec.set(acc, slot_key(inst.ptr.slot), true) else acc in
+      if is_stack(inst.src) then rec.set(a2, slot_key(inst.src.slot), true) else a2
+    else if op == "LoadHeap" then if is_stack(inst.ptr) then rec.set(acc, slot_key(inst.ptr.slot), true) else acc
+    else if op == "LoadHeapDyn" then
+      let a2 = if is_stack(inst.ptr) then rec.set(acc, slot_key(inst.ptr.slot), true) else acc in
+      if is_stack(inst.idx) then rec.set(a2, slot_key(inst.idx.slot), true) else a2
+    else if op == "MovStackToStack" then if is_stack(inst.src) then rec.set(acc, slot_key(inst.src.slot), true) else acc
     else acc
   }) in
 

@@ -208,7 +208,18 @@ fn regalloc_func(f) {
   let intervals = compute_intervals(insts) in
   let assignments = assign_registers(insts, intervals) in
   let rewritten = list.map(insts, fn(inst) { rewrite_inst(inst, assignments) }) in
-  { name: f.name, frame_size: f.frame_size, insts: rewritten, reg_assignments: assignments }
+  let used_callee = list.filter(callee_saved_regs(), fn(r) {
+    list.fold(rec.keys(assignments), false, fn(acc, k) {
+      if acc then true else rec.get(assignments, k) == r
+    })
+  }) in
+  let insts_with_callee = list.map(rewritten, fn(inst) {
+    if inst.op == "Prologue" || inst.op == "Epilogue"
+      then rec.set(inst, "used_callee_saved", used_callee)
+      else inst
+  }) in
+  { name: f.name, frame_size: f.frame_size, insts: insts_with_callee,
+    reg_assignments: assignments, used_callee_saved: used_callee }
 }
 
 fn regalloc_module(m) {
