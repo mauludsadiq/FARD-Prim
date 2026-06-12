@@ -29,7 +29,8 @@ fn slot_key(slot) { str.from(slot) }
 
 fn def_slot(inst) {
   let op = inst.op in
-  if op == "MovRegToStack" then inst.dst.slot
+  if op == "CopyI64" then inst.dst.slot
+  else if op == "MovRegToStack" then inst.dst.slot
   else if op == "SubI64"   then inst.dst.slot
   else if op == "AddI64"   then inst.dst.slot
   else if op == "MulI64"   then inst.dst.slot
@@ -41,7 +42,8 @@ fn def_slot(inst) {
 
 fn use_slots(inst) {
   let op = inst.op in
-  if op == "SubI64" || op == "AddI64" || op == "MulI64" || op == "CmpI64" then
+  if op == "CopyI64" then [inst.src.slot]
+  else if op == "SubI64" || op == "AddI64" || op == "MulI64" || op == "CmpI64" then
     [inst.lhs.slot, inst.rhs.slot]
   else if op == "CmpStackZero"  then [inst.src.slot]
   else if op == "MovStackToReg" then [inst.src.slot]
@@ -84,11 +86,41 @@ fn interval_crosses_call(insts, def_i, last_use_i) {
 
 // ── Linear scan assignment ────────────────────────────────────────────────────
 
+fn unsafe_slot(operand) {
+  if rec.has(operand, "slot") then [operand.slot] else []
+}
+
+fn unrewritable_slots(insts) {
+  // Slots referenced by ops whose operands rewrite_inst does not update.
+  // If such a slot were assigned a register, its MovRegToStack producer
+  // would become MovRegToReg (never writing the stack slot), but these
+  // ops would still read the stale stack slot -> corruption.
+  list.fold(insts, {}, fn(acc, inst) {
+    let op = inst.op in
+    let slots =
+      if op == "StoreHeap" then list.concat([unsafe_slot(inst.ptr), unsafe_slot(inst.src)])
+      else if op == "LoadHeap" then list.concat([unsafe_slot(inst.ptr), unsafe_slot(inst.dst)])
+      else if op == "LoadHeapDyn" then list.concat([unsafe_slot(inst.ptr), unsafe_slot(inst.idx), unsafe_slot(inst.dst)])
+      else if op == "LoadHeapStaticIdx" then list.concat([unsafe_slot(inst.ptr), unsafe_slot(inst.dst)])
+      else if op == "MakeClosure" then unsafe_slot(inst.dst)
+      else if op == "ConstStr" || op == "ConstStrChar" then
+        if rec.has(inst,"dst") then unsafe_slot(inst.dst) else []
+      else if op == "WriteFvalIntOps" || op == "UnboxInt" then
+        list.concat([if rec.has(inst,"dst_slot") then [inst.dst_slot] else [],
+                      if rec.has(inst,"src_slot") then [inst.src_slot] else [],
+                      if rec.has(inst,"src_fval_slot") then [inst.src_fval_slot] else []])
+      else []
+    in
+    list.fold(slots, acc, fn(a, s) { rec.set(a, slot_key(s), true) })
+  })
+}
+
 fn assign_registers(insts, intervals) {
   // For each slot with an interval, decide if it gets a register
   // Priority: slots live across calls get callee-saved regs
   let n = list.len(insts) in
-  let slot_keys = rec.keys(intervals) in
+  let unsafe = unrewritable_slots(insts) in
+  let slot_keys = list.filter(rec.keys(intervals), fn(k) { !rec.has(unsafe, k) }) in
 
   // Find call positions
   let call_positions = list.filter(
@@ -130,21 +162,10 @@ fn assign_registers(insts, intervals) {
     }
   ) in
 
-  // Assign caller-saved regs to short-lived slots
-  let n_caller = list.len(caller_regs) in
-  let n_no_call = list.len(no_call_slots) in
-  let caller_assignments = list.fold(
-    list.build(if n_no_call < n_caller then n_no_call else n_caller, fn(i){i}),
-    {},
-    fn(acc, i) {
-      rec.set(acc, list.get(no_call_slots, i), list.get(caller_regs, i))
-    }
-  ) in
-
-  // Merge assignments
-  list.fold(rec.keys(caller_assignments), callee_assignments, fn(acc, k) {
-    rec.set(acc, k, rec.get(caller_assignments, k))
-  })
+  // Caller-saved r10/r11 disabled: callees use them as scratch and don't
+  // preserve them, so a value live across a call must never live there
+  // (and only-non-cross-call slots aren't worth a register anyway).
+  callee_assignments
 }
 
 // ── Instruction rewriting ─────────────────────────────────────────────────────
@@ -158,7 +179,17 @@ fn slot_or_reg(slot, assignments) {
 
 fn rewrite_inst(inst, assignments) {
   let op = inst.op in
-  if op == "MovRegToStack" then
+  if op == "CopyI64" then
+    let dst = slot_or_reg(inst.dst.slot, assignments) in
+    let src = slot_or_reg(inst.src.slot, assignments) in
+    if dst.k == "reg" && src.k == "reg"
+      then { op: "MovRegToReg", src: src, dst: dst }
+      else if dst.k == "reg"
+        then { op: "MovStackToReg", dst: dst, src: src }
+        else if src.k == "reg"
+          then { op: "MovRegToStack", dst: dst, src: src }
+          else { op: "CopyI64", dst: dst, src: src }
+  else if op == "MovRegToStack" then
     let dst = slot_or_reg(inst.dst.slot, assignments) in
     if dst.k == "reg"
       then { op: "MovRegToReg", src: inst.src, dst: dst }

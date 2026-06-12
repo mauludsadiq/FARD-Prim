@@ -57,6 +57,14 @@ fn rex_w_for(reg) {
   if code >= 8 then 73 else 72
 }
 
+fn rex_wr_for(reg) {
+  // For instructions where `reg` occupies the ModRM.reg field
+  // (e.g. MOV r64,r/m64 = 0x8B; reg=dest) and the r/m field is rbp/disp8,
+  // an extended register needs REX.R (bit 2, value 4), not REX.B.
+  let code = reg_code(reg) in
+  if code >= 8 then 76 else 72
+}
+
 fn disp8(d) {
   u8(d)
 }
@@ -123,35 +131,35 @@ fn mov_r64_imm64(dst, val) {
 
 fn mov_stack_to_reg(dst, src_stack) {
   let c = reg_code(dst) in
-  [rex_w_for(dst), 139, modrm_disp8(c, 5), disp8(src_stack.slot)]
+  [rex_wr_for(dst), 139, modrm_disp8(c, 5), disp8(src_stack.slot)]
 }
 
 fn mov_reg_to_stack(dst_stack, src) {
   let c = reg_code(src) in
-  [rex_w_for(src), 137, modrm_disp8(c, 5), disp8(dst_stack.slot)]
+  [rex_wr_for(src), 137, modrm_disp8(c, 5), disp8(dst_stack.slot)]
 }
 
 fn add_reg_stack(dst, src_stack) {
   let c = reg_code(dst) in
-  [rex_w_for(dst), 3, modrm_disp8(c, 5), disp8(src_stack.slot)]
+  [rex_wr_for(dst), 3, modrm_disp8(c, 5), disp8(src_stack.slot)]
 }
 
 fn sub_reg_stack(dst, src_stack) {
   // sub dst_reg, [rbp + src_stack.slot]
   let c = reg_code(dst) in
-  [rex_w_for(dst), 43, modrm_disp8(c, 5), disp8(src_stack.slot)]
+  [rex_wr_for(dst), 43, modrm_disp8(c, 5), disp8(src_stack.slot)]
 }
 
 fn imul_reg_stack(dst, src_stack) {
   // imul dst_reg, [rbp + src_stack.slot]
   let c = reg_code(dst) in
-  [rex_w_for(dst), 15, 175, modrm_disp8(c, 5), disp8(src_stack.slot)]
+  [rex_wr_for(dst), 15, 175, modrm_disp8(c, 5), disp8(src_stack.slot)]
 }
 
 fn cmp_reg_stack(dst, src_stack) {
   // cmp dst_reg, [rbp + src_stack.slot]
   let c = reg_code(dst) in
-  [rex_w_for(dst), 59, modrm_disp8(c, 5), disp8(src_stack.slot)]
+  [rex_wr_for(dst), 59, modrm_disp8(c, 5), disp8(src_stack.slot)]
 }
 
 fn cmp_stack_zero(src_stack) {
@@ -229,13 +237,14 @@ fn cmp_regs(dst, lhs, rhs, cmp) {
     else if cmp == "le" then [15, 158, 192]
     else if cmp == "gt" then [15, 159, 192]
     else [15, 157, 192] in  // ge
+  let store = if dst.k == "reg" then mov_reg_to_reg(dst, rax) else mov_reg_to_stack(dst, rax) in
   list.concat([
     reg_or_stack_to_rax(lhs),
     reg_or_stack_to_rcx(rhs),
     [72, 57, 200],   // cmp rax, rcx
     setcc,
     [72, 15, 182, 192],  // movzx rax, al
-    mov_reg_to_reg(dst, rax)
+    store
   ])
 }
 
@@ -466,6 +475,28 @@ fn encode_inst(inst) {
       mov_stack_to_reg(rax, inst.src),
       mov_reg_to_stack(inst.dst, rax)
     ])
+  else if inst.op == "SubI64" && (inst.dst.k == "reg" || inst.lhs.k == "reg" || inst.rhs.k == "reg") then
+    let rax = { k: "reg", name: "rax" } in
+    let rcx = { k: "reg", name: "rcx" } in
+    let compute = list.concat([
+      reg_or_stack_to_rax(inst.lhs),
+      reg_or_stack_to_rcx(inst.rhs),
+      [72, 41, 200]
+    ]) in
+    if inst.dst.k == "reg"
+      then list.concat([compute, mov_reg_to_reg(inst.dst, rax)])
+      else list.concat([compute, mov_reg_to_stack(inst.dst, rax)])
+  else if inst.op == "AddI64" && (inst.dst.k == "reg" || inst.lhs.k == "reg" || inst.rhs.k == "reg") then
+    let rax = { k: "reg", name: "rax" } in
+    let rcx = { k: "reg", name: "rcx" } in
+    let compute = list.concat([
+      reg_or_stack_to_rax(inst.lhs),
+      reg_or_stack_to_rcx(inst.rhs),
+      [72, 1, 200]
+    ]) in
+    if inst.dst.k == "reg"
+      then list.concat([compute, mov_reg_to_reg(inst.dst, rax)])
+      else list.concat([compute, mov_reg_to_stack(inst.dst, rax)])
   else if inst.op == "SubI64" then
     // mov rax, [rbp+lhs]; sub rax, [rbp+rhs]; mov [rbp+dst], rax
     let rax = { k: "reg", name: "rax" } in
@@ -474,6 +505,17 @@ fn encode_inst(inst) {
       sub_reg_stack(rax, inst.rhs),
       mov_reg_to_stack(inst.dst, rax)
     ])
+  else if inst.op == "MulI64" && (inst.dst.k == "reg" || inst.lhs.k == "reg" || inst.rhs.k == "reg") then
+    let rax = { k: "reg", name: "rax" } in
+    let compute = list.concat([
+      reg_or_stack_to_rax(inst.lhs),
+      if inst.rhs.k == "reg"
+        then [72, 15, 175, modrm_reg_reg(0, bits.band(reg_code(inst.rhs),7))]  // imul rax, reg
+        else imul_reg_stack(rax, inst.rhs)
+    ]) in
+    if inst.dst.k == "reg"
+      then list.concat([compute, mov_reg_to_reg(inst.dst, rax)])
+      else list.concat([compute, mov_reg_to_stack(inst.dst, rax)])
   else if inst.op == "MulI64" then
     // mov rax, [rbp+lhs]; imul rax, [rbp+rhs]; mov [rbp+dst], rax
     let rax = { k: "reg", name: "rax" } in
@@ -482,6 +524,8 @@ fn encode_inst(inst) {
       imul_reg_stack(rax, inst.rhs),
       mov_reg_to_stack(inst.dst, rax)
     ])
+  else if inst.op == "CmpI64" && (inst.lhs.k == "reg" || inst.rhs.k == "reg") then
+    cmp_regs(inst.dst, inst.lhs, inst.rhs, inst.cmp)
   else if inst.op == "CmpI64" then
     let rax = { k: "reg", name: "rax" } in
     let setcc = if inst.cmp == "gt" then [15, 159, 192]   // setg al
@@ -506,31 +550,6 @@ fn encode_inst(inst) {
     mov_reg_to_reg(inst.dst, arg_reg(inst.arg_idx))
   else if inst.op == "AddRegReg" then
     add_rax_reg(inst.src)
-  else if inst.op == "SubI64" && (inst.dst.k == "reg" || inst.lhs.k == "reg" || inst.rhs.k == "reg") then
-    // Mixed reg/stack sub: compute in rax, store to dst
-    let rax = { k: "reg", name: "rax" } in
-    let rcx = { k: "reg", name: "rcx" } in
-    let compute = list.concat([
-      reg_or_stack_to_rax(inst.lhs),
-      reg_or_stack_to_rcx(inst.rhs),
-      [72, 41, 200]   // sub rax, rcx
-    ]) in
-    if inst.dst.k == "reg"
-      then list.concat([compute, mov_reg_to_reg(inst.dst, rax)])
-      else list.concat([compute, mov_reg_to_stack(inst.dst, rax)])
-  else if inst.op == "AddI64" && (inst.dst.k == "reg" || inst.lhs.k == "reg" || inst.rhs.k == "reg") then
-    let rax = { k: "reg", name: "rax" } in
-    let rcx = { k: "reg", name: "rcx" } in
-    let compute = list.concat([
-      reg_or_stack_to_rax(inst.lhs),
-      reg_or_stack_to_rcx(inst.rhs),
-      [72, 1, 200]    // add rax, rcx
-    ]) in
-    if inst.dst.k == "reg"
-      then list.concat([compute, mov_reg_to_reg(inst.dst, rax)])
-      else list.concat([compute, mov_reg_to_stack(inst.dst, rax)])
-  else if inst.op == "CmpI64" && (inst.lhs.k == "reg" || inst.rhs.k == "reg") then
-    cmp_regs(inst.dst, inst.lhs, inst.rhs, inst.cmp)
     else
     []
 }

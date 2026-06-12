@@ -112,6 +112,8 @@ fn apply_subst_to_inst(inst, subst) {
       ptr: safe_subst(inst.ptr, subst), idx: safe_subst(inst.idx, subst) }
   else if op == "MovStackToStack" then
     { op: "MovStackToStack", dst: inst.dst, src: safe_subst(inst.src, subst) }
+  else if op == "AddRegStack" then
+    { op: "AddRegStack", dst: inst.dst, src: safe_subst(inst.src, subst) }
   else inst
 }
 
@@ -172,13 +174,70 @@ fn dse_pass_to_insts(insts) {
 
 // ── Main pass ─────────────────────────────────────────────────────────────────
 
+fn compute_cross_block_live(insts) {
+  // Walk instructions tracking current block index (incremented at each Label).
+  // For each slot, record the block where it was first defined (by CopyI64)
+  // and the max block index where it is subsequently read.
+  // A slot is "cross-block-live" if some read occurs in a later block than its def.
+  let n = list.len(insts) in
+  let scan = list.fold(list.build(n, fn(i){i}), { blk: 0, defs: {}, cross: {} }, fn(acc, i) {
+    let inst = list.get(insts, i) in
+    if inst.op == "Label" then
+      { blk: acc.blk + 1, defs: acc.defs, cross: acc.cross }
+    else
+      let acc2 = if inst.op == "CopyI64" then
+        let k = slot_key(inst.dst.slot) in
+        if rec.has(acc.defs, k) then acc
+        else { blk: acc.blk, defs: rec.set(acc.defs, k, acc.blk), cross: acc.cross }
+      else acc in
+      // Check reads of this instruction against defs
+      let reads = use_slots_for_cross(inst) in
+      let cross2 = list.fold(reads, acc2.cross, fn(cacc, slot) {
+        let k = slot_key(slot) in
+        if rec.has(acc2.defs, k) && rec.get(acc2.defs, k) < acc2.blk
+          then rec.set(cacc, k, true)
+          else cacc
+      }) in
+      { blk: acc2.blk, defs: acc2.defs, cross: cross2 }
+  }) in
+  scan.cross
+}
+
+fn use_slots_for_cross(inst) {
+  let op = inst.op in
+  if op == "CopyI64" then [inst.src.slot]
+  else if op == "SubI64" || op == "AddI64" || op == "MulI64" || op == "CmpI64" then
+    list.map(list.filter([inst.lhs, inst.rhs], fn(o){is_stack(o)}), fn(o){o.slot})
+  else if op == "CmpStackZero" || op == "MovStackToReg" then
+    if is_stack(inst.src) then [inst.src.slot] else []
+  else if op == "LoadArg" then
+    if rec.has(inst,"slot") then [inst.slot] else []
+  else if op == "AddRegStack" then
+    if rec.has(inst,"src") && is_stack(inst.src) then [inst.src.slot] else []
+  else if op == "StoreHeap" then
+    list.map(list.filter([inst.ptr, inst.src], fn(o){is_stack(o)}), fn(o){o.slot})
+  else if op == "LoadHeap" then
+    if is_stack(inst.ptr) then [inst.ptr.slot] else []
+  else if op == "LoadHeapDyn" then
+    list.map(list.filter([inst.ptr, inst.idx], fn(o){is_stack(o)}), fn(o){o.slot})
+  else if op == "MovStackToStack" then
+    if is_stack(inst.src) then [inst.src.slot] else []
+  else []
+}
+
 fn peephole_func(f) {
   // Pass 1: Forward copy propagation (block-local, clear at Label)
+  // Never eliminate a CopyI64 whose dst is read in a LATER block (cross-block-live):
+  // such copies are the only write to a branch-merge result slot.
+  let cross_live = compute_cross_block_live(f.insts) in
   let after_cp = list.fold(f.insts, { out: [], subst: {} }, fn(acc, inst) {
     if inst.op == "Label" then
       { out: list.append(acc.out, inst), subst: {} }
     else if inst.op == "CopyI64" then
-      { out: acc.out, subst: rec.set(acc.subst, slot_key(inst.dst.slot), inst.src.slot) }
+      let inst2 = apply_subst_to_inst(inst, acc.subst) in
+      if rec.has(cross_live, slot_key(inst.dst.slot))
+        then { out: list.append(acc.out, inst2), subst: acc.subst }
+        else { out: acc.out, subst: rec.set(acc.subst, slot_key(inst.dst.slot), inst2.src.slot) }
     else
       { out: list.append(acc.out, apply_subst_to_inst(inst, acc.subst)), subst: acc.subst }
   }).out in
@@ -189,7 +248,9 @@ fn peephole_func(f) {
   let all_reads = list.fold(after_cp, {}, fn(acc, inst) {
     // Collect all slots read by any instruction
     let op = inst.op in
-    if op == "SubI64" || op == "AddI64" || op == "MulI64" || op == "CmpI64" then
+    if op == "CopyI64" then
+      if is_stack(inst.src) then rec.set(acc, slot_key(inst.src.slot), true) else acc
+    else if op == "SubI64" || op == "AddI64" || op == "MulI64" || op == "CmpI64" then
       let a2 = if is_stack(inst.lhs) then rec.set(acc, slot_key(inst.lhs.slot), true) else acc in
       if is_stack(inst.rhs) then rec.set(a2, slot_key(inst.rhs.slot), true) else a2
     else if op == "CmpStackZero" then if is_stack(inst.src) then rec.set(acc, slot_key(inst.src.slot), true) else acc
@@ -203,6 +264,7 @@ fn peephole_func(f) {
       let a2 = if is_stack(inst.ptr) then rec.set(acc, slot_key(inst.ptr.slot), true) else acc in
       if is_stack(inst.idx) then rec.set(a2, slot_key(inst.idx.slot), true) else a2
     else if op == "MovStackToStack" then if is_stack(inst.src) then rec.set(acc, slot_key(inst.src.slot), true) else acc
+    else if op == "AddRegStack" then if rec.has(inst,"src") && is_stack(inst.src) then rec.set(acc, slot_key(inst.src.slot), true) else acc
     else acc
   }) in
 
