@@ -47,6 +47,10 @@ Linux targets tested via Docker on Ubuntu 22.04.
      -> OCIR (phi elimination, register/stack abstraction)
      -> SSA opts (copy prop, const fold, DCE)
      -> OMIR (machine instruction selection)
+     -> TCO (self-tail-calls -> Jmp to entry)
+     -> register allocation (linear-scan; callee-saved r12-r15
+        for values live across CallReloc, push/pop in prologue/epilogue)
+     -> peephole (cross-block-safe copy propagation, dead-store elimination)
      -> encode + fixups (branch patching, reloc resolution)
      -> ELF64 or Mach-O binary
 
@@ -71,24 +75,45 @@ No external linker. No C runtime. No libSystem.
 
 10 cases, all PASS across all targets.
 
+## Performance
+
+   fib(35), macOS x86-64, user time:
+
+   FARD Prim   0.108s
+   gcc -O0     0.052s   (2.1x)
+   gcc -O2     0.030s   (3.6x)
+
+Achieved via linear-scan register allocation (callee-saved r12-r15
+for values live across recursive calls -- e.g. fib(n-1)'s result
+survives the call to fib(n-2)) plus a cross-block-safe peephole pass
+(copy propagation + dead-store elimination).
+
 ## Source
 
-6,892 lines of FARD across 32 files in src/orgntr_prim/.
+7,611 lines of FARD across 34 files in src/orgntr_prim/.
 
-   arm64_encode.fard     ARM64 instruction encoding (560 lines)
+   x86_64_encode.fard    x86-64 instruction encoding, incl. register
+                         operand forms for the allocator (639 lines)
+   arm64_encode.fard     ARM64 instruction encoding (575 lines)
    elf_arm64.fard        ELF64 AArch64 emitter
    elf_exe.fard          ELF64 x86-64 emitter
    macho_exe.fard        Mach-O x86-64 emitter
    hir_to_uvir.fard      HIR to UVIR with phi nodes
    uvir_to_ocir.fard     phi elimination, OCIR emission
    ocir_opt.fard         copy prop, const fold, DCE
+   omir_tco.fard         self-tail-call -> Jmp elimination
+   omir_regalloc.fard    linear-scan register allocator (260 lines)
+   omir_peephole.fard    copy propagation + DSE (283 lines)
    python_to_uvir.fard   Python subset frontend
    js_to_uvir.fard       JavaScript subset frontend
 
 ## Next
 
    growable heap (mmap) -> done for all ELF targets
-    tail call optimization (TCO) -> done: self-tail-calls -> Jmp to entry
+   tail call optimization (TCO) -> done: self-tail-calls -> Jmp to entry
+   register allocation -> done: linear-scan, callee-saved r12-r15
+   peephole (copy prop + DSE) -> done
+   list.len / list.get native -> done
    stdlib native (list.map, str.concat, rec.get)
    fardlex + fardparse + fard_eval compile natively
    delete Rust eval loop
