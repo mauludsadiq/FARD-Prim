@@ -326,6 +326,18 @@ fn lea_reg_reg_imm8(dst, src, imm) {
   [rex, 141, 64 + (bits.band(dc,7)*8) + bits.band(sc,7), disp8(imm)]
 }
 
+fn cmp_reg_imm8(src, imm) {
+  // CMP src, imm8   REX.W 0x83 /7 ModRM imm8
+  let sc = reg_code(src) in
+  let rex = 72 + (if sc >= 8 then 1 else 0) in
+  [rex, 131, 248 + bits.band(sc,7), disp8(imm)]
+}
+
+fn cmp_stack_imm8(src_stack, imm) {
+  // CMP [rbp+slot], imm8   REX.W 0x83 /7 ModRM disp8 imm8
+  [72, 131, modrm_disp8(7, 5), disp8(src_stack.slot), disp8(imm)]
+}
+
 fn sub_reg_imm8(dst, imm) {
   // SUB dst, imm8   REX.W 0x83 /5 ModRM imm8
   let dc = reg_code(dst) in
@@ -383,6 +395,18 @@ fn encode_inst(inst) {
     if inst.src.k == "reg"
       then test_reg_reg(inst.src)  // test reg,reg sets ZF
       else cmp_stack_zero(inst.src)
+  else if inst.op == "JccFlags" then
+    // Branch using CPU flags set by preceding CmpRegImmFlags/CmpI64Flags.
+    // Predicate: branch when cmp is TRUE (same semantics as CmpStackZero+Jne:
+    // Jne fires when result slot was non-zero = cmp was true).
+    let cmp_ = inst.cmp in
+    // rel32 placeholders -- patched by fixups pass
+    if cmp_ == "eq" then [15, 132, 0, 0, 0, 0]       // je  (==)
+    else if cmp_ == "ne" then [15, 133, 0, 0, 0, 0]   // jne (!=)
+    else if cmp_ == "lt" then [15, 140, 0, 0, 0, 0]   // jl
+    else if cmp_ == "le" then [15, 142, 0, 0, 0, 0]   // jle
+    else if cmp_ == "gt" then [15, 143, 0, 0, 0, 0]   // jg
+    else [15, 141, 0, 0, 0, 0]                         // jge (>=)
   else if inst.op == "Jne" then
     jne_rel32_placeholder()
   else if inst.op == "Jmp" then
@@ -498,6 +522,42 @@ fn encode_inst(inst) {
       mov_stack_to_reg(rax, inst.src),
       mov_reg_to_stack(inst.dst, rax)
     ])
+  else if inst.op == "CmpRegImmFlags" then
+    // cmp src, imm8  -- sets flags directly, no result register needed
+    // Jne/Jmp following will use these flags directly
+    if inst.src.k == "reg"
+      then cmp_reg_imm8(inst.src, inst.val)
+      else cmp_stack_imm8(inst.src, inst.val)
+  else if inst.op == "CmpI64Flags" then
+    // cmp lhs, rhs  -- sets flags directly
+    let rax = { k: "reg", name: "rax" } in
+    let rcx = { k: "reg", name: "rcx" } in
+    list.concat([
+      if inst.lhs.k == "reg" then mov_reg_to_reg(rax, inst.lhs) else mov_stack_to_reg(rax, inst.lhs),
+      if inst.rhs.k == "reg" then [rex_wr_for(rax), 59, modrm_reg_reg(0, bits.band(reg_code(inst.rhs),7))]
+      else [rex_wr_for(rax), 59, modrm_disp8(0, 5), disp8(inst.rhs.slot)]
+    ])
+  else if inst.op == "CmpRegImm" then
+    // CmpI64 with const rhs: cmp lhs, imm8 (sets flags); result in dst slot
+    // Also emits the setle/setge/etc byte and movzx to dst so CmpStackZero
+    // still works -- same pattern as CmpI64
+    let cmp_ = inst.cmp in
+    let cmp_bytes = if inst.src.k == "reg"
+      then cmp_reg_imm8(inst.src, inst.val)
+      else cmp_stack_imm8(inst.src, inst.val) in
+    let set_bytes = if cmp_ == "eq" then [15, 148, 192]
+                    else if cmp_ == "ne" then [15, 149, 192]
+                    else if cmp_ == "lt" then [15, 156, 192]
+                    else if cmp_ == "le" then [15, 158, 192]
+                    else if cmp_ == "gt" then [15, 159, 192]
+                    else [15, 157, 192] in
+    let movzx = [72, 15, 182, 192] in
+    let store = if rec.has(inst,"dst") && inst.dst.k == "stack"
+      then mov_reg_to_stack(inst.dst, { k: "reg", name: "rax" })
+      else if rec.has(inst,"dst") && inst.dst.k == "reg"
+      then mov_reg_to_reg(inst.dst, { k: "reg", name: "rax" })
+      else mov_reg_to_stack(inst.dst, { k: "reg", name: "rax" }) in
+    list.concat([cmp_bytes, set_bytes, movzx, store])
   else if inst.op == "SubRegImm" then
     // dst = src - val  (val is a small constant from const-fold peephole)
     // If both dst and src are registers: lea dst,[src-val] (1 instruction)

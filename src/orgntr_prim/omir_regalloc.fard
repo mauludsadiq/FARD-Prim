@@ -47,8 +47,8 @@ fn use_slots(inst) {
     [inst.lhs.slot, inst.rhs.slot]
   else if op == "CmpStackZero"  then [inst.src.slot]
   else if op == "MovStackToReg" then [inst.src.slot]
-  else if op == "SubRegImm" || op == "AddRegImm" then
-    if inst.dst.k == "stack" then inst.dst.slot else -1
+  else if op == "SubRegImm" || op == "AddRegImm" || op == "CmpRegImm" then
+    if rec.has(inst,"dst") && inst.dst.k == "stack" then inst.dst.slot else -1
   else if op == "LoadArg"       then [inst.slot]
   else if op == "StoreHeap"     then [inst.ptr.slot, inst.src.slot]
   else if op == "LoadHeap"      then [inst.ptr.slot]
@@ -231,6 +231,10 @@ fn rewrite_inst(inst, assignments) {
     let src2 = if inst.src.k == "stack" then slot_or_reg(inst.src.slot, assignments) else inst.src in
     let dst2 = if inst.dst.k == "stack" then slot_or_reg(inst.dst.slot, assignments) else inst.dst in
     { op: inst.op, dst: dst2, src: src2, val: inst.val }
+  else if op == "CmpRegImm" then
+    let src2 = if inst.src.k == "stack" then slot_or_reg(inst.src.slot, assignments) else inst.src in
+    let dst2 = if rec.has(inst,"dst") && inst.dst.k == "stack" then slot_or_reg(inst.dst.slot, assignments) else if rec.has(inst,"dst") then inst.dst else inst.dst in
+    { op: inst.op, dst: dst2, src: src2, val: inst.val, cmp: inst.cmp }
   else if op == "AddRegStack" then
     // AddRegStack: rax += [rbp+src] or rax += reg
     let src = slot_or_reg(inst.src.slot, assignments) in

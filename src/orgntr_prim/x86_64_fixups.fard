@@ -25,6 +25,12 @@ fn scan_labels_and_patches(insts) {
         labels: acc.labels,
         patches: list.append(acc.patches, { kind: "Jne", at: acc.pc + 2, next_ip: acc.pc + 6, target: inst.target.id })
       }
+    else if inst.op == "JccFlags" then
+      {
+        pc: acc.pc + size_of_inst(inst),
+        labels: acc.labels,
+        patches: list.append(acc.patches, { kind: "Jne", at: acc.pc + 2, next_ip: acc.pc + 6, target: inst.target.id })
+      }
     else if inst.op == "Jmp" then
       {
         pc: acc.pc + size_of_inst(inst),

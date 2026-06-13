@@ -115,6 +115,9 @@ fn apply_subst_to_inst(inst, subst) {
   else if op == "SubRegImm" || op == "AddRegImm" then
     let src2 = if inst.src.k == "stack" then { k: "stack", slot: safe_subst(inst.src, subst).slot } else inst.src in
     { op: inst.op, dst: inst.dst, src: src2, val: inst.val }
+  else if op == "CmpRegImm" then
+    let src2 = if inst.src.k == "stack" then { k: "stack", slot: safe_subst(inst.src, subst).slot } else inst.src in
+    { op: inst.op, dst: inst.dst, src: src2, val: inst.val, cmp: inst.cmp }
   else if op == "AddRegStack" then
     { op: "AddRegStack", dst: inst.dst, src: safe_subst(inst.src, subst) }
   else inst
@@ -268,7 +271,7 @@ fn peephole_func(f) {
       if is_stack(inst.idx) then rec.set(a2, slot_key(inst.idx.slot), true) else a2
     else if op == "MovStackToStack" then if is_stack(inst.src) then rec.set(acc, slot_key(inst.src.slot), true) else acc
     else if op == "AddRegStack" then if rec.has(inst,"src") && is_stack(inst.src) then rec.set(acc, slot_key(inst.src.slot), true) else acc
-    else if op == "SubRegImm" || op == "AddRegImm" then if rec.has(inst,"src") && is_stack(inst.src) then rec.set(acc, slot_key(inst.src.slot), true) else acc
+    else if op == "SubRegImm" || op == "AddRegImm" || op == "CmpRegImm" then if rec.has(inst,"src") && is_stack(inst.src) then rec.set(acc, slot_key(inst.src.slot), true) else acc
     else acc
   }) in
 
@@ -277,7 +280,66 @@ fn peephole_func(f) {
     else rec.has(all_reads, slot_key(inst.dst.slot))
   }) in
 
-  { name: f.name, frame_size: f.frame_size, insts: after_dse }
+  // Pass: fold CmpRegImm/CmpI64(dst=slot)+CmpStackZero(slot)+Jne
+  // -> CmpRegImmFlags/CmpI64Flags + JccFlags{cmp}
+  // Eliminates setle/movzx/store/test, emits cmp+jcc directly.
+  // The comparison predicate determines the branch opcode (jle/jg/je/jne etc).
+  // CmpStackZero+Jne fires when result==0 i.e. cmp was FALSE -> branch to else.
+  // So JccFlags inverts the predicate for the branch: le->jg, eq->jne, etc.
+  let nc = list.len(after_dse) in
+  let cmp_fold = list.fold(list.build(if nc > 2 then nc-2 else 0, fn(i){i}), {}, fn(acc, i) {
+    let a = list.get(after_dse, i) in
+    let b = list.get(after_dse, i+1) in
+    let c_ = list.get(after_dse, i+2) in
+    if (a.op == "CmpRegImm" || a.op == "CmpI64") &&
+       rec.has(a,"dst") && a.dst.k == "stack" &&
+       b.op == "CmpStackZero" && rec.has(b,"src") && b.src.k == "stack" && b.src.slot == a.dst.slot &&
+       c_.op == "Jne"
+      then rec.set(rec.set(rec.set(acc, str.from(i), "cmp"), str.from(i+1), "skip"), str.from(i+2), "jcc")
+      else acc
+  }) in
+  let after_cmp_fold = list.flatten(list.map(list.build(nc, fn(i){i}), fn(i) {
+    let inst = list.get(after_dse, i) in
+    let tag = rec.getOr(cmp_fold, str.from(i), "keep") in
+    if tag == "skip" then []
+    else if tag == "jcc" then
+      // Replace Jne with JccFlags carrying the predicate and the branch target
+      let prev_cmp_inst = list.get(after_dse, i-2) in
+      let cmp_ = if rec.has(prev_cmp_inst,"cmp") then prev_cmp_inst.cmp else "ne" in
+      [{ op: "JccFlags", cmp: cmp_, target: inst.target }]
+    else if tag == "cmp" then
+      if inst.op == "CmpRegImm" then
+        [{ op: "CmpRegImmFlags", src: inst.src, val: inst.val, cmp: inst.cmp }]
+      else
+        [{ op: "CmpI64Flags", lhs: inst.lhs, rhs: inst.rhs, cmp: if rec.has(inst,"cmp") then inst.cmp else "eq" }]
+    else [inst]
+  })) in
+  let after_dse = after_cmp_fold in
+
+  // Pass: fold MovRegToStack(slot,rax)+MovRegToReg(rax,X)+AddRegStack(rax,slot)
+  // -> AddRegReg(rax,X)
+  let nd = list.len(after_dse) in
+  let fold_set = list.fold(list.build(if nd > 2 then nd-2 else 0, fn(i){i}), {}, fn(acc, i) {
+    let a = list.get(after_dse, i) in
+    let b = list.get(after_dse, i+1) in
+    let c_ = list.get(after_dse, i+2) in
+    if a.op == "MovRegToStack" && rec.has(a,"src") && a.src.k == "reg" && a.src.name == "rax" &&
+       b.op == "MovRegToReg" && rec.has(b,"dst") && b.dst.k == "reg" && b.dst.name == "rax" &&
+       c_.op == "AddRegStack" && rec.has(c_,"src") && c_.src.k == "stack" && c_.src.slot == a.dst.slot
+      then rec.set(rec.set(rec.set(acc, str.from(i), "replace"), str.from(i+1), "skip"), str.from(i+2), "skip")
+      else acc
+  }) in
+  let after_add_fold = list.flatten(list.map(list.build(nd, fn(i){i}), fn(i) {
+    let inst = list.get(after_dse, i) in
+    let tag = rec.getOr(fold_set, str.from(i), "keep") in
+    if tag == "skip" then []
+    else if tag == "replace" then
+      let b = list.get(after_dse, i+1) in
+      [{ op: "AddRegReg", dst: { k: "reg", name: "rax" }, src: b.src }]
+    else [inst]
+  })) in
+
+  { name: f.name, frame_size: f.frame_size, insts: after_add_fold }
 }
 
 
@@ -342,6 +404,33 @@ fn const_fold_func(f) {
     else
       list.append(acc, inst)
   }) in
+
+  // Pass D0: fold MovRegToStack(slot,rax)+MovRegToReg(rax,X)+AddRegStack(rax,slot)
+  // -> AddRegReg(rax,X). Eliminates the store/reload of fib(n-1) result
+  // when adding fib(n-1)+fib(n-2): rax=fib(n-2), X=fib(n-1) in r14,
+  // and the slot spill is only there to feed AddRegStack.
+  let n0 = list.len(out) in
+  let out0 = if n0 < 3 then out else
+    list.fold(list.build(n0, fn(i){i}), { result: [], skip: {} }, fn(acc, i) {
+      if rec.has(acc.skip, str.from(i)) then acc
+      else if i + 2 < n0 then
+        let a = list.get(out, i) in
+        let b = list.get(out, i+1) in
+        let c_ = list.get(out, i+2) in
+        if a.op == "MovRegToStack" && rec.has(a,"src") && a.src.k == "reg" && a.src.name == "rax" &&
+           b.op == "MovRegToReg" && rec.has(b,"src") && b.src.k == "reg" && b.src.name == "rax" &&
+           c_.op == "AddRegStack" && rec.has(c_,"src") && c_.src.k == "stack" && c_.src.slot == a.dst.slot
+          then
+            let new_inst = { op: "AddRegReg", dst: { k: "reg", name: "rax" }, src: b.dst } in
+            let skip2 = rec.set(rec.set(acc.skip, str.from(i), true), str.from(i+1), true) in
+            { result: list.append(acc.result, new_inst), skip: rec.set(skip2, str.from(i+2), true) }
+          else
+            { result: list.append(acc.result, a), skip: acc.skip }
+      else
+        if rec.has(acc.skip, str.from(i)) then acc
+        else { result: list.append(acc.result, list.get(out, i)), skip: acc.skip }
+    }).result in
+  let out = out0 in
 
   // Pass D: fold SubRegImm(dst=slot) immediately followed by LoadArg(slot=dst)
   // into SubRegImm(dst={k:"reg",name:"rdi"}) -- produces lea rdi,[src-val]
