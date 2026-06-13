@@ -363,17 +363,24 @@ fn peephole_func(f) {
 }
 
 
+fn is_callee_saved(name) {
+  name == "r12" || name == "r13" || name == "r14" || name == "r15" || name == "rbx"
+}
+
 fn const_fold_func(f) {
   let n = list.len(f.insts) in
 
   // Pass A: find slots written by MovImm64(rax,C)+MovRegToStack(slot,rax) [const_slots]
-  // and slots written by MovRegToStack(slot, named_reg) [reg_for_slot]
+  // and slots written by MovRegToStack(slot, named_reg) BEFORE any Label [entry_reg_for_slot]
+  // Entry-block reg_for_slot is safe to substitute in CmpI64.lhs since callee-saved
+  // registers are not modified between function entry and any use of the slot.
   let scan_a = list.fold(f.insts, { cs: {}, rs: {} }, fn(acc, inst) {
     if inst.op == "MovRegToStack" && rec.has(inst,"src") && inst.src.k == "reg" then
-      if inst.src.name == "rax" then
-        acc  // rax is too volatile to trust as a stable reg source
-      else
+      if inst.src.name == "rax" then acc
+      // Record all callee-saved reg spills -- these regs are stable across calls
+      else if is_callee_saved(inst.src.name) then
         { cs: acc.cs, rs: rec.set(acc.rs, slot_key(inst.dst.slot), inst.src.name) }
+      else acc
     else acc
   }) in
   let scan_b = list.fold(list.build(if n > 0 then n-1 else 0, fn(i){i}), scan_a, fn(acc, i) {
@@ -421,6 +428,17 @@ fn const_fold_func(f) {
         then { k: "reg", name: rec.get(reg_for_slot, slot_key(raw_src.slot)) }
         else raw_src in
       list.append(acc, { op: new_op, dst: inst.dst, src: src2, val: cv })
+    else if op_ == "CmpI64" &&
+            rec.has(inst,"rhs") && inst.rhs.k == "stack" &&
+            rec.has(const_slots, slot_key(inst.rhs.slot)) then
+      // CmpI64 with const rhs -- only fold if lhs slot is in entry reg_for_slot
+      // (written before any Label, thus stable callee-saved register)
+      let cv = rec.get(const_slots, slot_key(inst.rhs.slot)) in
+      let raw_lhs = inst.lhs in
+      let src2 = if raw_lhs.k == "stack" && rec.has(reg_for_slot, slot_key(raw_lhs.slot))
+        then { k: "reg", name: rec.get(reg_for_slot, slot_key(raw_lhs.slot)) }
+        else raw_lhs in
+      list.append(acc, { op: "CmpRegImm", dst: inst.dst, src: src2, val: cv, cmp: inst.cmp })
     else
       list.append(acc, inst)
   }) in
