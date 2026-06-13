@@ -317,6 +317,29 @@ fn lea_rdi_rbp_disp8(slot) {
   [72, 141, 125, disp8(slot)]
 }
 
+fn lea_reg_reg_imm8(dst, src, imm) {
+  // LEA dst, [src + imm8]   REX.W 0x8D /r
+  // ModRM: mod=01(disp8) reg=dst rm=src
+  let dc = reg_code(dst) in
+  let sc = reg_code(src) in
+  let rex = 72 + (if dc >= 8 then 4 else 0) + (if sc >= 8 then 1 else 0) in
+  [rex, 141, 64 + (bits.band(dc,7)*8) + bits.band(sc,7), disp8(imm)]
+}
+
+fn sub_reg_imm8(dst, imm) {
+  // SUB dst, imm8   REX.W 0x83 /5 ModRM imm8
+  let dc = reg_code(dst) in
+  let rex = 72 + (if dc >= 8 then 1 else 0) in
+  [rex, 131, 232 + bits.band(dc,7), disp8(imm)]
+}
+
+fn add_reg_imm8(dst, imm) {
+  // ADD dst, imm8   REX.W 0x83 /0 ModRM imm8
+  let dc = reg_code(dst) in
+  let rex = 72 + (if dc >= 8 then 1 else 0) in
+  [rex, 131, 192 + bits.band(dc,7), disp8(imm)]
+}
+
 fn mov_rsi_rbp_disp8(slot) {
   [72, 139, 117, disp8(slot)]
 }
@@ -475,6 +498,49 @@ fn encode_inst(inst) {
       mov_stack_to_reg(rax, inst.src),
       mov_reg_to_stack(inst.dst, rax)
     ])
+  else if inst.op == "SubRegImm" then
+    // dst = src - val  (val is a small constant from const-fold peephole)
+    // If both dst and src are registers: lea dst,[src-val] (1 instruction)
+    // Otherwise: mov dst_reg,src; sub dst_reg,val; spill if needed
+    let val = inst.val in
+    if inst.dst.k == "reg" && inst.src.k == "reg" then
+      lea_reg_reg_imm8(inst.dst, inst.src, 0 - val)
+    else if inst.src.k == "reg" then
+      let rax = { k: "reg", name: "rax" } in
+      list.concat([
+        mov_reg_to_reg(rax, inst.src),
+        sub_reg_imm8(rax, val),
+        if inst.dst.k == "reg" then mov_reg_to_reg(inst.dst, rax)
+        else mov_reg_to_stack(inst.dst, rax)
+      ])
+    else
+      let rax = { k: "reg", name: "rax" } in
+      list.concat([
+        mov_stack_to_reg(rax, inst.src),
+        sub_reg_imm8(rax, val),
+        if inst.dst.k == "reg" then mov_reg_to_reg(inst.dst, rax)
+        else mov_reg_to_stack(inst.dst, rax)
+      ])
+  else if inst.op == "AddRegImm" then
+    let val = inst.val in
+    if inst.dst.k == "reg" && inst.src.k == "reg" then
+      lea_reg_reg_imm8(inst.dst, inst.src, val)
+    else if inst.src.k == "reg" then
+      let rax = { k: "reg", name: "rax" } in
+      list.concat([
+        mov_reg_to_reg(rax, inst.src),
+        add_reg_imm8(rax, val),
+        if inst.dst.k == "reg" then mov_reg_to_reg(inst.dst, rax)
+        else mov_reg_to_stack(inst.dst, rax)
+      ])
+    else
+      let rax = { k: "reg", name: "rax" } in
+      list.concat([
+        mov_stack_to_reg(rax, inst.src),
+        add_reg_imm8(rax, val),
+        if inst.dst.k == "reg" then mov_reg_to_reg(inst.dst, rax)
+        else mov_reg_to_stack(inst.dst, rax)
+      ])
   else if inst.op == "SubI64" && (inst.dst.k == "reg" || inst.lhs.k == "reg" || inst.rhs.k == "reg") then
     let rax = { k: "reg", name: "rax" } in
     let rcx = { k: "reg", name: "rcx" } in

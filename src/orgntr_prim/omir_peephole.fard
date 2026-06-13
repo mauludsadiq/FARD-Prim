@@ -112,6 +112,9 @@ fn apply_subst_to_inst(inst, subst) {
       ptr: safe_subst(inst.ptr, subst), idx: safe_subst(inst.idx, subst) }
   else if op == "MovStackToStack" then
     { op: "MovStackToStack", dst: inst.dst, src: safe_subst(inst.src, subst) }
+  else if op == "SubRegImm" || op == "AddRegImm" then
+    let src2 = if inst.src.k == "stack" then { k: "stack", slot: safe_subst(inst.src, subst).slot } else inst.src in
+    { op: inst.op, dst: inst.dst, src: src2, val: inst.val }
   else if op == "AddRegStack" then
     { op: "AddRegStack", dst: inst.dst, src: safe_subst(inst.src, subst) }
   else inst
@@ -265,6 +268,7 @@ fn peephole_func(f) {
       if is_stack(inst.idx) then rec.set(a2, slot_key(inst.idx.slot), true) else a2
     else if op == "MovStackToStack" then if is_stack(inst.src) then rec.set(acc, slot_key(inst.src.slot), true) else acc
     else if op == "AddRegStack" then if rec.has(inst,"src") && is_stack(inst.src) then rec.set(acc, slot_key(inst.src.slot), true) else acc
+    else if op == "SubRegImm" || op == "AddRegImm" then if rec.has(inst,"src") && is_stack(inst.src) then rec.set(acc, slot_key(inst.src.slot), true) else acc
     else acc
   }) in
 
@@ -276,8 +280,102 @@ fn peephole_func(f) {
   { name: f.name, frame_size: f.frame_size, insts: after_dse }
 }
 
+
+fn const_fold_func(f) {
+  let n = list.len(f.insts) in
+
+  // Pass A: find slots written by MovImm64(rax,C)+MovRegToStack(slot,rax) [const_slots]
+  // and slots written by MovRegToStack(slot, named_reg) [reg_for_slot]
+  let scan_a = list.fold(f.insts, { cs: {}, rs: {} }, fn(acc, inst) {
+    if inst.op == "MovRegToStack" && rec.has(inst,"src") && inst.src.k == "reg" then
+      if inst.src.name == "rax" then
+        acc  // rax is too volatile to trust as a stable reg source
+      else
+        { cs: acc.cs, rs: rec.set(acc.rs, slot_key(inst.dst.slot), inst.src.name) }
+    else acc
+  }) in
+  let scan_b = list.fold(list.build(if n > 0 then n-1 else 0, fn(i){i}), scan_a, fn(acc, i) {
+    let a = list.get(f.insts, i) in
+    let b = list.get(f.insts, i+1) in
+    if a.op == "MovImm64" && b.op == "MovRegToStack" &&
+       rec.has(a,"dst") && a.dst.k == "reg" && a.dst.name == "rax" &&
+       rec.has(b,"src") && b.src.k == "reg" && b.src.name == "rax"
+      then { cs: rec.set(acc.cs, slot_key(b.dst.slot), a.val), rs: acc.rs }
+      else acc
+  }) in
+  let const_slots = scan_b.cs in
+  let reg_for_slot = scan_b.rs in
+
+  // Pass B: which of those slots are consumed by Sub/AddI64 as rhs?
+  let consumed = list.fold(f.insts, {}, fn(acc, inst) {
+    if (inst.op == "SubI64" || inst.op == "AddI64") &&
+       rec.has(inst,"rhs") && inst.rhs.k == "stack" &&
+       rec.has(const_slots, slot_key(inst.rhs.slot))
+      then rec.set(acc, slot_key(inst.rhs.slot), true)
+      else acc
+  }) in
+
+  // Pass C: rewrite -- skip producers, fold consumers
+  let out = list.fold(list.build(n, fn(i){i}), [], fn(acc, i) {
+    let inst = list.get(f.insts, i) in
+    let op_ = inst.op in
+    if op_ == "MovRegToStack" && rec.has(consumed, slot_key(inst.dst.slot)) then
+      acc
+    else if op_ == "MovImm64" && i + 1 < n then
+      let b = list.get(f.insts, i+1) in
+      if b.op == "MovRegToStack" &&
+         rec.has(inst,"dst") && inst.dst.k == "reg" && inst.dst.name == "rax" &&
+         rec.has(b,"src") && b.src.k == "reg" && b.src.name == "rax" &&
+         rec.has(consumed, slot_key(b.dst.slot))
+        then acc
+        else list.append(acc, inst)
+    else if (op_ == "SubI64" || op_ == "AddI64") &&
+            rec.has(inst,"rhs") && inst.rhs.k == "stack" &&
+            rec.has(consumed, slot_key(inst.rhs.slot)) then
+      let cv = rec.get(const_slots, slot_key(inst.rhs.slot)) in
+      let new_op = if op_ == "SubI64" then "SubRegImm" else "AddRegImm" in
+      let raw_src = inst.lhs in
+      let src2 = if raw_src.k == "stack" && rec.has(reg_for_slot, slot_key(raw_src.slot))
+        then { k: "reg", name: rec.get(reg_for_slot, slot_key(raw_src.slot)) }
+        else raw_src in
+      list.append(acc, { op: new_op, dst: inst.dst, src: src2, val: cv })
+    else
+      list.append(acc, inst)
+  }) in
+
+  // Pass D: fold SubRegImm(dst=slot) immediately followed by LoadArg(slot=dst)
+  // into SubRegImm(dst={k:"reg",name:"rdi"}) -- produces lea rdi,[src-val]
+  let n2 = list.len(out) in
+  let out2 = list.fold(list.build(if n2 > 0 then n2-1 else 0, fn(i){i}), { result: [], skip: {} }, fn(acc, i) {
+    if rec.has(acc.skip, str.from(i)) then
+      acc
+    else
+      let a = list.get(out, i) in
+      let b = list.get(out, i+1) in
+      if (a.op == "SubRegImm" || a.op == "AddRegImm") &&
+         a.dst.k == "stack" &&
+         b.op == "LoadArg" &&
+         rec.has(b,"slot") && b.slot == a.dst.slot
+        then
+          let new_a = { op: a.op, dst: { k: "reg", name: "rdi" }, src: a.src, val: a.val } in
+          { result: list.append(acc.result, new_a), skip: rec.set(acc.skip, str.from(i+1), true) }
+        else
+          { result: list.append(acc.result, a), skip: acc.skip }
+  }) in
+  let final_out = if n2 > 0 && !rec.has(out2.skip, str.from(n2-1))
+    then list.append(out2.result, list.get(out, n2-1))
+    else out2.result in
+
+  { ...f, insts: final_out }
+}
+
+fn const_fold_module(m) {
+  { ...m, funcs: list.map(m.funcs, const_fold_func) }
+}
+
 fn peephole_module(m) {
-  { entry: m.entry, funcs: list.map(m.funcs, fn(f) { peephole_func(f) }) }
+  let after_cf = const_fold_module(m) in
+  { entry: m.entry, funcs: list.map(after_cf.funcs, peephole_func) }
 }
 
 export { peephole_module }
