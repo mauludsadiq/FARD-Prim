@@ -339,7 +339,27 @@ fn peephole_func(f) {
     else [inst]
   })) in
 
-  { name: f.name, frame_size: f.frame_size, insts: after_add_fold }
+  // Pass: fold MovRegToStack(slot,reg)+MovStackToReg(reg2,slot) -> MovRegToReg(reg2,reg)
+  let ns = list.len(after_add_fold) in
+  let spill_fold = list.fold(list.build(if ns > 1 then ns-1 else 0, fn(i){i}), {}, fn(acc, i) {
+    let a = list.get(after_add_fold, i) in
+    let b = list.get(after_add_fold, i+1) in
+    if a.op == "MovRegToStack" && rec.has(a,"src") && a.src.k == "reg" &&
+       b.op == "MovStackToReg" && rec.has(b,"src") && b.src.k == "stack" && b.src.slot == a.dst.slot
+      then rec.set(rec.set(acc, str.from(i), "replace"), str.from(i+1), "skip")
+      else acc
+  }) in
+  let after_spill_fold = list.flatten(list.map(list.build(ns, fn(i){i}), fn(i) {
+    let inst = list.get(after_add_fold, i) in
+    let tag = rec.getOr(spill_fold, str.from(i), "keep") in
+    if tag == "skip" then []
+    else if tag == "replace" then
+      let b = list.get(after_add_fold, i+1) in
+      [{ op: "MovRegToReg", dst: b.dst, src: inst.src }]
+    else [inst]
+  })) in
+
+  { name: f.name, frame_size: f.frame_size, insts: after_spill_fold }
 }
 
 
