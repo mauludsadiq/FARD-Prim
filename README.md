@@ -79,16 +79,29 @@ No external linker. No C runtime. No libSystem.
 
    fib(35), macOS x86-64, user time:
 
-   FARD Prim   0.085s
-   gcc -O0     0.052s   (1.6x)
-   gcc -O2     0.030s   (2.8x)
+   FARD Prim   0.079s
+   gcc -O0     0.052s   (1.5x)
+   gcc -O2     0.030s   (2.6x)
 
 Achieved via:
   - Linear-scan register allocation (callee-saved r12-r15 for values
     live across recursive calls)
   - Cross-block-safe peephole (copy propagation + dead-store elimination)
-  - Constant-fold isel pass: MovImm64(C)+SubI64 -> SubRegImm ->
-    lea rdi,[r13-1] (9 instructions -> 1) for argument preparation
+  - Constant-fold isel pass (const_fold_func, runs before peephole):
+      MovImm64(C)+Sub/AddI64(lhs,slot) -> SubRegImm/AddRegImm
+      -> lea rdi,[r13-1]  (9 instructions -> 1 for arg preparation)
+      MovImm64(C)+CmpI64(lhs,slot) -> CmpRegImm (when lhs is a
+      callee-saved register) -> cmp r13,1 (4 bytes, no memory load)
+  - CmpRegImmFlags+JccFlags: CmpRegImm+CmpStackZero+Jne collapsed to
+    cmp+jcc directly (eliminates setle/movzx/store/test sequence)
+  - AddRegReg: fib(n-1)+fib(n-2) addition collapses from 4 instructions
+    to add rax,r14 (1 instruction)
+  - Spill-fold: MovRegToStack(slot,reg)+MovStackToReg(reg2,slot)
+    -> MovRegToReg(reg2,reg)
+
+  Remaining bottleneck: 3 callee-saved push/pops per recursive call
+  frame (~180M push/pop for fib(35)). Next: reduce callee-saved
+  register pressure via smarter RA for recursive functions.
 
 ## Source
 
