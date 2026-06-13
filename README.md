@@ -79,14 +79,16 @@ No external linker. No C runtime. No libSystem.
 
    fib(35), macOS x86-64, user time:
 
-   FARD Prim   0.108s
-   gcc -O0     0.052s   (2.1x)
-   gcc -O2     0.030s   (3.6x)
+   FARD Prim   0.085s
+   gcc -O0     0.052s   (1.6x)
+   gcc -O2     0.030s   (2.8x)
 
-Achieved via linear-scan register allocation (callee-saved r12-r15
-for values live across recursive calls -- e.g. fib(n-1)'s result
-survives the call to fib(n-2)) plus a cross-block-safe peephole pass
-(copy propagation + dead-store elimination).
+Achieved via:
+  - Linear-scan register allocation (callee-saved r12-r15 for values
+    live across recursive calls)
+  - Cross-block-safe peephole (copy propagation + dead-store elimination)
+  - Constant-fold isel pass: MovImm64(C)+SubI64 -> SubRegImm ->
+    lea rdi,[r13-1] (9 instructions -> 1) for argument preparation
 
 ## Source
 
