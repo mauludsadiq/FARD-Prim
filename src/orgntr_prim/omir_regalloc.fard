@@ -146,9 +146,36 @@ fn assign_registers(insts, intervals) {
     !interval_crosses_call(insts, iv.def, iv.last_use)
   }) in
 
-  // Assign up to 4 callee-saved regs to cross-call slots (longest live first)
-  let cross_sorted = list.build(list.len(cross_call_slots), fn(i) {
-    let k = list.get(cross_call_slots, i) in
+  // Identify the ret-feeding slot: MovStackToReg(rax, slot) immediately before Epilogue.
+  // Pre-assign that slot to rax so MovStackToReg becomes a no-op (rax already = rax)
+  // and the final MovRegToReg(rax, rN) is eliminated.
+  let ret_slot = list.fold(list.build(if n > 1 then n-1 else 0, fn(i){i}), null, fn(acc, i) {
+    let a = list.get(insts, i) in
+    let b = list.get(insts, i+1) in
+    if a.op == "MovStackToReg" && rec.has(a,"dst") && a.dst.k == "reg" && a.dst.name == "rax" &&
+       (b.op == "Epilogue" || b.op == "Ret")
+      then a.src.slot
+      else acc
+  }) in
+  let ret_slot_key = if ret_slot != null then slot_key(ret_slot) else "" in
+  // Only pre-assign ret slot to rax if it does NOT cross any call
+  // (i.e. it is written after the last call and read at return).
+  // If it crosses a call, rax would be clobbered by the callee.
+  let ret_crosses_call = if ret_slot != null && rec.has(intervals, ret_slot_key)
+    then interval_crosses_call(insts, rec.get(intervals, ret_slot_key).def, rec.get(intervals, ret_slot_key).last_use)
+    else true in
+  let ret_pre_assign = if ret_slot != null && !ret_crosses_call && rec.has(intervals, ret_slot_key) && !rec.has(unsafe, ret_slot_key)
+    then rec.set({}, ret_slot_key, "rax")
+    else {} in
+
+  // Remove ret slot from cross_call_slots only if we pre-assigned it
+  let cross_call_slots2 = if ret_slot != null && !ret_crosses_call
+    then list.filter(cross_call_slots, fn(k) { k != ret_slot_key })
+    else cross_call_slots in
+
+  // Assign up to 4 callee-saved regs to remaining cross-call slots
+  let cross_sorted = list.build(list.len(cross_call_slots2), fn(i) {
+    let k = list.get(cross_call_slots2, i) in
     let iv = rec.get(intervals, k) in
     { slot: k, len: iv.last_use - iv.def }
   }) in
@@ -156,13 +183,14 @@ fn assign_registers(insts, intervals) {
   // Simple greedy: just take first N slots
   let n_callee = list.len(callee_regs) in
   let n_cross = list.len(cross_sorted) in
-  let callee_assignments = list.fold(
+  let base_assignments = list.fold(
     list.build(if n_cross < n_callee then n_cross else n_callee, fn(i){i}),
-    {},
+    ret_pre_assign,
     fn(acc, i) {
       rec.set(acc, list.get(cross_sorted, i).slot, list.get(callee_regs, i))
     }
   ) in
+  let callee_assignments = base_assignments in
 
   // Caller-saved r10/r11 disabled: callees use them as scratch and don't
   // preserve them, so a value live across a call must never live there
