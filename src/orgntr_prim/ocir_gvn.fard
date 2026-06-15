@@ -1,0 +1,110 @@
+/// ocir_gvn — Global Value Numbering at OCIR level.
+///
+/// Within each basic block, assigns value numbers to registers.
+/// When two instructions compute the same expression (same op + same
+/// value-numbered operands), the second is replaced with CopyI64 from
+/// the first result. ocir_opt's copy_prop + DCE then eliminates the copy.
+///
+/// Handles: ImmI64, CopyI64, AddI64, SubI64, MulI64, CmpI64.
+/// Conservative: skips CallI64, heap ops (may have side effects).
+
+import("std/list") as list
+import("std/rec")  as rec
+import("std/str")  as str
+
+// Value key: canonical string representation of an expression
+fn vkey_imm(v) { str.concat(["I:", str.from(v)]) }
+
+fn vkey_binop(op, a_vn, b_vn) {
+  // Commutative ops: canonicalize operand order by value number
+  let is_comm = op == "AddI64" || op == "MulI64" in
+  let lo = if is_comm && a_vn > b_vn then b_vn else a_vn in
+  let hi = if is_comm && a_vn > b_vn then a_vn else b_vn in
+  str.concat([op, ":", str.from(lo), ",", str.from(hi)])
+}
+
+fn vkey_cmp(cmp, a_vn, b_vn) {
+  str.concat(["CmpI64:", cmp, ":", str.from(a_vn), ",", str.from(b_vn)])
+}
+
+fn reg_key(r) { str.from(r) }
+
+// Get value number for a register (default: the register itself)
+fn vn_get(vn_map, r) {
+  let k = reg_key(r) in
+  if rec.has(vn_map, k) then rec.get(vn_map, k) else r
+}
+
+fn gvn_block(block) {
+  // vn_map: reg -> value_number (integer, reusing existing reg numbers)
+  // expr_map: value_key -> reg (first register that computed this value)
+  let init = { insts: [], vn_map: {}, expr_map: {} } in
+
+  let result = list.fold(block.insts, init, fn(acc, inst) {
+    let op = inst.op in
+
+    if op == "ImmI64" then
+      let key = vkey_imm(inst.val) in
+      if rec.has(acc.expr_map, key) then
+        // Already computed this constant -- emit CopyI64
+        let prev_reg = rec.get(acc.expr_map, key) in
+        let new_vn_map = rec.set(acc.vn_map, reg_key(inst.dst), prev_reg) in
+        let copy_inst = { op: "CopyI64", dst: inst.dst, src: prev_reg } in
+        { insts: list.append(acc.insts, copy_inst), vn_map: new_vn_map, expr_map: acc.expr_map }
+      else
+        let new_expr = rec.set(acc.expr_map, key, inst.dst) in
+        let new_vn = rec.set(acc.vn_map, reg_key(inst.dst), inst.dst) in
+        { insts: list.append(acc.insts, inst), vn_map: new_vn, expr_map: new_expr }
+
+    else if op == "CopyI64" then
+      // Propagate value number: dst gets same vn as src
+      let src_vn = vn_get(acc.vn_map, inst.src) in
+      let new_vn = rec.set(acc.vn_map, reg_key(inst.dst), src_vn) in
+      { insts: list.append(acc.insts, inst), vn_map: new_vn, expr_map: acc.expr_map }
+
+    else if op == "AddI64" || op == "SubI64" || op == "MulI64" then
+      let lhs_vn = vn_get(acc.vn_map, inst.lhs) in
+      let rhs_vn = vn_get(acc.vn_map, inst.rhs) in
+      let key = vkey_binop(op, lhs_vn, rhs_vn) in
+      if rec.has(acc.expr_map, key) then
+        let prev_reg = rec.get(acc.expr_map, key) in
+        let new_vn = rec.set(acc.vn_map, reg_key(inst.dst), prev_reg) in
+        let copy_inst = { op: "CopyI64", dst: inst.dst, src: prev_reg } in
+        { insts: list.append(acc.insts, copy_inst), vn_map: new_vn, expr_map: acc.expr_map }
+      else
+        let new_expr = rec.set(acc.expr_map, key, inst.dst) in
+        let new_vn = rec.set(acc.vn_map, reg_key(inst.dst), inst.dst) in
+        { insts: list.append(acc.insts, inst), vn_map: new_vn, expr_map: new_expr }
+
+    else if op == "CmpI64" then
+      let lhs_vn = vn_get(acc.vn_map, inst.lhs) in
+      let rhs_vn = vn_get(acc.vn_map, inst.rhs) in
+      let key = vkey_cmp(inst.cmp, lhs_vn, rhs_vn) in
+      if rec.has(acc.expr_map, key) then
+        let prev_reg = rec.get(acc.expr_map, key) in
+        let new_vn = rec.set(acc.vn_map, reg_key(inst.dst), prev_reg) in
+        let copy_inst = { op: "CopyI64", dst: inst.dst, src: prev_reg } in
+        { insts: list.append(acc.insts, copy_inst), vn_map: new_vn, expr_map: acc.expr_map }
+      else
+        let new_expr = rec.set(acc.expr_map, key, inst.dst) in
+        let new_vn = rec.set(acc.vn_map, reg_key(inst.dst), inst.dst) in
+        { insts: list.append(acc.insts, inst), vn_map: new_vn, expr_map: new_expr }
+
+    else
+      // Unknown op (calls, heap, etc) -- pass through, don't track
+      { insts: list.append(acc.insts, inst), vn_map: acc.vn_map, expr_map: acc.expr_map }
+  }) in
+
+  { label: block.label, insts: result.insts, term: block.term }
+}
+
+fn gvn_func(f) {
+  { name: f.name, params: f.params,
+    blocks: list.map(f.blocks, gvn_block) }
+}
+
+fn gvn_module(m) {
+  { entry: m.entry, funcs: list.map(m.funcs, gvn_func) }
+}
+
+export { gvn_module, gvn_func }

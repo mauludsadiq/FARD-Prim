@@ -8,6 +8,7 @@ import("../orgntr_prim/fard_ir_to_ocir") as bridge
 import("../orgntr_prim/ocir")            as ocir
 import("../orgntr_prim/ocir_opt")       as opt
 import("../orgntr_prim/ocir_inline")    as inl
+import("../orgntr_prim/ocir_gvn")       as gvn
 import("../orgntr_prim/ocir_sccp")      as sccp
 import("../orgntr_prim/verify")          as verify
 import("../orgntr_prim/lower_ocir_to_omir") as omir_lower
