@@ -105,7 +105,7 @@ Achieved via:
 
 ## Source
 
-7,611 lines of FARD across 34 files in src/orgntr_prim/.
+8338 lines of FARD across 36 files in src/orgntr_prim/.
 
    x86_64_encode.fard    x86-64 instruction encoding, incl. register
                          operand forms for the allocator (639 lines)
@@ -116,6 +116,8 @@ Achieved via:
    hir_to_uvir.fard      HIR to UVIR with phi nodes
    uvir_to_ocir.fard     phi elimination, OCIR emission
    ocir_opt.fard         copy prop, const fold, DCE
+  ocir_sccp.fard        sparse conditional constant propagation (210 lines)
+  ocir_inline.fard      function inliner, leaf functions <= 8 safe ops
    omir_tco.fard         self-tail-call -> Jmp elimination
    omir_regalloc.fard    linear-scan register allocator (260 lines)
    omir_peephole.fard    copy propagation + DSE (283 lines)
