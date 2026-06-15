@@ -1,0 +1,131 @@
+/// ocir_inline — function inlining pass at OCIR level.
+///
+/// Inline candidates: functions with exactly 1 block, no CallI64/CallIndirect
+/// in their body (leaf functions), and total instruction count <= INLINE_THRESHOLD.
+///
+/// Algorithm:
+///   1. Build inline_map: {callee_name -> func} for all candidates.
+///   2. For each function, walk its blocks and replace CallI64(callee, args)
+///      where callee is in inline_map with fresh-register copies of the
+///      callee's instructions, with params substituted for args.
+///   3. Re-run ocir_opt after inlining to fold constants exposed by inlining.
+
+import("std/list") as list
+import("std/rec")  as rec
+import("std/str")  as str
+
+let INLINE_THRESHOLD = 8
+
+fn is_safe_inline_op(op) {
+  op == "ImmI64" || op == "ImmBool" || op == "CopyI64" ||
+  op == "AddI64" || op == "SubI64" || op == "MulI64" || op == "CmpI64"
+}
+
+fn is_leaf_block(block) {
+  list.len(list.filter(block.insts, fn(i) {
+    !is_safe_inline_op(i.op)
+  })) == 0
+}
+
+fn is_inline_candidate(f) {
+  list.len(f.blocks) == 1 &&
+  is_leaf_block(list.get(f.blocks, 0)) &&
+  list.len(list.get(f.blocks, 0).insts) <= INLINE_THRESHOLD
+}
+
+fn build_inline_map(funcs) {
+  list.fold(
+    list.filter(funcs, is_inline_candidate),
+    {},
+    fn(acc, f) { rec.set(acc, f.name, f) }
+  )
+}
+
+// Inline one CallI64 site: substitute callee's instructions into caller,
+// using fresh registers offset by `base` to avoid conflicts.
+fn inline_call(inst, callee_func, base) {
+  let param_regs = list.map(callee_func.params, fn(p) { p.reg }) in
+  let args = inst.args in
+  // Build substitution map: callee param reg -> caller arg reg
+  let subst = list.fold(
+    list.build(list.len(param_regs), fn(i){i}),
+    {},
+    fn(acc, i) {
+      rec.set(acc, str.from(list.get(param_regs, i)), list.get(args, i))
+    }
+  ) in
+  let callee_block = list.get(callee_func.blocks, 0) in
+  // Rewrite each callee instruction with fresh registers + param substitution
+  let inlined_insts = list.map(callee_block.insts, fn(ci) {
+    let op = ci.op in
+    let new_dst = ci.dst + base in
+    let sub = fn(r) {
+      let k = str.from(r) in
+      if rec.has(subst, k) then rec.get(subst, k) else r + base
+    } in
+    if op == "ImmI64" || op == "ImmBool" then
+      { op: op, dst: new_dst, val: ci.val }
+    else if op == "CopyI64" then
+      { op: op, dst: new_dst, src: sub(ci.src) }
+    else if op == "AddI64" || op == "SubI64" || op == "MulI64" then
+      { op: op, dst: new_dst, lhs: sub(ci.lhs), rhs: sub(ci.rhs) }
+    else if op == "CmpI64" then
+      { op: op, dst: new_dst, lhs: sub(ci.lhs), rhs: sub(ci.rhs), cmp: ci.cmp }
+    else
+      ci
+  }) in
+  let ret_src = callee_block.term.src in
+  let ret_reg = if rec.has(subst, str.from(ret_src))
+    then rec.get(subst, str.from(ret_src))
+    else ret_src + base in
+  let copy_result = { op: "CopyI64", dst: inst.dst, src: ret_reg } in
+  list.append(inlined_insts, copy_result)
+}
+
+fn inline_block(block, inline_map, base_ref) {
+  let result = list.fold(block.insts, { insts: [], next_base: base_ref }, fn(acc, inst) {
+    if inst.op == "CallI64" && rec.has(inline_map, inst.callee) then
+      let callee = rec.get(inline_map, inst.callee) in
+      let callee_regs = callee.params |> fn(ps) {
+        list.fold(list.get(callee.blocks, 0).insts, 0, fn(m, i) {
+          if i.dst > m then i.dst else m
+        })
+      } in
+      let expanded = inline_call(inst, callee, acc.next_base) in
+      { insts: list.concat([acc.insts, expanded]),
+        next_base: acc.next_base + callee_regs + 1 }
+    else
+      { insts: list.append(acc.insts, inst), next_base: acc.next_base }
+  }) in
+  { label: block.label, insts: result.insts, term: block.term }
+}
+
+fn max_reg_in_func(f) {
+  list.fold(f.blocks, 0, fn(m, block) {
+    list.fold(block.insts, m, fn(mr, inst) {
+      if rec.has(inst, "dst") && inst.dst > mr then inst.dst else mr
+    })
+  })
+}
+
+fn inline_func(f, inline_map) {
+  let base = max_reg_in_func(f) + 100 in
+  { name: f.name, params: f.params,
+    blocks: list.map(f.blocks, fn(b) { inline_block(b, inline_map, base) }) }
+}
+
+fn inline_module(m) {
+  let inline_map = build_inline_map(m.funcs) in
+  // Don't inline a function into itself (no recursive inlining)
+  { entry: m.entry,
+    funcs: list.map(m.funcs, fn(f) {
+      // Remove self from inline_map to prevent recursive inlining
+      let safe_map = list.fold(rec.keys(inline_map), {}, fn(acc, k) {
+        if k == f.name then acc else rec.set(acc, k, rec.get(inline_map, k))
+      }) in
+      inline_func(f, safe_map)
+    })
+  }
+}
+
+export { inline_module, is_inline_candidate, build_inline_map }
