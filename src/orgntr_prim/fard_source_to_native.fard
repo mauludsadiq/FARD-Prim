@@ -8,6 +8,7 @@ import("../orgntr_prim/fard_ir_to_ocir") as bridge
 import("../orgntr_prim/ocir")            as ocir
 import("../orgntr_prim/ocir_opt")       as opt
 import("../orgntr_prim/ocir_inline")    as inl
+import("../orgntr_prim/ocir_sccp")      as sccp
 import("../orgntr_prim/verify")          as verify
 import("../orgntr_prim/lower_ocir_to_omir") as omir_lower
 import("../orgntr_prim/omir_tco")           as tco
@@ -32,8 +33,9 @@ fn compile_and_emit(src, out_path) {
   let v = verify.verify_module(ocir_mod) in
   if v.t != "ok" then { ok: false, stage: "verify", err: v } else
 
-  let ocir_mod = inl.inline_module(ocir_mod) in
-  let ocir_mod = opt.opt_module(ocir_mod) in
+  let ocir_mod = sccp.sccp_module(ocir_mod) in
+  let ocir_mod = inl.inline_module(opt.opt_module(ocir_mod)) in
+  let ocir_mod = opt.opt_module(sccp.sccp_module(opt.opt_module(ocir_mod))) in
   let omir_mod = omir_lower.lower_module(ocir_mod) in
   let omir_mod = tco.tco_module(omir_mod) in
   let omir_mod = ra.regalloc_module(omir_mod) in

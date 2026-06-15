@@ -1,0 +1,195 @@
+/// ocir_sccp — Sparse Conditional Constant Propagation at OCIR level.
+///
+/// Lattice per register:
+///   "Top"    — not yet seen (initial state)
+///   "Const"  — known constant integer value  { kind: "Const", val: v }
+///   "Bottom" — non-constant (multiple values or unknown)
+///
+/// Algorithm (Wegman-Zadeck):
+///   1. Initialize all registers to Top. Mark entry block executable.
+///   2. Process executable blocks: for each instruction, evaluate
+///      the lattice value of its output given its inputs.
+///   3. For BrCond: if condition is Const(0) -> only else executable;
+///      Const(nonzero) -> only then executable; Bottom -> both.
+///   4. Repeat until no changes.
+///   5. Rewrite: replace Const registers with ImmI64, fold BrCond
+///      with known condition to Br, remove dead blocks.
+
+import("std/list") as list
+import("std/rec")  as rec
+import("std/str")  as str
+
+// ── Lattice ───────────────────────────────────────────────────────────────────
+
+fn top()         { { kind: "Top" } }
+fn const_val(v)  { { kind: "Const", val: v } }
+fn bottom()      { { kind: "Bottom" } }
+
+fn is_top(l)    { l.kind == "Top" }
+fn is_const(l)  { l.kind == "Const" }
+fn is_bottom(l) { l.kind == "Bottom" }
+
+// Meet: Top ^ x = x; Bottom ^ x = Bottom; Const(a) ^ Const(b) = a==b ? Const(a) : Bottom
+fn meet(a, b) {
+  if is_top(a) then b
+  else if is_top(b) then a
+  else if is_bottom(a) || is_bottom(b) then bottom()
+  else if a.val == b.val then a
+  else bottom()
+}
+
+fn lat_key(r) { str.from(r) }
+
+fn lat_get(lat, r) {
+  let k = lat_key(r) in
+  if rec.has(lat, k) then rec.get(lat, k) else top()
+}
+
+fn lat_set(lat, r, v) { rec.set(lat, lat_key(r), v) }
+
+// ── Constant folding for each OCIR op ────────────────────────────────────────
+
+fn eval_binop(op, a, b) {
+  if op == "AddI64" then a + b
+  else if op == "SubI64" then a - b
+  else if op == "MulI64" then a * b
+  else if op == "CmpI64" then 0  // handled separately
+  else 0
+}
+
+fn eval_cmp(cmp, a, b) {
+  if cmp == "eq" then if a == b then 1 else 0
+  else if cmp == "ne" then if a != b then 1 else 0
+  else if cmp == "lt" then if a < b then 1 else 0
+  else if cmp == "le" then if a <= b then 1 else 0
+  else if cmp == "gt" then if a > b then 1 else 0
+  else if a >= b then 1 else 0
+}
+
+fn eval_inst(inst, lat) {
+  let op = inst.op in
+  if op == "ImmI64" then const_val(inst.val)
+  else if op == "ImmBool" then const_val(if inst.val then 1 else 0)
+  else if op == "CopyI64" then lat_get(lat, inst.src)
+  else if op == "AddI64" || op == "SubI64" || op == "MulI64" then
+    let la = lat_get(lat, inst.lhs) in
+    let lb = lat_get(lat, inst.rhs) in
+    if is_const(la) && is_const(lb)
+      then const_val(eval_binop(op, la.val, lb.val))
+      else if is_bottom(la) || is_bottom(lb) then bottom()
+      else top()
+  else if op == "CmpI64" then
+    let la = lat_get(lat, inst.lhs) in
+    let lb = lat_get(lat, inst.rhs) in
+    if is_const(la) && is_const(lb)
+      then const_val(eval_cmp(inst.cmp, la.val, lb.val))
+      else if is_bottom(la) || is_bottom(lb) then bottom()
+      else top()
+  else bottom()  // calls, heap ops, etc -> Bottom
+}
+
+// ── Block execution ───────────────────────────────────────────────────────────
+
+fn exec_block(block, lat) {
+  list.fold(block.insts, lat, fn(acc, inst) {
+    if !rec.has(inst, "dst") then acc
+    else
+      let new_val = eval_inst(inst, acc) in
+      let old_val = lat_get(acc, inst.dst) in
+      let merged = meet(old_val, new_val) in
+      lat_set(acc, inst.dst, merged)
+  })
+}
+
+// ── Worklist iteration ────────────────────────────────────────────────────────
+
+fn find_block(blocks, label) {
+  list.get(list.filter(blocks, fn(b) { b.label == label }), 0)
+}
+
+fn successors(block, lat) {
+  let term = block.term in
+  let op = term.op in
+  if op == "Br" then [term.to]
+  else if op == "BrCond" then
+    let cond_lat = lat_get(lat, term.cond) in
+    if is_const(cond_lat) then
+      if cond_lat.val != 0 then [term.then_blk] else [term.else_blk]
+    else [term.then_blk, term.else_blk]
+  else []
+}
+
+fn rewrite_inst(inst, lat) {
+  let op = inst.op in
+  if op == "ImmI64" || op == "ImmBool" then inst
+  else if op == "CopyI64" then
+    let lv = lat_get(lat, inst.src) in
+    if is_const(lv) then { op: "ImmI64", dst: inst.dst, val: lv.val }
+    else inst
+  else if op == "AddI64" || op == "SubI64" || op == "MulI64" || op == "CmpI64" then
+    let lv = lat_get(lat, inst.dst) in
+    if is_const(lv) then { op: "ImmI64", dst: inst.dst, val: lv.val }
+    else inst
+  else inst
+}
+
+fn rewrite_term(term, lat) {
+  if term.op == "BrCond" then
+    let lv = lat_get(lat, term.cond) in
+    if is_const(lv) then
+      if lv.val != 0 then { op: "Br", to: term.then_blk }
+      else { op: "Br", to: term.else_blk }
+    else term
+  else term
+}
+
+fn sccp_func(f) {
+  let blocks = f.blocks in
+  let entry_label = list.get(blocks, 0).label in
+
+  // Worklist: list of block labels to process
+  // Executed: set of block labels already executed
+  // Lat: register -> lattice value
+
+  let init = { worklist: [entry_label], executed: {}, lat: {} } in
+
+  let result = list.fold(
+    list.build(200, fn(i){i}),  // max 200 iterations
+    init,
+    fn(state, _) {
+      if list.len(state.worklist) == 0 then state
+      else
+        let label = list.get(state.worklist, 0) in
+        let rest = list.filter(state.worklist, fn(l){ l != label }) in
+        let block = find_block(blocks, label) in
+        let new_lat = exec_block(block, state.lat) in
+        let new_executed = rec.set(state.executed, str.from(label), true) in
+        let succs = successors(block, new_lat) in
+        let new_worklist = list.concat([rest, list.filter(succs, fn(s){
+          !rec.has(new_executed, str.from(s))
+        })]) in
+        { worklist: new_worklist, executed: new_executed, lat: new_lat }
+    }
+  ) in
+
+  let lat = result.lat in
+  let executed = result.executed in
+
+  // ── Rewrite ──────────────────────────────────────────────────────────────
+  let live_blocks = list.filter(blocks, fn(b) {
+    rec.has(executed, str.from(b.label))
+  }) in
+  let rewritten_blocks = list.map(live_blocks, fn(b) {
+    { label: b.label,
+      insts: list.map(b.insts, fn(inst) { rewrite_inst(inst, lat) }),
+      term: rewrite_term(b.term, lat) }
+  }) in
+
+  { name: f.name, params: f.params, blocks: rewritten_blocks }
+}
+
+fn sccp_module(m) {
+  { entry: m.entry, funcs: list.map(m.funcs, sccp_func) }
+}
+
+export { sccp_module, sccp_func }
