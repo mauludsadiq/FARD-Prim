@@ -165,9 +165,19 @@ fn sccp_func(f) {
         let new_lat = exec_block(block, state.lat) in
         let new_executed = rec.set(state.executed, str.from(label), true) in
         let succs = successors(block, new_lat) in
-        let new_worklist = list.concat([rest, list.filter(succs, fn(s){
-          !rec.has(new_executed, str.from(s))
-        })]) in
+        // Re-enqueue successors if any lattice value changed
+        // (standard SCCP: propagate until fixpoint)
+        let lat_changed = list.len(list.filter(rec.keys(new_lat), fn(k) {
+          let old_v = if rec.has(state.lat, k) then rec.get(state.lat, k) else top() in
+          let new_v = rec.get(new_lat, k) in
+          old_v.kind != new_v.kind || (old_v.kind == "Const" && old_v.val != new_v.val)
+        })) > 0 in
+        let new_worklist = if lat_changed
+          then list.concat([rest, succs])
+          else list.concat([rest, list.filter(succs, fn(s){
+            !rec.has(new_executed, str.from(s))
+          })])
+        in
         { worklist: new_worklist, executed: new_executed, lat: new_lat }
     }
   ) in

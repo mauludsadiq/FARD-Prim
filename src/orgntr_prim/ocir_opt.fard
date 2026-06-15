@@ -229,6 +229,66 @@ fn const_fold_func(f) {
 
 // ── Combined optimization pipeline ───────────────────────────────────────────
 
+
+// ── Pass: empty block elimination ────────────────────────────────────────────
+// A block with no instructions and term=Br(X) is a pure jump.
+// Replace all references to its label with X throughout the function,
+// then remove the empty block. Repeat until stable.
+
+fn build_redirect_map(blocks) {
+  list.fold(blocks, {}, fn(acc, b) {
+    if list.len(b.insts) == 0 && b.term.op == "Br"
+      then rec.set(acc, str.from(b.label), b.term.to)
+      else acc
+  })
+}
+
+fn resolve_label(label, rmap) {
+  // Follow redirect chain up to 10 hops (avoids recursion)
+  let k0 = str.from(label) in
+  let l1 = if rec.has(rmap, k0) then rec.get(rmap, k0) else label in
+  let k1 = str.from(l1) in
+  let l2 = if rec.has(rmap, k1) then rec.get(rmap, k1) else l1 in
+  let k2 = str.from(l2) in
+  let l3 = if rec.has(rmap, k2) then rec.get(rmap, k2) else l2 in
+  let k3 = str.from(l3) in
+  let l4 = if rec.has(rmap, k3) then rec.get(rmap, k3) else l3 in
+  let k4 = str.from(l4) in
+  if rec.has(rmap, k4) then rec.get(rmap, k4) else l4
+}
+
+fn redirect_term(term, rmap) {
+  if !rec.has(term, "op") then term
+  else if term.op == "Br" then { op: "Br", to: resolve_label(term.to, rmap) }
+  else if term.op == "BrCond" then
+    { op: "BrCond", cond: term.cond,
+      then_blk: resolve_label(term.then_blk, rmap),
+      else_blk: resolve_label(term.else_blk, rmap) }
+  else term
+}
+
+fn elim_empty_blocks(f) {
+  if list.len(f.blocks) == 0 then f
+  else
+    let rmap = build_redirect_map(f.blocks) in
+    let has_redirects = list.len(rec.keys(rmap)) > 0 in
+    if !has_redirects then f
+    else
+      let entry_label = list.get(f.blocks, 0).label in
+      let kept = list.filter(f.blocks, fn(b) {
+        b.label == entry_label || !rec.has(rmap, str.from(b.label))
+      }) in
+      let rewritten = list.map(kept, fn(b) {
+        { label: b.label, insts: b.insts, term: redirect_term(b.term, rmap) }
+      }) in
+      { name: f.name, params: f.params, blocks: rewritten }
+}
+
+fn elim_empty_blocks_module(m) {
+  let pass1 = { entry: m.entry, funcs: list.map(m.funcs, elim_empty_blocks) } in
+  { entry: pass1.entry, funcs: list.map(pass1.funcs, elim_empty_blocks) }
+}
+
 fn opt_func(f) {
   let f1 = copy_prop_func(f) in
   let f2 = const_fold_func(f1) in
@@ -239,7 +299,8 @@ fn opt_func(f) {
 }
 
 fn opt_module(m) {
-  { entry: m.entry, funcs: list.map(m.funcs, fn(f) { opt_func(f) }) }
+  let m1 = { entry: m.entry, funcs: list.map(m.funcs, fn(f) { opt_func(f) }) } in
+  elim_empty_blocks_module(m1)
 }
 
-export { opt_module, opt_func, copy_prop_func, dce_func, const_fold_func }
+export { opt_module, opt_func, copy_prop_func, dce_func, const_fold_func, elim_empty_blocks_module }

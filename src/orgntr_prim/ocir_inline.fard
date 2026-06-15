@@ -1,20 +1,27 @@
 /// ocir_inline — function inlining pass at OCIR level.
 ///
-/// Inline candidates: functions with exactly 1 block, no CallI64/CallIndirect
-/// in their body (leaf functions), and total instruction count <= INLINE_THRESHOLD.
+/// Supports both single-block and multi-block callees.
 ///
-/// Algorithm:
-///   1. Build inline_map: {callee_name -> func} for all candidates.
-///   2. For each function, walk its blocks and replace CallI64(callee, args)
-///      where callee is in inline_map with fresh-register copies of the
-///      callee's instructions, with params substituted for args.
-///   3. Re-run ocir_opt after inlining to fold constants exposed by inlining.
+/// Algorithm for inlining CallI64(callee, args) at position i in block B:
+///   1. Split B at position i:
+///      - pre_block:  B.label, insts[0..i-1], Br(callee_entry + label_offset)
+///      - cont_block: fresh_label, insts[i+1..], B.term
+///   2. Copy callee blocks with fresh labels (label + label_offset) and
+///      fresh registers (reg + reg_offset).
+///   3. Substitute callee params -> caller args in all copied instructions.
+///   4. Replace RetI64(src) in callee exit block with:
+///      CopyI64(call_dst, src+reg_offset), Br(cont_block)
+///   5. Insert: pre_block, callee_blocks, cont_block into caller's block list.
+///
+/// Inline candidates: functions with all-safe ops in all blocks,
+/// total instructions <= INLINE_THRESHOLD.
+/// Safe ops: ImmI64, ImmBool, CopyI64, AddI64, SubI64, MulI64, CmpI64.
 
 import("std/list") as list
 import("std/rec")  as rec
 import("std/str")  as str
 
-let INLINE_THRESHOLD = 8
+let INLINE_THRESHOLD = 12
 
 fn is_safe_inline_op(op) {
   op == "ImmI64" || op == "ImmBool" || op == "CopyI64" ||
@@ -28,9 +35,9 @@ fn is_leaf_block(block) {
 }
 
 fn is_inline_candidate(f) {
-  list.len(f.blocks) == 1 &&
-  is_leaf_block(list.get(f.blocks, 0)) &&
-  list.len(list.get(f.blocks, 0).insts) <= INLINE_THRESHOLD
+  let total_insts = list.fold(f.blocks, 0, fn(acc,b){ acc + list.len(b.insts) }) in
+  let all_safe = list.len(list.filter(f.blocks, fn(b){ !is_leaf_block(b) })) == 0 in
+  total_insts <= INLINE_THRESHOLD && all_safe
 }
 
 fn build_inline_map(funcs) {
@@ -41,65 +48,6 @@ fn build_inline_map(funcs) {
   )
 }
 
-// Inline one CallI64 site: substitute callee's instructions into caller,
-// using fresh registers offset by `base` to avoid conflicts.
-fn inline_call(inst, callee_func, base) {
-  let param_regs = list.map(callee_func.params, fn(p) { p.reg }) in
-  let args = inst.args in
-  // Build substitution map: callee param reg -> caller arg reg
-  let subst = list.fold(
-    list.build(list.len(param_regs), fn(i){i}),
-    {},
-    fn(acc, i) {
-      rec.set(acc, str.from(list.get(param_regs, i)), list.get(args, i))
-    }
-  ) in
-  let callee_block = list.get(callee_func.blocks, 0) in
-  // Rewrite each callee instruction with fresh registers + param substitution
-  let inlined_insts = list.map(callee_block.insts, fn(ci) {
-    let op = ci.op in
-    let new_dst = ci.dst + base in
-    let sub = fn(r) {
-      let k = str.from(r) in
-      if rec.has(subst, k) then rec.get(subst, k) else r + base
-    } in
-    if op == "ImmI64" || op == "ImmBool" then
-      { op: op, dst: new_dst, val: ci.val }
-    else if op == "CopyI64" then
-      { op: op, dst: new_dst, src: sub(ci.src) }
-    else if op == "AddI64" || op == "SubI64" || op == "MulI64" then
-      { op: op, dst: new_dst, lhs: sub(ci.lhs), rhs: sub(ci.rhs) }
-    else if op == "CmpI64" then
-      { op: op, dst: new_dst, lhs: sub(ci.lhs), rhs: sub(ci.rhs), cmp: ci.cmp }
-    else
-      ci
-  }) in
-  let ret_src = callee_block.term.src in
-  let ret_reg = if rec.has(subst, str.from(ret_src))
-    then rec.get(subst, str.from(ret_src))
-    else ret_src + base in
-  let copy_result = { op: "CopyI64", dst: inst.dst, src: ret_reg } in
-  list.append(inlined_insts, copy_result)
-}
-
-fn inline_block(block, inline_map, base_ref) {
-  let result = list.fold(block.insts, { insts: [], next_base: base_ref }, fn(acc, inst) {
-    if inst.op == "CallI64" && rec.has(inline_map, inst.callee) then
-      let callee = rec.get(inline_map, inst.callee) in
-      let callee_regs = callee.params |> fn(ps) {
-        list.fold(list.get(callee.blocks, 0).insts, 0, fn(m, i) {
-          if i.dst > m then i.dst else m
-        })
-      } in
-      let expanded = inline_call(inst, callee, acc.next_base) in
-      { insts: list.concat([acc.insts, expanded]),
-        next_base: acc.next_base + callee_regs + 1 }
-    else
-      { insts: list.append(acc.insts, inst), next_base: acc.next_base }
-  }) in
-  { label: block.label, insts: result.insts, term: block.term }
-}
-
 fn max_reg_in_func(f) {
   list.fold(f.blocks, 0, fn(m, block) {
     list.fold(block.insts, m, fn(mr, inst) {
@@ -108,18 +56,155 @@ fn max_reg_in_func(f) {
   })
 }
 
+fn max_label_in_func(f) {
+  list.fold(f.blocks, 0, fn(m, block) {
+    if block.label > m then block.label else m
+  })
+}
+
+// Substitute a register: if it's a param reg, use the arg; otherwise offset
+fn sub_reg(r, subst, reg_offset) {
+  let k = str.from(r) in
+  if rec.has(subst, k) then rec.get(subst, k)
+  else r + reg_offset
+}
+
+// Rewrite a single instruction with reg substitution + offset
+fn rewrite_callee_inst(inst, subst, reg_offset) {
+  let op = inst.op in
+  let new_dst = inst.dst + reg_offset in
+  let sub = fn(r) { sub_reg(r, subst, reg_offset) } in
+  if op == "ImmI64" || op == "ImmBool" then
+    { op: op, dst: new_dst, val: inst.val }
+  else if op == "CopyI64" then
+    { op: op, dst: new_dst, src: sub(inst.src) }
+  else if op == "AddI64" || op == "SubI64" || op == "MulI64" then
+    { op: op, dst: new_dst, lhs: sub(inst.lhs), rhs: sub(inst.rhs) }
+  else if op == "CmpI64" then
+    { op: op, dst: new_dst, lhs: sub(inst.lhs), rhs: sub(inst.rhs), cmp: inst.cmp }
+  else inst
+}
+
+// Rewrite a terminator with label + reg offsets
+fn rewrite_callee_term(term, subst, reg_offset, label_offset, call_dst, cont_label) {
+  let op = term.op in
+  if op == "Br" then
+    { op: "Br", to: term.to + label_offset }
+  else if op == "BrCond" then
+    { op: "BrCond",
+      cond: sub_reg(term.cond, subst, reg_offset),
+      then_blk: term.then_blk + label_offset,
+      else_blk: term.else_blk + label_offset }
+  else if op == "RetI64" then
+    // Replace return with: copy result to call_dst, jump to continuation
+    { op: "RetI64", src: term.src }  // handled at block level
+  else term
+}
+
+// Copy a callee block with fresh labels/regs, replacing RetI64 with Br to cont
+fn copy_callee_block(block, subst, reg_offset, label_offset, call_dst, cont_label) {
+  let new_label = block.label + label_offset in
+  let new_insts = list.map(block.insts, fn(inst) {
+    rewrite_callee_inst(inst, subst, reg_offset)
+  }) in
+  let new_term = if block.term.op == "RetI64" then
+    // Emit CopyI64(call_dst, ret_src+reg_offset) before jumping to continuation
+    let ret_src = sub_reg(block.term.src, subst, reg_offset) in
+    { op: "Br", to: cont_label, _ret_copy: { dst: call_dst, src: ret_src } }
+  else
+    rewrite_callee_term(block.term, subst, reg_offset, label_offset, call_dst, cont_label)
+  in
+  // If this block had a RetI64, prepend the copy instruction
+  let final_insts = if block.term.op == "RetI64" then
+    let ret_src = sub_reg(block.term.src, subst, reg_offset) in
+    list.append(new_insts, { op: "CopyI64", dst: call_dst, src: ret_src })
+  else new_insts in
+  { label: new_label, insts: final_insts, term: if block.term.op == "RetI64" then { op: "Br", to: cont_label } else rewrite_callee_term(block.term, subst, reg_offset, label_offset, call_dst, cont_label) }
+}
+
+// Inline one call site in a block at instruction index call_idx
+fn inline_call_in_block(block, call_idx, callee, caller_max_reg, caller_max_label) {
+  let call_inst = list.get(block.insts, call_idx) in
+  let call_dst = call_inst.dst in
+  let args = call_inst.args in
+  let param_regs = list.map(callee.params, fn(p) { p.reg }) in
+
+  // Build param substitution: callee param -> caller arg
+  let subst = list.fold(
+    list.build(list.len(param_regs), fn(i){i}),
+    {},
+    fn(acc, i) {
+      rec.set(acc, str.from(list.get(param_regs, i)), list.get(args, i))
+    }
+  ) in
+
+  let reg_offset = caller_max_reg + 100 in
+  let label_offset = caller_max_label + 100 in
+  let cont_label = caller_max_label + 200 in
+
+  // Split block at call_idx:
+  // pre_block: insts before call, term = Br to callee entry
+  let pre_insts = list.filter(
+    list.build(call_idx, fn(i){ list.get(block.insts, i) }),
+    fn(x){ true }
+  ) in
+  let callee_entry = list.get(callee.blocks, 0).label + label_offset in
+  let pre_block = { label: block.label, insts: pre_insts, term: { op: "Br", to: callee_entry } } in
+
+  // cont_block: insts after call, original term
+  let n_insts = list.len(block.insts) in
+  let post_insts = list.filter(
+    list.build(n_insts - call_idx - 1, fn(i){ list.get(block.insts, call_idx + 1 + i) }),
+    fn(x){ true }
+  ) in
+  let cont_block = { label: cont_label, insts: post_insts, term: block.term } in
+
+  // Copy callee blocks
+  let callee_blocks = list.map(callee.blocks, fn(b) {
+    copy_callee_block(b, subst, reg_offset, label_offset, call_dst, cont_label)
+  }) in
+
+  { pre: pre_block, callee_blocks: callee_blocks, cont: cont_block }
+}
+
+// Inline all call sites in a function
 fn inline_func(f, inline_map) {
-  let base = max_reg_in_func(f) + 100 in
-  { name: f.name, params: f.params,
-    blocks: list.map(f.blocks, fn(b) { inline_block(b, inline_map, base) }) }
+  // Process one block at a time, looking for inlinable CallI64
+  let result = list.fold(f.blocks, [], fn(acc_blocks, block) {
+    // Find first inlinable call in this block
+    let call_idx = list.fold(
+      list.build(list.len(block.insts), fn(i){i}),
+      -1,
+      fn(acc, i) {
+        if acc != -1 then acc
+        else
+          let inst = list.get(block.insts, i) in
+          if inst.op == "CallI64" && rec.has(inline_map, inst.callee)
+            then i else -1
+      }
+    ) in
+    if call_idx == -1 then
+      list.append(acc_blocks, block)
+    else
+      let callee = rec.get(inline_map, list.get(block.insts, call_idx).callee) in
+      let caller_max_reg = list.fold(acc_blocks, max_reg_in_func(f), fn(m, b) {
+        list.fold(b.insts, m, fn(mr, inst) {
+          if rec.has(inst,"dst") && inst.dst > mr then inst.dst else mr
+        })
+      }) in
+      let caller_max_label = list.fold(acc_blocks, max_label_in_func(f), fn(m, b) {
+        if b.label > m then b.label else m
+      }) in
+      let inlined = inline_call_in_block(block, call_idx, callee, caller_max_reg, caller_max_label) in
+      list.concat([acc_blocks, [inlined.pre], inlined.callee_blocks, [inlined.cont]])
+  }) in
+  { name: f.name, params: f.params, blocks: result }
 }
 
 fn inline_module(m) {
   let inline_map = build_inline_map(m.funcs) in
-  // Don't inline a function into itself (no recursive inlining)
   { entry: m.entry,
     funcs: list.map(m.funcs, fn(f) {
-      // Remove self from inline_map to prevent recursive inlining
       let safe_map = list.fold(rec.keys(inline_map), {}, fn(acc, k) {
         if k == f.name then acc else rec.set(acc, k, rec.get(inline_map, k))
       }) in
