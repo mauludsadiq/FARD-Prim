@@ -121,6 +121,28 @@ fn unrewritable_slots(insts) {
   })
 }
 
+fn intervals_overlap(iv1, iv2) {
+  iv1.def < iv2.last_use && iv2.def < iv1.last_use
+}
+
+fn slots_assigned_reg(assignments, reg) {
+  list.filter(rec.keys(assignments), fn(k) {
+    rec.get(assignments, k) == reg
+  })
+}
+
+fn can_coalesce(dst_key, src_key, reg, assignments, intervals) {
+  if !rec.has(intervals, dst_key) then false
+  else
+    let dst_iv = rec.get(intervals, dst_key) in
+    let conflicts = list.filter(slots_assigned_reg(assignments, reg), fn(k) {
+      k != dst_key && k != src_key &&
+      rec.has(intervals, k) &&
+      intervals_overlap(dst_iv, rec.get(intervals, k))
+    }) in
+    list.len(conflicts) == 0
+}
+
 fn assign_registers(insts, intervals) {
   // For each slot with an interval, decide if it gets a register
   // Priority: slots live across calls get callee-saved regs
@@ -194,7 +216,35 @@ fn assign_registers(insts, intervals) {
       rec.set(acc, list.get(cross_sorted, i).slot, list.get(callee_regs, i))
     }
   ) in
-  let callee_assignments = base_assignments in
+
+  // Copy coalescing: for CopyI64(dst, src) where both have reg assignments,
+  // if dst and src don't interfere, reassign dst to src's reg.
+  // This eliminates MovRegToReg produced by the copy.
+  let copy_insts = list.filter(insts, fn(i) { i.op == "CopyI64" &&
+    rec.has(i,"dst") && i.dst.k == "stack" &&
+    rec.has(i,"src") && i.src.k == "stack" }) in
+  let coalesced = list.fold(copy_insts, base_assignments, fn(acc, inst) {
+    let dst_key = slot_key(inst.dst.slot) in
+    let src_key = slot_key(inst.src.slot) in
+    if !rec.has(acc, src_key) then acc
+    else
+      let src_reg = rec.get(acc, src_key) in
+      if src_reg == "rax" then acc
+      else if rec.has(unsafe, dst_key) then acc
+      else if !rec.has(acc, dst_key) then
+        // dst unassigned: assign same reg as src if no interference
+        if can_coalesce(dst_key, src_key, src_reg, acc, intervals)
+          then rec.set(acc, dst_key, src_reg)
+          else acc
+      else
+        // both assigned: try to reassign dst to src's reg
+        let dst_reg = rec.get(acc, dst_key) in
+        if dst_reg == src_reg then acc
+        else if can_coalesce(dst_key, src_key, src_reg, acc, intervals)
+          then rec.set(acc, dst_key, src_reg)
+          else acc
+  }) in
+  let callee_assignments = coalesced in
 
   // Caller-saved r10/r11 disabled: callees use them as scratch and don't
   // preserve them, so a value live across a call must never live there

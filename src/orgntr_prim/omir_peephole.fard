@@ -280,7 +280,14 @@ fn peephole_func(f) {
     else acc
   }) in
 
-  let after_dse = list.filter(after_cp, fn(inst) {
+  // Eliminate self-moves: MovRegToReg(r, r) is a no-op
+  let after_selfmove = list.filter(after_cp, fn(inst) {
+    if inst.op != "MovRegToReg" then true
+    else if !rec.has(inst,"dst") || !rec.has(inst,"src") then true
+    else inst.dst.k != "reg" || inst.src.k != "reg" || inst.dst.name != inst.src.name
+  }) in
+
+  let after_dse = list.filter(after_selfmove, fn(inst) {
     if inst.op != "MovRegToStack" then true
     else if !rec.has(inst, "dst") then true
     else if inst.dst.k != "stack" then true
