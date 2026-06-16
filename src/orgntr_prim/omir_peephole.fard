@@ -130,8 +130,8 @@ fn copy_prop_pass(insts) {
     { out: [], subst: {} },
     fn(acc, i) {
       let inst = apply_subst_to_inst(list.get(insts, i), acc.subst) in
-      if inst.op == "CopyI64" then
-        // Propagate: dst -> src in subsequent instructions
+      if inst.op == "CopyI64" && inst.dst.k == "stack" && inst.src.k == "stack" then
+        // Propagate: dst -> src in subsequent instructions (stack slots only)
         let new_subst = rec.set(acc.subst, slot_key(inst.dst.slot), inst.src.slot) in
         { out: acc.out, subst: new_subst }
       else
@@ -147,7 +147,7 @@ fn copy_prop_pass(insts) {
 fn is_dead_store(insts, i) {
   let inst = list.get(insts, i) in
   let op = inst.op in
-  if op == "MovRegToStack" then
+  if op == "MovRegToStack" && rec.has(inst,"dst") && inst.dst.k == "stack" then
     !slot_read_after(insts, i + 1, inst.dst.slot)
   else false
 }
@@ -168,11 +168,14 @@ fn dse_pass_to_insts(insts) {
       else
         let idx = list.find(
           list.build(n, fn(i) { i }),
-          fn(i) { list.get(insts, i).op == inst.op &&
-                  list.get(insts, i).dst.slot == inst.dst.slot }
+          fn(i) { let ci = list.get(insts, i) in
+                  ci.op == inst.op &&
+                  rec.has(ci,"dst") && ci.dst.k == "stack" &&
+                  rec.has(inst,"dst") && inst.dst.k == "stack" &&
+                  ci.dst.slot == inst.dst.slot }
         ) in
         if rec.has(idx, "some")
-          then slot_read_after(insts, idx.some + 1, inst.dst.slot)
+          then if inst.dst.k == "stack" then slot_read_after(insts, idx.some + 1, inst.dst.slot) else false
           else true
     }
   )
@@ -191,7 +194,7 @@ fn compute_cross_block_live(insts) {
     if inst.op == "Label" then
       { blk: acc.blk + 1, defs: acc.defs, cross: acc.cross }
     else
-      let acc2 = if inst.op == "CopyI64" then
+      let acc2 = if inst.op == "CopyI64" && inst.dst.k == "stack" then
         let k = slot_key(inst.dst.slot) in
         if rec.has(acc.defs, k) then acc
         else { blk: acc.blk, defs: rec.set(acc.defs, k, acc.blk), cross: acc.cross }
@@ -211,7 +214,7 @@ fn compute_cross_block_live(insts) {
 
 fn use_slots_for_cross(inst) {
   let op = inst.op in
-  if op == "CopyI64" then [inst.src.slot]
+  if op == "CopyI64" then if is_stack(inst.src) then [inst.src.slot] else []
   else if op == "SubI64" || op == "AddI64" || op == "MulI64" || op == "CmpI64" then
     list.map(list.filter([inst.lhs, inst.rhs], fn(o){is_stack(o)}), fn(o){o.slot})
   else if op == "CmpStackZero" || op == "MovStackToReg" then
@@ -241,7 +244,9 @@ fn peephole_func(f) {
       { out: list.append(acc.out, inst), subst: {} }
     else if inst.op == "CopyI64" then
       let inst2 = apply_subst_to_inst(inst, acc.subst) in
-      if rec.has(cross_live, slot_key(inst.dst.slot))
+      if inst.dst.k != "stack" || inst2.src.k != "stack" then
+        { out: list.append(acc.out, inst2), subst: acc.subst }
+      else if rec.has(cross_live, slot_key(inst.dst.slot))
         then { out: list.append(acc.out, inst2), subst: acc.subst }
         else { out: acc.out, subst: rec.set(acc.subst, slot_key(inst.dst.slot), inst2.src.slot) }
     else
@@ -277,6 +282,8 @@ fn peephole_func(f) {
 
   let after_dse = list.filter(after_cp, fn(inst) {
     if inst.op != "MovRegToStack" then true
+    else if !rec.has(inst, "dst") then true
+    else if inst.dst.k != "stack" then true
     else rec.has(all_reads, slot_key(inst.dst.slot))
   }) in
 

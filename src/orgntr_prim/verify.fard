@@ -121,11 +121,17 @@ fn verify_insts(insts, env, func_name, block_label, func_arities) {
 
 fn verify_term(term, env, labels, func_name, block_label) {
   if term.op == "RetI64" then
-    require_ty(env, term.src, "I64", "RET_I64_TYPE", { func: func_name, block: block_label, reg: term.src })
+    // Bool is valid too -- booleans are 0/1 integers at machine level
+    let ty = get_ty(env, term.src) in
+    if ty == "I64" || ty == "Bool" then ok(env)
+    else err("RET_I64_TYPE", { func: func_name, block: block_label, reg: term.src })
   else if term.op == "Br" then
     if has_label(labels, term.to) then ok(env) else err("BR_TARGET_MISSING", { func: func_name, block: block_label, target: term.to })
   else if term.op == "BrCond" then
-    let c = require_ty(env, term.cond, "Bool", "BRCOND_COND_TYPE", { func: func_name, block: block_label, reg: term.cond }) in
+    // Accept I64 too -- call results are I64, booleans are 0/1 integers
+    let cond_ty = get_ty(env, term.cond) in
+    let c = if cond_ty == "Bool" || cond_ty == "I64" then ok(env)
+            else err("BRCOND_COND_TYPE", { func: func_name, block: block_label, reg: term.cond }) in
     if c.t == "err" then c else
       if !has_label(labels, term.then_blk) then err("BRCOND_THEN_MISSING", { func: func_name, block: block_label, target: term.then_blk })
       else if !has_label(labels, term.else_blk) then err("BRCOND_ELSE_MISSING", { func: func_name, block: block_label, target: term.else_blk })

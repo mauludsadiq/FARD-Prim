@@ -1,0 +1,212 @@
+/// fardlex — Full FARD lexer producing span-annotated token streams
+///
+/// Token record: { t, v, line, col }
+///   t: "kw" | "ident" | "int" | "float" | "str" | "sym" | "eof"
+///   v: string value of token
+///   line, col: 1-based source position
+///
+/// Usage:
+///   import("apps/fardlex") as lex
+///   let tokens = lex.tokenize(src)
+
+import("std/str")  as str
+import("std/list") as list
+
+fn is_alpha(c) {
+  str.contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_", c)
+}
+
+fn is_alnum(c) {
+  str.contains("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789", c)
+}
+
+fn is_digit(c) {
+  str.contains("0123456789", c)
+}
+
+fn is_ws(c) {
+  c == " " || c == "\t"
+}
+
+fn is_keyword(w) {
+  w == "let" || w == "in" || w == "fn" || w == "if" || w == "then" || w == "else" ||
+  w == "import" || w == "as" || w == "export" || w == "match" || w == "using" ||
+  w == "test" || w == "while" || w == "return" || w == "true" || w == "false" ||
+  w == "null" || w == "and" || w == "or" || w == "not" || w == "artifact"
+}
+
+fn peek(chars, i) {
+  if i < list.len(chars) then list.get(chars, i) else ""
+}
+fn decode_escape(ch) {
+  if ch == "n" then "\n"
+  else if ch == "t" then "\t"
+  else if ch == "r" then "r"
+  else if ch == "\\" then "\\"
+  else if ch == "\"" then "\""
+  else ch
+}
+
+fn decode_string_raw(s) {
+  let chars = str.split(s, "") in
+  let n = list.len(chars) in
+  let r = list.fold(list.build(n, fn(i) { i }), { out: [], skip: false }, fn(a, i) {
+    if a.skip then { out: a.out, skip: false }
+    else
+      let ch = list.get(chars, i) in
+      if ch == "\\" && i + 1 < n then { out: list.append(a.out, decode_escape(list.get(chars, i + 1))), skip: true }
+      else { out: list.append(a.out, ch), skip: false }
+  }) in
+  str.concat(r.out)
+}
+
+fn scan_line_comment(chars, n, idx) {
+  let r = list.fold(list.build(n - idx, fn(j) { j }), { end: idx, done: false }, fn(a, j) {
+    if a.done then a else
+    let ci = idx + j in
+    if ci < n && list.get(chars, ci) != "\n" then { end: ci + 1, done: false }
+    else { end: ci, done: true }
+  }) in
+  r.end
+}
+fn scan_string(chars, n, idx, src) {
+  let r = list.fold(list.build(n - idx - 1, fn(j) { j }), { done: false, end: idx + 1, esc: false }, fn(a, j) {
+    if a.done then a else
+    let ci = idx + 1 + j in
+    let ch = peek(chars, ci) in
+    if a.esc then { done: false, end: ci + 1, esc: false }
+    else if ch == "\\" then { done: false, end: ci + 1, esc: true }
+    else if ch == "\"" then { done: true, end: ci + 1, esc: false }
+    else { done: false, end: ci + 1, esc: false }
+  }) in
+  let raw = str.slice(src, idx + 1, r.end - 1) in
+  let v = decode_string_raw(raw) in
+  { end: r.end, v: v }
+}
+
+fn scan_backtick(chars, n, idx, src) {
+  let r = list.fold(list.build(n - idx - 1, fn(j) { j }), { done: false, end: idx + 1 }, fn(a, j) {
+    if a.done then a else
+    let ci = idx + 1 + j in
+    let ch = peek(chars, ci) in
+    if ch == "`" then { done: true, end: ci + 1 }
+    else { done: false, end: ci + 1 }
+  }) in
+  let raw = str.slice(src, idx + 1, r.end - 1) in
+  let v = decode_string_raw(raw) in
+  { end: r.end, v: v }
+}
+
+fn scan_word(chars, n, idx, src) {
+  let r = list.fold(list.build(n - idx, fn(j) { j + 1 }), { done: false, end: idx + 1 }, fn(a, j) {
+    if a.done then a
+    else if idx + j < n && is_alnum(peek(chars, idx + j)) then { done: false, end: idx + j + 1 }
+    else { done: true, end: idx + j }
+  }) in
+  { end: r.end, v: str.slice(src, idx, r.end) }
+}
+
+fn scan_number(chars, n, idx, src) {
+  let r = list.fold(list.build(n - idx, fn(j) { j + 1 }), { done: false, end: idx + 1, is_float: false }, fn(a, j) {
+    if a.done then a else
+    let ci = idx + j in
+    if ci >= n then { done: true, end: ci, is_float: a.is_float }
+    else
+      let ch = peek(chars, ci) in
+      if is_digit(ch) then { done: false, end: ci + 1, is_float: a.is_float }
+      else if ch == "." && ci + 1 < n && is_digit(peek(chars, ci + 1)) then { done: false, end: ci + 1, is_float: true }
+      else { done: true, end: ci, is_float: a.is_float }
+  }) in
+  { end: r.end, v: str.slice(src, idx, r.end), is_float: r.is_float }
+}
+
+fn tok(t, v, line, col) {
+  { t: t, v: v, line: line, col: col }
+}
+
+fn tokenize(src) {
+  let chars = str.chars(src) in
+  let n     = list.len(chars) in
+  let state = list.fold(
+    list.build(n, fn(i) { i }),
+    { tokens: [], line: 1, col: 1, i: 0 },
+    fn(acc, idx) {
+      if idx < acc.i then acc else
+      let c    = peek(chars, idx) in
+      let c2   = peek(chars, idx + 1) in
+      let line = acc.line in
+      let col  = acc.col in
+
+      if c == "\n" then
+        { tokens: acc.tokens, line: line + 1, col: 1, i: idx + 1 }
+      else if is_ws(c) then
+        { tokens: acc.tokens, line: line, col: col + 1, i: idx + 1 }
+
+      // Doc comments /// — emit as token (must check before //)
+      else if c == "/" && c2 == "/" && peek(chars, idx + 2) == "/" then
+        let end = scan_line_comment(chars, n, idx) in
+        let v   = str.slice(src, idx, end) in
+        { tokens: list.append(acc.tokens, tok("doc", v, line, col)), line: line, col: col + (end - idx), i: end }
+
+      // Line comments // and #
+      else if (c == "/" && c2 == "/") || c == "#" then
+        let end = scan_line_comment(chars, n, idx) in
+        { tokens: acc.tokens, line: line, col: col, i: end }
+
+      // Strings
+      else if c == "\"" then
+        let r = scan_string(chars, n, idx, src) in
+        { tokens: list.append(acc.tokens, tok("str", r.v, line, col)), line: line, col: col + (r.end - idx), i: r.end }
+
+      // Backtick strings
+      else if c == "`" then
+        let r = scan_backtick(chars, n, idx, src) in
+        { tokens: list.append(acc.tokens, tok("str", r.v, line, col)), line: line, col: col + (r.end - idx), i: r.end }
+
+      // Two-char operators
+      else if c == "=" && c2 == "=" then
+        { tokens: list.append(acc.tokens, tok("sym", "==", line, col)), line: line, col: col + 2, i: idx + 2 }
+      else if c == "!" && c2 == "=" then
+        { tokens: list.append(acc.tokens, tok("sym", "!=", line, col)), line: line, col: col + 2, i: idx + 2 }
+      else if c == "<" && c2 == "=" then
+        { tokens: list.append(acc.tokens, tok("sym", "<=", line, col)), line: line, col: col + 2, i: idx + 2 }
+      else if c == ">" && c2 == "=" then
+        { tokens: list.append(acc.tokens, tok("sym", ">=", line, col)), line: line, col: col + 2, i: idx + 2 }
+      else if c == "&" && c2 == "&" then
+        { tokens: list.append(acc.tokens, tok("sym", "&&", line, col)), line: line, col: col + 2, i: idx + 2 }
+      else if c == "|" && c2 == "|" then
+        { tokens: list.append(acc.tokens, tok("sym", "||", line, col)), line: line, col: col + 2, i: idx + 2 }
+      else if c == "-" && c2 == ">" then
+        { tokens: list.append(acc.tokens, tok("sym", "->", line, col)), line: line, col: col + 2, i: idx + 2 }
+      else if c == "=" && c2 == ">" then
+        { tokens: list.append(acc.tokens, tok("sym", "=>", line, col)), line: line, col: col + 2, i: idx + 2 }
+      else if c == "|" && c2 == ">" then
+        { tokens: list.append(acc.tokens, tok("sym", "|>", line, col)), line: line, col: col + 2, i: idx + 2 }
+      else if c == "?" && c2 == "." then
+        { tokens: list.append(acc.tokens, tok("sym", "?.", line, col)), line: line, col: col + 2, i: idx + 2 }
+      else if c == "?" && c2 == "?" then
+        { tokens: list.append(acc.tokens, tok("sym", "??", line, col)), line: line, col: col + 2, i: idx + 2 }
+      else if c == "." && c2 == "." && peek(chars, idx + 2) == "." then
+        { tokens: list.append(acc.tokens, tok("sym", "...", line, col)), line: line, col: col + 3, i: idx + 3 }
+
+      // Identifiers and keywords
+      else if is_alpha(c) then
+        let r    = scan_word(chars, n, idx, src) in
+        let kind = if is_keyword(r.v) then "kw" else "ident" in
+        { tokens: list.append(acc.tokens, tok(kind, r.v, line, col)), line: line, col: col + (r.end - idx), i: r.end }
+
+      // Numbers
+      else if is_digit(c) then
+        let r    = scan_number(chars, n, idx, src) in
+        let kind = if r.is_float then "float" else "int" in
+        { tokens: list.append(acc.tokens, tok(kind, r.v, line, col)), line: line, col: col + (r.end - idx), i: r.end }
+
+      // Single-char symbols
+      else
+        { tokens: list.append(acc.tokens, tok("sym", c, line, col)), line: line, col: col + 1, i: idx + 1 }
+    }
+  ) in
+  list.append(state.tokens, tok("eof", "", state.line, state.col))
+}
+
+{ tokenize: tokenize, tok: tok, is_keyword: is_keyword }

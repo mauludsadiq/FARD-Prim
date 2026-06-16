@@ -1,0 +1,520 @@
+/// fardparse — Recursive descent parser for FARD
+///
+/// Each parse_* function takes (tokens, pos) and returns { node, pos } or { err, pos }
+/// AST nodes: { t: "...", ... } records
+///
+/// Usage:
+///   import("apps/fardlex")   as lex
+///   import("apps/fardparse") as par
+///   let tokens = lex.tokenize(src)
+///   let result = par.parse_module(tokens, 0)
+
+import("std/str")   as str
+import("std/list")  as list
+import("std/rec")   as rec
+import("std/array") as array
+
+// ── Token accessors ───────────────────────────────────────────────────────────
+
+fn tok_at(tokens, pos) {
+  if pos < array.len(tokens) then array.get(tokens, pos)
+  else { t: "eof", v: "", line: 0, col: 0 }
+}
+
+fn tok_type(tokens, pos) { tok_at(tokens, pos).t }
+fn tok_val(tokens, pos)  { tok_at(tokens, pos).v }
+
+fn is_kw(tokens, pos, kw) {
+  let t = tok_at(tokens, pos) in
+  (t.t == "kw" || t.t == "ident") && t.v == kw
+}
+
+fn is_sym(tokens, pos, sym) {
+  let t = tok_at(tokens, pos) in
+  t.t == "sym" && t.v == sym
+}
+
+fn is_eof(tokens, pos) {
+  tok_at(tokens, pos).t == "eof"
+}
+
+fn ok(node, pos)  { { ok: true, node: node, pos: pos } }
+fn err(msg, pos)  { { ok: false, err: msg, pos: pos } }
+
+fn expect_sym(tokens, pos, sym) {
+  if is_sym(tokens, pos, sym) then { ok: true, pos: pos + 1 }
+  else
+    let t = tok_at(tokens, pos) in
+    { ok: false, err: str.concat("expected '", str.concat(sym, str.concat("' got '", str.concat(t.v, "'")))), pos: pos }
+}
+
+fn expect_kw(tokens, pos, kw) {
+  if is_kw(tokens, pos, kw) then { ok: true, pos: pos + 1 }
+  else
+    let t = tok_at(tokens, pos) in
+    { ok: false, err: str.concat("expected '", str.concat(kw, str.concat("' got '", str.concat(t.v, "'")))), pos: pos }
+}
+
+// ── Literal parsers ───────────────────────────────────────────────────────────
+
+fn parse_atom(tokens, pos) {
+  let t = tok_at(tokens, pos) in
+
+  if t.t == "int" then
+    ok({ t: "int", v: t.v, line: t.line, col: t.col }, pos + 1)
+
+  else if t.t == "float" then
+    ok({ t: "float", v: t.v, line: t.line, col: t.col }, pos + 1)
+
+  else if t.t == "str" then
+    ok({ t: "str", v: t.v, line: t.line, col: t.col }, pos + 1)
+
+  else if t.t == "kw" && t.v == "true" then
+    ok({ t: "bool", v: "true", line: t.line, col: t.col }, pos + 1)
+
+  else if t.t == "kw" && t.v == "false" then
+    ok({ t: "bool", v: "false", line: t.line, col: t.col }, pos + 1)
+
+  else if t.t == "kw" && t.v == "null" then
+    ok({ t: "null", line: t.line, col: t.col }, pos + 1)
+
+  else if t.t == "ident" then
+    ok({ t: "var", v: t.v, line: t.line, col: t.col }, pos + 1)
+
+  // Parenthesized expression
+  else if is_sym(tokens, pos, "(") then
+    let r = parse_expr(tokens, pos + 1) in
+    if !r.ok then r else
+    let ce = expect_sym(tokens, r.pos, ")") in
+    if !ce.ok then err(ce.err, r.pos) else
+    ok(r.node, ce.pos)
+
+  // List literal
+  else if is_sym(tokens, pos, "[") then
+    parse_list_lit(tokens, pos)
+
+  // Record literal
+  else if is_sym(tokens, pos, "{") then
+    parse_rec_lit(tokens, pos)
+
+  // Lambda: ident => expr
+  else if t.t == "ident" && is_sym(tokens, pos + 1, "=>") then
+    let body = parse_expr(tokens, pos + 2) in
+    if !body.ok then body else
+    ok({ t: "fn", params: [t.v], body: body.node, line: t.line }, body.pos)
+
+  // Anonymous function
+  else if t.t == "kw" && t.v == "fn" then
+    parse_fn_expr(tokens, pos)
+
+  // if expression
+  else if t.t == "kw" && t.v == "if" then
+    parse_if(tokens, pos)
+
+  // let expression
+  else if t.t == "kw" && t.v == "let" then
+    parse_let_expr(tokens, pos)
+
+  // match expression
+  else if t.t == "kw" && t.v == "match" then
+    parse_match(tokens, pos)
+
+  // while expression
+  else if t.t == "kw" && t.v == "while" then
+    parse_while(tokens, pos)
+
+  else
+    err(str.concat("unexpected token: ", t.v), pos)
+}
+
+// ── List literal ──────────────────────────────────────────────────────────────
+
+fn parse_list_lit(tokens, pos) {
+  let p0 = pos + 1 in
+  if is_sym(tokens, p0, "]") then
+    ok({ t: "list", items: [], line: tok_at(tokens, pos).line }, p0 + 1)
+  else
+    let r = parse_comma_exprs(tokens, p0, "]") in
+    if !r.ok then r else
+    ok({ t: "list", items: r.items, line: tok_at(tokens, pos).line }, r.pos)
+}
+
+fn parse_comma_items(tokens, pos, close, acc) {
+  if is_sym(tokens, pos, close) then { ok: true, items: acc, pos: pos + 1 }
+  else
+    let re = parse_expr(tokens, pos) in
+    if !re.ok then { ok: false, items: acc, pos: re.pos, err: re.err }
+    else
+      let p2 = if is_sym(tokens, re.pos, ",") then re.pos + 1 else re.pos in
+      if is_sym(tokens, p2, close) then { ok: true, items: list.append(acc, re.node), pos: p2 + 1 }
+      else parse_comma_items(tokens, p2, close, list.append(acc, re.node))
+}
+
+fn parse_comma_exprs(tokens, pos, close) {
+  if is_sym(tokens, pos, close) then { ok: true, items: [], pos: pos + 1 }
+  else parse_comma_items(tokens, pos, close, [])
+}
+
+// ── Record literal ────────────────────────────────────────────────────────────
+
+fn parse_rec_fields(tokens, pos, acc) {
+  if is_sym(tokens, pos, "}") then { ok: true, fields: acc, pos: pos + 1 }
+  else
+    let kt = tok_at(tokens, pos) in
+    let key = kt.v in
+    let p1 = pos + 1 in
+    let ce = expect_sym(tokens, p1, ":") in
+    if !ce.ok then { ok: false, fields: acc, pos: p1, err: ce.err }
+    else
+      let ve = parse_expr(tokens, ce.pos) in
+      if !ve.ok then { ok: false, fields: acc, pos: ve.pos, err: ve.err }
+      else
+        let p2 = if is_sym(tokens, ve.pos, ",") then ve.pos + 1 else ve.pos in
+        parse_rec_fields(tokens, p2, list.append(acc, { k: key, v: ve.node }))
+}
+
+fn parse_rec_lit(tokens, pos) {
+  let line = tok_at(tokens, pos).line in
+  let p0   = pos + 1 in
+  if is_sym(tokens, p0, "}") then
+    ok({ t: "rec", fields: [], line: line }, p0 + 1)
+  else
+    let r = parse_rec_fields(tokens, p0, []) in
+    if !r.ok then err(r.err, r.pos)
+    else ok({ t: "rec", fields: r.fields, line: line }, r.pos)
+}
+
+// ── Function expression ───────────────────────────────────────────────────────
+
+fn parse_fn_params(tokens, pos) {
+  if is_sym(tokens, pos, ")") then { ok: true, params: [], pos: pos + 1 }
+  else
+    let r = list.fold(
+      list.build(64, fn(i) { i }),
+      { ok: true, params: [], pos: pos, done: false, err: "" },
+      fn(acc, _) {
+        if acc.done || !acc.ok then acc else
+        let t = tok_at(tokens, acc.pos) in
+        if t.t != "ident" then { ok: false, params: acc.params, pos: acc.pos, done: true, err: "expected param name" }
+        else
+          let p1 = acc.pos + 1 in
+          let p2 = if is_sym(tokens, p1, ":") then
+            let r2 = skip_type(tokens, p1 + 1) in r2
+          else p1 in
+          if is_sym(tokens, p2, ")") then
+            { ok: true, params: list.append(acc.params, t.v), pos: p2 + 1, done: true, err: "" }
+          else if is_sym(tokens, p2, ",") then
+            { ok: true, params: list.append(acc.params, t.v), pos: p2 + 1, done: false, err: "" }
+          else
+            { ok: false, params: acc.params, pos: p2, done: true, err: "expected ',' or ')'" }
+      }
+    ) in
+    { ok: r.ok, params: r.params, pos: r.pos, err: r.err }
+}
+
+fn skip_type(tokens, pos) {
+  // Skip a type annotation — just consume ident and optional <...>
+  let t = tok_at(tokens, pos) in
+  if t.t != "ident" && t.t != "kw" then pos else
+  let p1 = pos + 1 in
+  if is_sym(tokens, p1, "<") then
+    let r = list.fold(list.build(32, fn(i) { i }), { pos: p1 + 1, depth: 1, done: false }, fn(a, _) {
+      if a.done then a else
+      if is_sym(tokens, a.pos, "<") then { pos: a.pos + 1, depth: a.depth + 1, done: false }
+      else if is_sym(tokens, a.pos, ">") && a.depth == 1 then { pos: a.pos + 1, depth: 0, done: true }
+      else if is_sym(tokens, a.pos, ">") then { pos: a.pos + 1, depth: a.depth - 1, done: false }
+      else { pos: a.pos + 1, depth: a.depth, done: false }
+    }) in
+    r.pos
+  else p1
+}
+
+fn parse_fn_expr(tokens, pos) {
+  let line = tok_at(tokens, pos).line in
+  let p0   = pos + 1 in
+  let ce   = expect_sym(tokens, p0, "(") in
+  if !ce.ok then err(ce.err, p0) else
+  let pr   = parse_fn_params(tokens, ce.pos) in
+  if !pr.ok then err(pr.err, ce.pos) else
+  let p1   = if is_sym(tokens, pr.pos, "->") then skip_type(tokens, pr.pos + 1) else pr.pos in
+  let ob   = expect_sym(tokens, p1, "{") in
+  if !ob.ok then err(ob.err, p1) else
+  let body = parse_block(tokens, ob.pos) in
+  if !body.ok then body else
+  let cb   = expect_sym(tokens, body.pos, "}") in
+  if !cb.ok then err(cb.err, body.pos) else
+  ok({ t: "fn", params: pr.params, body: body.node, line: line }, cb.pos)
+}
+
+// ── Block (let chain + tail expr) ─────────────────────────────────────────────
+
+fn parse_block(tokens, pos) {
+  let line = tok_at(tokens, pos).line in
+  if is_kw(tokens, pos, "let") then
+    let name_tok = tok_at(tokens, pos + 1) in
+    let name     = name_tok.v in
+    let p1       = pos + 2 in
+    let p2       = if is_sym(tokens, p1, ":") then skip_type(tokens, p1 + 1) else p1 in
+    let eq       = expect_sym(tokens, p2, "=") in
+    if !eq.ok then err(eq.err, p2) else
+    let val      = parse_expr(tokens, eq.pos) in
+    if !val.ok then val else
+    let p3       = if is_kw(tokens, val.pos, "in") then val.pos + 1 else val.pos in
+    let body     = parse_block(tokens, p3) in
+    if !body.ok then body else
+    ok({ t: "let", name: name, val: val.node, body: body.node, line: line }, body.pos)
+  else
+    parse_expr(tokens, pos)
+}
+
+// ── if expression ─────────────────────────────────────────────────────────────
+
+fn parse_if(tokens, pos) {
+  let line = tok_at(tokens, pos).line in
+  let p0   = pos + 1 in
+  let cond = parse_expr(tokens, p0) in
+  if !cond.ok then cond else
+  let pt   = if is_kw(tokens, cond.pos, "then") then cond.pos + 1 else cond.pos in
+  let then_r = parse_expr(tokens, pt) in
+  if !then_r.ok then then_r else
+  let pe   = if is_kw(tokens, then_r.pos, "else") then then_r.pos + 1 else then_r.pos in
+  let else_r = parse_expr(tokens, pe) in
+  if !else_r.ok then else_r else
+  ok({ t: "if", cond: cond.node, then_n: then_r.node, else_n: else_r.node, line: line }, else_r.pos)
+}
+
+// ── let expression ────────────────────────────────────────────────────────────
+
+fn parse_let_expr(tokens, pos) {
+  let line     = tok_at(tokens, pos).line in
+  let name_tok = tok_at(tokens, pos + 1) in
+  let name     = name_tok.v in
+  let p1       = pos + 2 in
+  let p2       = if is_sym(tokens, p1, ":") then skip_type(tokens, p1 + 1) else p1 in
+  let eq       = expect_sym(tokens, p2, "=") in
+  if !eq.ok then err(eq.err, p2) else
+  let val      = parse_expr(tokens, eq.pos) in
+  if !val.ok then val else
+  let p3       = if is_kw(tokens, val.pos, "in") then val.pos + 1 else val.pos in
+  let body     = parse_expr(tokens, p3) in
+  if !body.ok then body else
+  ok({ t: "let", name: name, val: val.node, body: body.node, line: line }, body.pos)
+}
+
+// ── match expression ──────────────────────────────────────────────────────────
+
+fn parse_match_arms(tokens, pos, acc) {
+  if is_sym(tokens, pos, "}") then { ok: true, arms: acc, pos: pos + 1 }
+  else
+    let pat  = parse_expr(tokens, pos) in
+    if !pat.ok then { ok: false, arms: acc, pos: pat.pos, err: pat.err } else
+    let arr  = expect_sym(tokens, pat.pos, "=>") in
+    if !arr.ok then { ok: false, arms: acc, pos: pat.pos, err: arr.err } else
+    let body = parse_expr(tokens, arr.pos) in
+    if !body.ok then { ok: false, arms: acc, pos: body.pos, err: body.err } else
+    let p2   = if is_sym(tokens, body.pos, ",") then body.pos + 1 else body.pos in
+    parse_match_arms(tokens, p2, list.append(acc, { pat: pat.node, body: body.node }))
+}
+
+fn parse_while(tokens, pos) {
+  // while init_expr cond_fn step_fn
+  // Three bare expressions after the "while" keyword
+  let line = tok_at(tokens, pos).line in
+  let init_r = parse_expr(tokens, pos + 1) in
+  if !init_r.ok then init_r else
+  let cond_r = parse_expr(tokens, init_r.pos) in
+  if !cond_r.ok then cond_r else
+  let step_r = parse_expr(tokens, cond_r.pos) in
+  if !step_r.ok then step_r else
+  ok({ t: "while", init: init_r.node, cond: cond_r.node, step: step_r.node, line: line }, step_r.pos)
+}
+
+fn parse_match(tokens, pos) {
+  let line   = tok_at(tokens, pos).line in
+  let subj   = parse_expr(tokens, pos + 1) in
+  if !subj.ok then subj else
+  let ob     = expect_sym(tokens, subj.pos, "{") in
+  if !ob.ok then err(ob.err, subj.pos) else
+  let r = parse_match_arms(tokens, ob.pos, []) in
+  if !r.ok then err(r.err, r.pos)
+  else ok({ t: "match", subj: subj.node, arms: r.arms, line: line }, r.pos)
+}
+
+// ── Postfix (calls, field access, index) ─────────────────────────────────────
+
+fn parse_postfix_loop(tokens, pos, node) {
+  if is_sym(tokens, pos, ".") then
+    let ft = tok_at(tokens, pos + 1) in
+    if ft.t != "ident" && ft.t != "kw" then ok(node, pos)
+    else if is_sym(tokens, pos + 2, "(") then
+      let ar = parse_comma_exprs(tokens, pos + 3, ")") in
+      if !ar.ok then err(ar.err, ar.pos)
+      else parse_postfix_loop(tokens, ar.pos, { t: "call", fn_n: { t: "get", obj: node, field: ft.v }, args: ar.items })
+    else
+      parse_postfix_loop(tokens, pos + 2, { t: "get", obj: node, field: ft.v })
+  else if is_sym(tokens, pos, "(") then
+    let ar = parse_comma_exprs(tokens, pos + 1, ")") in
+    if !ar.ok then err(ar.err, ar.pos)
+    else parse_postfix_loop(tokens, ar.pos, { t: "call", fn_n: node, args: ar.items })
+  else if is_sym(tokens, pos, "[") then
+    let ir = parse_expr(tokens, pos + 1) in
+    if !ir.ok then ir else
+    let cb = expect_sym(tokens, ir.pos, "]") in
+    if !cb.ok then err(cb.err, ir.pos)
+    else parse_postfix_loop(tokens, cb.pos, { t: "index", obj: node, idx: ir.node })
+  else if is_sym(tokens, pos, "?") then
+    parse_postfix_loop(tokens, pos + 1, { t: "try", expr: node })
+  else ok(node, pos)
+}
+
+fn parse_postfix(tokens, pos) {
+  let base = parse_atom(tokens, pos) in
+  if !base.ok then base else
+  parse_postfix_loop(tokens, base.pos, base.node)
+}
+
+// ── Unary ─────────────────────────────────────────────────────────────────────
+
+fn parse_unary(tokens, pos) {
+  if is_sym(tokens, pos, "!") then
+    let r = parse_unary(tokens, pos + 1) in
+    if !r.ok then r else ok({ t: "unary", op: "!", operand: r.node }, r.pos)
+  else if is_sym(tokens, pos, "-") then
+    let r = parse_unary(tokens, pos + 1) in
+    if !r.ok then r else ok({ t: "unary", op: "-", operand: r.node }, r.pos)
+  else
+    parse_postfix(tokens, pos)
+}
+
+// ── Binary (precedence climbing) ─────────────────────────────────────────────
+
+fn prec(op) {
+  if op == "|>" then 1
+  else if op == "||" || op == "??" then 2
+  else if op == "&&" then 3
+  else if op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=" then 4
+  else if op == "+" || op == "-" then 5
+  else if op == "*" || op == "/" || op == "%" then 6
+  else 0
+}
+
+fn is_binop(tokens, pos) {
+  let t = tok_at(tokens, pos) in
+  t.t == "sym" && prec(t.v) > 0
+}
+
+fn parse_infix(tokens, pos, min_prec) {
+  let left = parse_unary(tokens, pos) in
+  if !left.ok then left else
+  parse_infix_loop(tokens, left.pos, left.node, min_prec)
+}
+
+fn parse_infix_loop(tokens, pos, node, min_prec) {
+  if !is_binop(tokens, pos) then ok(node, pos) else
+  let op = tok_at(tokens, pos).v in
+  let p  = prec(op) in
+  if p < min_prec then ok(node, pos) else
+  let rhs = parse_infix(tokens, pos + 1, p + 1) in
+  if !rhs.ok then rhs else
+  parse_infix_loop(tokens, rhs.pos, { t: "bin", op: op, left: node, right: rhs.node }, min_prec)
+}
+
+
+fn parse_expr(tokens, pos) {
+  parse_infix(tokens, pos, 0)
+}
+
+// ── Top-level items ───────────────────────────────────────────────────────────
+
+fn parse_fn_item(tokens, pos) {
+  let line     = tok_at(tokens, pos).line in
+  let name_tok = tok_at(tokens, pos + 1) in
+  let name     = name_tok.v in
+  let p0       = pos + 2 in
+  let ce       = expect_sym(tokens, p0, "(") in
+  if !ce.ok then err(ce.err, p0) else
+  let pr       = parse_fn_params(tokens, ce.pos) in
+  if !pr.ok then err(pr.err, ce.pos) else
+  let p1       = if is_sym(tokens, pr.pos, "->") then skip_type(tokens, pr.pos + 1) else pr.pos in
+  let ob       = expect_sym(tokens, p1, "{") in
+  if !ob.ok then err(ob.err, p1) else
+  let body     = parse_block(tokens, ob.pos) in
+  if !body.ok then body else
+  let cb       = expect_sym(tokens, body.pos, "}") in
+  if !cb.ok then err(cb.err, body.pos) else
+  ok({ t: "fn_item", name: name, params: pr.params, body: body.node, line: line }, cb.pos)
+}
+
+fn parse_let_item(tokens, pos) {
+  let line     = tok_at(tokens, pos).line in
+  let name_tok = tok_at(tokens, pos + 1) in
+  let name     = name_tok.v in
+  let p1       = pos + 2 in
+  let p2       = if is_sym(tokens, p1, ":") then skip_type(tokens, p1 + 1) else p1 in
+  let eq       = expect_sym(tokens, p2, "=") in
+  if !eq.ok then err(eq.err, p2) else
+  let val      = parse_expr(tokens, eq.pos) in
+  if !val.ok then val else
+  ok({ t: "let_item", name: name, val: val.node, line: line }, val.pos)
+}
+
+fn parse_import_item(tokens, pos) {
+  let line = tok_at(tokens, pos).line in
+  let p0   = pos + 1 in
+  let lp   = expect_sym(tokens, p0, "(") in
+  if !lp.ok then err(lp.err, p0) else
+  let pt   = tok_at(tokens, lp.pos) in
+  let path = pt.v in
+  let p1   = lp.pos + 1 in
+  let rp   = expect_sym(tokens, p1, ")") in
+  if !rp.ok then err(rp.err, p1) else
+  let as_k = expect_kw(tokens, rp.pos, "as") in
+  if !as_k.ok then err(as_k.err, rp.pos) else
+  let alias_tok = tok_at(tokens, as_k.pos) in
+  let alias     = alias_tok.v in
+  ok({ t: "import", path: path, alias: alias, line: line }, as_k.pos + 1)
+}
+
+fn parse_module_items(tokens, pos, acc) {
+  if is_eof(tokens, pos) then { ok: true, items: acc, pos: pos }
+  else if is_kw(tokens, pos, "import") then
+    let r = parse_import_item(tokens, pos) in
+    if !r.ok then { ok: false, items: acc, pos: r.pos, err: r.err }
+    else parse_module_items(tokens, r.pos, list.append(acc, r.node))
+  else if is_kw(tokens, pos, "fn") then
+    let r = parse_fn_item(tokens, pos) in
+    if !r.ok then { ok: false, items: acc, pos: r.pos, err: r.err }
+    else parse_module_items(tokens, r.pos, list.append(acc, r.node))
+  else if is_kw(tokens, pos, "let") then
+    let r = parse_let_item(tokens, pos) in
+    if !r.ok then { ok: false, items: acc, pos: r.pos, err: r.err }
+    else parse_module_items(tokens, r.pos, list.append(acc, r.node))
+  else if tok_at(tokens, pos).t == "doc" then
+    parse_module_items(tokens, pos + 1, acc)
+  else
+    let r = parse_expr(tokens, pos) in
+    if !r.ok then { ok: false, items: acc, pos: r.pos, err: r.err }
+    else parse_module_items(tokens, r.pos, list.append(acc, { t: "expr_item", expr: r.node }))
+}
+
+fn parse_module(tokens, pos) {
+  let arr = array.from_list(tokens) in
+  parse_module_arr(arr, pos)
+}
+
+fn parse_module_arr(tokens, pos) {
+  let r = parse_module_items(tokens, pos, []) in
+  if !r.ok then err(r.err, r.pos)
+  else ok({ t: "module", items: r.items }, r.pos)
+}
+
+{
+  parse_module: parse_module,
+  parse_expr:   parse_expr,
+  parse_block:  parse_block,
+  tok_at:       tok_at,
+  is_kw:        is_kw,
+  is_sym:       is_sym,
+  ok:           ok,
+  err:          err
+}

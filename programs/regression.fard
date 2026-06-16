@@ -21,5 +21,8 @@ fn check(name, src, out, expected) {
   check("rec_field",  "fn geta(r){r.a}\ngeta({a:42,b:7})",                          "out/r_rec",     42),
   check("rec_field2", "fn getb(r){r.b}\ngetb({a:42,b:7})",                          "out/r_rec2",    7),
   check("closure",    "fn adder(x){fn(y){x+y}}\nadder(10)(32)",                     "out/r_closure", 42),
-  check("str_char",   "fn c0(s){s[0]}\nc0(\"hello\")",                              "out/r_str",     104)
+  check("str_char",   "fn c0(s){s[0]}\nc0(\"hello\")",                              "out/r_str",     104),
+  check("while_count","fn count(n){ while 0 fn(s){s<n} fn(s){s+1} }\ncount(10)",  "out/r_while",   10)
 ]
+//sccp
+//sccp

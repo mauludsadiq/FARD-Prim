@@ -54,6 +54,8 @@ fn use_slots(inst) {
   else if op == "LoadHeap"      then [inst.ptr.slot]
   else if op == "LoadHeapDyn"   then [inst.ptr.slot, inst.idx.slot]
   else if op == "MovStackToStack" then [inst.src.slot]
+  else if op == "CallIndirect" then
+    if inst.closure.k == "stack" then [inst.closure.slot] else []
   else []
 }
 
@@ -107,6 +109,8 @@ fn unrewritable_slots(insts) {
       else if op == "MakeClosure" then unsafe_slot(inst.dst)
       else if op == "ConstStr" || op == "ConstStrChar" then
         if rec.has(inst,"dst") then unsafe_slot(inst.dst) else []
+      else if op == "LoadArg" then
+        if rec.has(inst,"slot") then [inst.slot] else []
       else if op == "WriteFvalIntOps" || op == "UnboxInt" then
         list.concat([if rec.has(inst,"dst_slot") then [inst.dst_slot] else [],
                       if rec.has(inst,"src_slot") then [inst.src_slot] else [],
@@ -269,6 +273,9 @@ fn rewrite_inst(inst, assignments) {
     if src.k == "reg"
       then { op: "AddRegReg", src: src }
       else inst
+  else if op == "CallIndirect" then
+    let closure2 = if inst.closure.k == "stack" then slot_or_reg(inst.closure.slot, assignments) else inst.closure in
+    { op: "CallIndirect", closure: closure2 }
   else inst
 }
 

@@ -78,11 +78,9 @@ fn lower_instr_one(instr, fn_names, field_order, stdlib_regs) {
     ocir.inst_call_i64(instr.dst, callee, instr.args)
   else if op == "make_closure" then
     let fn_name = list.get(fn_names, instr.fn_id) in
-    if list.len(instr.captures) == 0 then
-      ocir.inst_imm_i64(instr.dst, 0)
-    else
-      let ptr_reg = 30000 + instr.dst in
-      { op: "MakeClosure", dst: instr.dst, ptr_reg: ptr_reg, fn_name: fn_name, captures: instr.captures }  else if op == "global_store" then
+    let captures = if rec.has(instr, "captures") then instr.captures else [] in
+    let ptr_reg = 30000 + instr.dst in
+    { op: "MakeClosure", dst: instr.dst, ptr_reg: ptr_reg, fn_name: fn_name, captures: captures }  else if op == "global_store" then
     // Global stores not yet supported — emit a no-op ImmI64 0
     ocir.inst_imm_i64(0, 0)
   else if op == "call_global" then
@@ -367,13 +365,26 @@ fn resolve_subst(subst, reg) {
 }
 
 fn build_subst(instrs, arity) {
-  // Build substitution map for ALL load instructions (register copies)
-  // load dst src means dst = src
-  // Resolve chains transitively
-  let direct = list.fold(instrs, {}, fn(acc, i) {
-    if type.of(i) == "record" && rec.has(i, "op") && i.op == "load" && rec.has(i, "src") && type.of(i.src) == "int" && i.src >= arity
-      then rec.set(acc, str.from(i.dst), i.src)
-      else acc  }) in
+  // Build substitution map for load instructions.
+  // Only substitute registers defined by load EXACTLY ONCE.
+  // Registers written multiple times are loop-carried -- do not substitute.
+  let loads = list.filter(instrs, fn(i) {
+    type.of(i) == "record" && rec.has(i, "op") && i.op == "load" &&
+    rec.has(i, "src") && type.of(i.src) == "int" && i.src >= arity
+  }) in
+  // Count definitions per dst register
+  let def_counts = list.fold(loads, {}, fn(acc, i) {
+    let k = str.from(i.dst) in
+    let prev = if rec.has(acc, k) then rec.get(acc, k) else 0 in
+    rec.set(acc, k, prev + 1)
+  }) in
+  // Only add to substitution if defined exactly once
+  let direct = list.fold(loads, {}, fn(acc, i) {
+    let k = str.from(i.dst) in
+    if rec.get(def_counts, k) == 1
+      then rec.set(acc, k, i.src)
+      else acc
+  }) in
   // Resolve each entry transitively
   let keys = rec.keys(direct) in
   list.fold(keys, direct, fn(acc, k) {

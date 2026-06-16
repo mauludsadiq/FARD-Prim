@@ -1,0 +1,589 @@
+/// fard_lower — AST to FARD IR lowering pass
+///
+/// Takes a module AST from fardparse and produces an IR program record.
+/// IR format defined in spec/fard_ir.md
+
+import("std/str")   as str
+import("std/list")  as list
+import("std/rec")   as rec
+import("std/array") as array
+import("std/cast")  as cast
+
+// ── Local counter (per function) ─────────────────────────────────────────────
+
+fn make_ctx() {
+  { next_local: array.new(), fns: array.new(), globals: array.new(),
+    fn_names: array.new() }
+}
+
+fn alloc_local(ctx) {
+  let n = array.len(ctx.next_local) in
+  let _ = array.push(ctx.next_local, n) in
+  n
+}
+
+fn local_count(ctx) { array.len(ctx.next_local) }
+
+fn restore_locals(ctx, saved) {
+  // Pop extras until count equals saved
+  let _ = list.fold(list.build(local_count(ctx) - saved, fn(i) { i }), null, fn(_, i) {
+    array.pop(ctx.next_local)
+  }) in null
+}
+
+fn reset_locals(ctx) {
+  let n = array.len(ctx.next_local) in
+  let _ = list.fold(list.build(n, fn(i) { i }), null, fn(_, i) { array.pop(ctx.next_local) }) in
+  null
+}
+
+// ── Environment (name -> local index) ────────────────────────────────────────
+
+fn lenv_new(parent) { parent }
+
+fn lenv_set(env, name, local) {
+  { key: name, local: local, next: env }
+}
+
+
+// ── Free variable analysis ────────────────────────────────────────────────────
+
+fn fv_union(a, b) {
+  list.fold(b, a, fn(acc, name) {
+    if list.any(acc, fn(n) { n == name }) then acc
+    else list.append(acc, name)
+  })
+}
+
+fn fv_diff(fvs, bound) {
+  list.filter(fvs, fn(name) { !list.any(bound, fn(b) { b == name }) })
+}
+
+fn free_vars_expr(node) {
+  if node.t == "var" then [node.v]
+  else if node.t == "int" || node.t == "float" || node.t == "bool" || node.t == "str" || node.t == "null_lit" then []
+  else if node.t == "binop" || node.t == "bin" then fv_union(free_vars_expr(node.left), free_vars_expr(node.right))
+  else if node.t == "unop" then free_vars_expr(node.operand)
+  else if node.t == "call" then
+    fv_union(free_vars_expr(node.fn_n), list.flatten(list.map(node.args, fn(a) { free_vars_expr(a) })))
+  else if node.t == "if" then
+    fv_union(free_vars_expr(node.cond), fv_union(free_vars_expr(node.then_), free_vars_expr(node.else_)))
+  else if node.t == "let" then
+    fv_diff(fv_union(free_vars_expr(node.val), free_vars_expr(node.body)), [node.name])
+  else if node.t == "fn" then
+    fv_diff(free_vars_expr(node.body), node.params)
+  else if node.t == "list" then list.flatten(list.map(node.items, fn(i) { free_vars_expr(i) }))
+  else if node.t == "rec" then list.flatten(list.map(node.fields, fn(f) { free_vars_expr(f.v) }))
+  else if node.t == "get_field" then free_vars_expr(node.obj)
+  else if node.t == "get_index" then fv_union(free_vars_expr(node.obj), free_vars_expr(node.idx))
+  else if node.t == "while" then
+    list.flatten([free_vars_expr(node.init), free_vars_expr(node.cond), free_vars_expr(node.step)])
+  else []
+}
+
+fn lenv_get(env, name) {
+  if env == null then null
+  else if env.key == name then env.local
+  else lenv_get(env.next, name)
+}
+
+// ── Instruction helpers ───────────────────────────────────────────────────────
+
+fn emit(code, instr) {
+  let _ = array.push(code, instr) in null
+}
+
+fn instr_const(dst, val) { { op: "const", dst: dst, val: val } }
+fn instr_load(dst, src)  { { op: "load",  dst: dst, src: src } }
+fn instr_global_load(dst, name) { { op: "global_load", dst: dst, name: name } }
+fn instr_global_store(name, src) { { op: "global_store", name: name, src: src } }
+fn instr_add(dst, a, b)  { { op: "add", dst: dst, a: a, b: b } }
+fn instr_sub(dst, a, b)  { { op: "sub", dst: dst, a: a, b: b } }
+fn instr_mul(dst, a, b)  { { op: "mul", dst: dst, a: a, b: b } }
+fn instr_div(dst, a, b)  { { op: "div", dst: dst, a: a, b: b } }
+fn instr_mod(dst, a, b)  { { op: "mod", dst: dst, a: a, b: b } }
+fn instr_neg(dst, src)   { { op: "neg", dst: dst, src: src } }
+fn instr_eq(dst, a, b)   { { op: "eq",  dst: dst, a: a, b: b } }
+fn instr_ne(dst, a, b)   { { op: "ne",  dst: dst, a: a, b: b } }
+fn instr_lt(dst, a, b)   { { op: "lt",  dst: dst, a: a, b: b } }
+fn instr_le(dst, a, b)   { { op: "le",  dst: dst, a: a, b: b } }
+fn instr_gt(dst, a, b)   { { op: "gt",  dst: dst, a: a, b: b } }
+fn instr_ge(dst, a, b)   { { op: "ge",  dst: dst, a: a, b: b } }
+fn instr_and(dst, a, b)  { { op: "and", dst: dst, a: a, b: b } }
+fn instr_or(dst, a, b)   { { op: "or",  dst: dst, a: a, b: b } }
+fn instr_not(dst, src)   { { op: "not", dst: dst, src: src } }
+fn instr_jump(target)    { { op: "jump", target: target } }
+fn instr_branch(cond, then_t, else_t) { { op: "branch", cond: cond, then_t: then_t, else_t: else_t } }
+fn instr_return(src)     { { op: "return", src: src } }
+fn instr_make_list(dst, items) { { op: "make_list", dst: dst, items: items } }
+fn instr_make_rec(dst, fields) { { op: "make_rec", dst: dst, fields: fields } }
+fn instr_get_field(dst, obj, field) { { op: "get_field", dst: dst, obj: obj, field: field } }
+fn instr_get_index(dst, obj, idx)   { { op: "get_index", dst: dst, obj: obj, idx: idx } }
+fn instr_make_closure(dst, fn_id, captures) { { op: "make_closure", dst: dst, fn_id: fn_id, captures: captures } }
+fn instr_call(dst, fn_r, args) { { op: "call", dst: dst, fn_r: fn_r, args: args, fn_id: -1 } }
+fn instr_call_direct(dst, fn_id, args) { { op: "call", dst: dst, fn_r: -1, args: args, fn_id: fn_id } }
+fn instr_call_global(dst, name, args) { { op: "call_global", dst: dst, name: name, args: args } }
+fn instr_get_method(dst, obj, method) { { op: "get_method", dst: dst, obj: obj, method: method } }
+fn instr_import(dst, path, alias) { { op: "import", dst: dst, path: path, alias: alias } }
+
+// ── Placeholder for branch patching ──────────────────────────────────────────
+
+fn patch_jump(code, idx, target) {
+  let instr = array.get(code, idx) in
+  let patched = { op: instr.op, target: target } in
+  let _ = array.push(code, patched) in
+  let _ = array.pop(code) in
+  // rebuild: set idx position — use a workaround since array has no set
+  // For now rebuild the array up to idx, replace, then continue
+  // This is a known limitation — bytecode patching needs array.set
+  null
+}
+
+fn cur_pos(code) { array.len(code) }
+
+// ── Expression lowering ───────────────────────────────────────────────────────
+
+fn lower_expr(node, env, code, ctx) {
+  let t = node.t in
+
+  if t == "int" then
+    let dst = alloc_local(ctx) in
+    let _ = emit(code, instr_const(dst, cast_int(node.v))) in
+    dst
+
+  else if t == "float" then
+    let dst = alloc_local(ctx) in
+    let _ = emit(code, instr_const(dst, cast_float(node.v))) in
+    dst
+
+  else if t == "bool" then
+    let dst = alloc_local(ctx) in
+    let _ = emit(code, instr_const(dst, node.v == "true")) in
+    dst
+
+  else if t == "null" then
+    let dst = alloc_local(ctx) in
+    let _ = emit(code, instr_const(dst, null)) in
+    dst
+
+  else if t == "str" then
+    let dst = alloc_local(ctx) in
+    let _ = emit(code, instr_const(dst, node.v)) in
+    dst
+
+  else if t == "var" then
+    let local = lenv_get(env, node.v) in
+    if local != null then
+      let dst = alloc_local(ctx) in
+      let _ = emit(code, instr_load(dst, local)) in
+      dst
+    else
+      let dst = alloc_local(ctx) in
+      let _ = emit(code, instr_global_load(dst, node.v)) in
+      dst
+
+  else if t == "let" then
+    let val_r = lower_expr(node.val, env, code, ctx) in
+    let env2  = lenv_set(env, node.name, val_r) in
+    lower_expr(node.body, env2, code, ctx)
+
+  else if t == "if" then
+    lower_if(node, env, code, ctx)
+
+  else if t == "bin" then
+    lower_bin(node, env, code, ctx)
+
+  else if t == "unary" then
+    let src = lower_expr(node.operand, env, code, ctx) in
+    let dst = alloc_local(ctx) in
+    if node.op == "!" then
+      let _ = emit(code, instr_not(dst, src)) in dst
+    else
+      let _ = emit(code, instr_neg(dst, src)) in dst
+
+  else if t == "list" then
+    lower_list(node.items, env, code, ctx)
+
+  else if t == "rec" then
+    lower_rec(node.fields, env, code, ctx)
+
+  else if t == "get" then
+    let obj = lower_expr(node.obj, env, code, ctx) in
+    let dst = alloc_local(ctx) in
+    let _ = emit(code, instr_get_field(dst, obj, node.field)) in
+    dst
+
+  else if t == "index" then
+    let obj = lower_expr(node.obj, env, code, ctx) in
+    let idx = lower_expr(node.idx, env, code, ctx) in
+    let dst = alloc_local(ctx) in
+    let _ = emit(code, instr_get_index(dst, obj, idx)) in
+    dst
+
+  else if t == "fn" then
+    lower_fn_expr(node, env, code, ctx)
+
+  else if t == "call" then
+    lower_call(node, env, code, ctx)
+
+  else if t == "match" then
+    lower_match(node, env, code, ctx)
+
+  else if t == "while" then
+    lower_while(node, env, code, ctx)
+
+  else
+    let dst = alloc_local(ctx) in
+    let _ = emit(code, instr_const(dst, null)) in
+    dst
+}
+
+fn lower_if(node, env, code, ctx) {
+  let cond_r = lower_expr(node.cond, env, code, ctx) in
+  let branch_pos = cur_pos(code) in
+  let _ = emit(code, { op: "branch", cond: cond_r, then_t: 0, else_t: 0 }) in
+
+  let then_pos = cur_pos(code) in
+  let then_r   = lower_expr(node.then_n, env, code, ctx) in
+  let dst      = alloc_local(ctx) in
+  let _ = emit(code, instr_load(dst, then_r)) in
+  let jump_pos = cur_pos(code) in
+  let _ = emit(code, { op: "jump", target: 0 }) in
+
+  let else_pos = cur_pos(code) in
+  let else_r   = lower_expr(node.else_n, env, code, ctx) in
+  let _ = emit(code, instr_load(dst, else_r)) in
+  let end_pos  = cur_pos(code) in
+
+  // Patch branch and jump — store patches as metadata since array.set is missing
+  // The IR interpreter will handle forward references
+  let _ = emit(code, { op: "patch_branch", idx: branch_pos, then_t: then_pos, else_t: else_pos }) in
+  let _ = emit(code, { op: "patch_jump",   idx: jump_pos,   target: end_pos }) in
+  dst
+}
+
+fn lower_while(node, env, code, ctx) {
+  // Lower cond_fn and step_fn FIRST (before allocating locals) to avoid
+  // reset_locals/restore_locals corrupting the outer local counter.
+  let cond_fn_r = lower_expr(node.cond, env, code, ctx) in
+  let step_fn_r = lower_expr(node.step, env, code, ctx) in
+
+  // Allocate the loop state register BEFORE emitting init.
+  // state_reg is written by init path AND by step path.
+  // This gives fard_ir_to_ocir a single register to track across the back-edge.
+  let state_reg = alloc_local(ctx) in
+
+  // Init: evaluate init expr, load into state_reg
+  let init_r    = lower_expr(node.init, env, code, ctx) in
+  let _         = emit(code, instr_load(state_reg, init_r)) in
+
+  // loop_top: cond check
+  let loop_top  = cur_pos(code) in
+  let cond_r    = alloc_local(ctx) in
+  let _         = emit(code, instr_call(cond_r, cond_fn_r, [state_reg])) in
+
+  let branch_pos = cur_pos(code) in
+  let _          = emit(code, { op: "branch", cond: cond_r, then_t: 0, else_t: 0 }) in
+
+  // loop_body: step
+  let body_pos  = cur_pos(code) in
+  let new_state = alloc_local(ctx) in
+  let _         = emit(code, instr_call(new_state, step_fn_r, [state_reg])) in
+  // Write new_state back into state_reg for next iteration
+  let _         = emit(code, instr_load(state_reg, new_state)) in
+
+  let jump_pos  = cur_pos(code) in
+  let _         = emit(code, { op: "jump", target: 0 }) in
+
+  let end_pos   = cur_pos(code) in
+
+  let _ = emit(code, { op: "patch_branch", idx: branch_pos, then_t: body_pos, else_t: end_pos }) in
+  let _ = emit(code, { op: "patch_jump", idx: jump_pos, target: loop_top }) in
+
+  state_reg
+}
+
+fn lower_bin(node, env, code, ctx) {
+  if node.op == "|>" then
+    let left_r = lower_expr(node.left, env, code, ctx) in
+    if node.right.t == "call" then
+      let fn_r  = lower_expr(node.right.fn_n, env, code, ctx) in
+      let args  = lower_args(node.right.args, env, code, ctx) in
+      let dst   = alloc_local(ctx) in
+      let _ = emit(code, instr_call(dst, fn_r, list.concat([[left_r], args]))) in
+      dst
+    else
+      let fn_r = lower_expr(node.right, env, code, ctx) in
+      let dst  = alloc_local(ctx) in
+      let _ = emit(code, instr_call(dst, fn_r, [left_r])) in
+      dst
+  else
+    let a   = lower_expr(node.left, env, code, ctx) in
+    let b   = lower_expr(node.right, env, code, ctx) in
+    let dst = alloc_local(ctx) in
+    let op  = node.op in
+    if op == "+"  then let _ = emit(code, instr_add(dst, a, b)) in dst
+    else if op == "-"  then let _ = emit(code, instr_sub(dst, a, b)) in dst
+    else if op == "*"  then let _ = emit(code, instr_mul(dst, a, b)) in dst
+    else if op == "/"  then let _ = emit(code, instr_div(dst, a, b)) in dst
+    else if op == "%"  then let _ = emit(code, instr_mod(dst, a, b)) in dst
+    else if op == "==" then let _ = emit(code, instr_eq(dst, a, b)) in dst
+    else if op == "!=" then let _ = emit(code, instr_ne(dst, a, b)) in dst
+    else if op == "<"  then let _ = emit(code, instr_lt(dst, a, b)) in dst
+    else if op == "<=" then let _ = emit(code, instr_le(dst, a, b)) in dst
+    else if op == ">"  then let _ = emit(code, instr_gt(dst, a, b)) in dst
+    else if op == ">=" then let _ = emit(code, instr_ge(dst, a, b)) in dst
+    else if op == "&&" then let _ = emit(code, instr_and(dst, a, b)) in dst
+    else if op == "||" then let _ = emit(code, instr_or(dst, a, b)) in dst
+    else dst
+}
+
+fn lower_args(args, env, code, ctx) {
+  lower_args_acc(args, env, code, ctx, 0, [])
+}
+
+fn lower_args_acc(args, env, code, ctx, i, acc) {
+  if i >= list.len(args) then acc
+  else
+    let r = lower_expr(list.get(args, i), env, code, ctx) in
+    lower_args_acc(args, env, code, ctx, i + 1, list.append(acc, r))
+}
+
+fn lower_list(items, env, code, ctx) {
+  let regs = lower_args(items, env, code, ctx) in
+  let dst  = alloc_local(ctx) in
+  let _ = emit(code, instr_make_list(dst, regs)) in
+  dst
+}
+
+fn lower_rec(fields, env, code, ctx) {
+  let dst = alloc_local(ctx) in
+  let fs  = lower_rec_fields(fields, env, code, ctx, []) in
+  let _ = emit(code, instr_make_rec(dst, fs)) in
+  dst
+}
+
+fn lower_rec_fields(fields, env, code, ctx, acc) {
+  if list.len(fields) == 0 then acc
+  else
+    let f   = list.get(fields, 0) in
+    let src = lower_expr(f.v, env, code, ctx) in
+    lower_rec_fields(list.tail(fields), env, code, ctx, list.append(acc, { key: f.k, src: src }))
+}
+
+fn lower_fn_expr(node, env, code, ctx) {
+  // Compute free variables: used in body but not bound by params
+  let fvs = fv_diff(free_vars_expr(node.body), node.params) in
+  let captures = list.filter(fvs, fn(name) { lenv_get(env, name) != null }) in
+  let cap_regs = list.map(captures, fn(name) { lenv_get(env, name) }) in
+  let n_caps = list.len(captures) in
+
+  // Build the anon function with __env__ as first param if there are captures
+  // Inside the function, load captures from __env__[i]
+  let aug_params = if n_caps == 0
+    then node.params
+    else list.concat([["__env__"], node.params]) in
+
+  // Build inner env that maps captured names to get_index on __env__
+  // This is done by lower_fn_with_caps
+  // Always pass __env__ as first param (closure ptr) for uniform CallIndirect convention
+  let fn_id = lower_fn_with_caps(
+    str.concat("anon_", cast_text(array.len(ctx.fns))),
+    node.params, node.body, captures, env, ctx) in
+  let dst = alloc_local(ctx) in
+  let _ = emit(code, instr_make_closure(dst, fn_id, cap_regs)) in
+  dst
+}
+
+fn lower_fn_with_caps(name, params, body, captures, outer_env, ctx) {
+  let saved_locals = local_count(ctx) in
+  let _ = reset_locals(ctx) in
+  let code = array.new() in
+  let n_caps = list.len(captures) in
+  // __env__ is always param 0 (closure ptr) for uniform CallIndirect convention
+  // Actual params start at index 1
+  let env_reg = alloc_local(ctx) in
+  let base_env = lenv_set(outer_env, "__env__", env_reg) in
+  let env_after_params = build_param_env(params, base_env, ctx, 0) in
+  // Emit loads for captured vars from __env__[i]
+  let cap_env = if n_caps == 0
+    then env_after_params
+    else
+      let env_reg = lenv_get(env_after_params, "__env__") in
+      list.fold(list.build(n_caps, fn(i) { i }), env_after_params, fn(acc_env, i) {
+        let cap_name = list.get(captures, i) in
+        let dst = alloc_local(ctx) in
+        let idx_reg = alloc_local(ctx) in
+        let _ = emit(code, instr_const(idx_reg, i)) in
+        let _ = emit(code, { op: "get_index", dst: dst, obj: env_reg, idx: idx_reg }) in
+        lenv_set(acc_env, cap_name, dst)
+      })
+  in
+  let ret_r = lower_expr(body, cap_env, code, ctx) in
+  let _ = emit(code, instr_return(ret_r)) in
+  let fn_def = {
+    name:   name,
+    arity:  1 + list.len(params),  // always +1 for __env__ (closure ptr)
+    locals: local_count(ctx),
+    code:   array.to_list(code)
+  } in
+  let fn_id = array.len(ctx.fns) in
+  let _ = array.push(ctx.fns, fn_def) in
+  let _ = restore_locals(ctx, saved_locals) in
+  fn_id
+}
+
+fn lower_call(node, env, code, ctx) {
+  // If fn_n is a direct var reference to a known function, use direct call
+  let fn_name = if node.fn_n.t == "var" then node.fn_n.v else "" in
+  let fn_id   = if fn_name != "" then lookup_fn_name(ctx.fn_names, fn_name) else -1 in
+  
+  if fn_id >= 0 then
+    let args = lower_args(node.args, env, code, ctx) in
+    let dst  = alloc_local(ctx) in
+    let _ = emit(code, instr_call_direct(dst, fn_id, args)) in
+    dst
+  else
+    let fn_r = lower_expr(node.fn_n, env, code, ctx) in
+    let args = lower_args(node.args, env, code, ctx) in
+    let dst  = alloc_local(ctx) in
+    let _ = emit(code, instr_call(dst, fn_r, args)) in
+    dst
+}
+
+fn lower_match(node, env, code, ctx) {
+  let subj = lower_expr(node.subj, env, code, ctx) in
+  let dst  = alloc_local(ctx) in
+  let _    = lower_match_arms(node.arms, env, code, ctx, subj, dst) in
+  dst
+}
+
+fn lower_match_arms(arms, env, code, ctx, subj, dst) {
+  if list.len(arms) == 0 then null
+  else
+    let arm = list.get(arms, 0) in
+    let pat_r = lower_expr(arm.pat, env, code, ctx) in
+    let cond_r = alloc_local(ctx) in
+    let _ = emit(code, instr_eq(cond_r, subj, pat_r)) in
+    let branch_pos = cur_pos(code) in
+    let _ = emit(code, { op: "branch", cond: cond_r, then_t: 0, else_t: 0 }) in
+    let then_pos = cur_pos(code) in
+    let body_env = if arm.pat.t == "var" then lenv_set(env, arm.pat.v, subj) else env in
+    let body_r = lower_expr(arm.body, body_env, code, ctx) in
+    let _ = emit(code, instr_load(dst, body_r)) in
+    let jump_pos = cur_pos(code) in
+    let _ = emit(code, { op: "jump", target: 0 }) in
+    let else_pos = cur_pos(code) in
+    let _ = lower_match_arms(list.tail(arms), env, code, ctx, subj, dst) in
+    let end_pos = cur_pos(code) in
+    let _ = emit(code, { op: "patch_branch", idx: branch_pos, then_t: then_pos, else_t: else_pos }) in
+    let _ = emit(code, { op: "patch_jump", idx: jump_pos, target: end_pos }) in
+    null
+}
+
+// ── Function lowering ─────────────────────────────────────────────────────────
+
+fn lower_function(name, params, body, env, ctx) {
+  let _ = reset_locals(ctx) in
+  let code  = array.new() in
+  let fenv  = build_param_env(params, env, ctx, 0) in
+  let ret_r = lower_expr(body, fenv, code, ctx) in
+  let _ = emit(code, instr_return(ret_r)) in
+  let fn_def = {
+    name:   name,
+    arity:  list.len(params),
+    locals: local_count(ctx),
+    code:   array.to_list(code)
+  } in
+  let fn_id = array.len(ctx.fns) in
+  let _ = array.push(ctx.fns, fn_def) in
+  fn_id
+}
+
+fn build_param_env(params, env, ctx, i) {
+  if i >= list.len(params) then env
+  else
+    let name  = list.get(params, i) in
+    let local = alloc_local(ctx) in
+    build_param_env(params, lenv_set(env, name, local), ctx, i + 1)
+}
+
+// ── Module lowering ───────────────────────────────────────────────────────────
+
+fn lower_module_items(items, env, code, ctx) {
+  if list.len(items) == 0 then 0
+  else
+    let item = list.get(items, 0) in
+    let rest = list.tail(items) in
+    let t    = item.t in
+
+    if t == "fn_item" then
+      let fn_id = lower_function(item.name, item.params, item.body, env, ctx) in
+      let _     = register_fn_name(ctx, item.name, fn_id) in
+      let dst   = alloc_local(ctx) in
+      let _ = emit(code, instr_make_closure(dst, fn_id, [])) in
+      let _ = emit(code, instr_global_store(item.name, dst)) in
+      lower_module_items(rest, env, code, ctx)
+
+    else if t == "let_item" then
+      let val_r = lower_expr(item.val, env, code, ctx) in
+      let _ = emit(code, instr_global_store(item.name, val_r)) in
+      lower_module_items(rest, env, code, ctx)
+
+    else if t == "import" then
+      let dst = alloc_local(ctx) in
+      let _ = emit(code, instr_import(dst, item.path, item.alias)) in
+      let _ = emit(code, instr_global_store(item.alias, dst)) in
+      lower_module_items(rest, env, code, ctx)
+
+    else if t == "expr_item" then
+      let r = lower_expr(item.expr, env, code, ctx) in
+      if list.len(rest) == 0 then r
+      else lower_module_items(rest, env, code, ctx)
+
+    else
+      lower_module_items(rest, env, code, ctx)
+}
+
+fn register_fn_name(ctx, name, fn_id) {
+  let _ = array.push(ctx.fn_names, { name: name, fn_id: fn_id }) in
+  null
+}
+
+fn lookup_fn_name(fn_names, name) {
+  lookup_fn_name_acc(fn_names, name, array.len(fn_names) - 1)
+}
+
+fn lookup_fn_name_acc(fn_names, name, i) {
+  if i < 0 then -1
+  else
+    let e = array.get(fn_names, i) in
+    if e.name == name then e.fn_id
+    else lookup_fn_name_acc(fn_names, name, i - 1)
+}
+
+fn lower_program(ast) {
+  let ctx  = make_ctx() in
+  let code = array.new() in
+  let env  = lenv_new(null) in
+  let ret  = lower_module_items(ast.items, env, code, ctx) in
+  let _ = emit(code, instr_return(ret)) in
+  let entry_fn = {
+    name:   "__main__",
+    arity:  0,
+    locals: local_count(ctx),
+    code:   array.to_list(code)
+  } in
+  let entry_id = array.len(ctx.fns) in
+  let _ = array.push(ctx.fns, entry_fn) in
+  {
+    fns:   array.to_list(ctx.fns),
+    entry: entry_id
+  }
+}
+
+fn cast_int(s)   { cast.int(s) }
+fn cast_float(s) { cast.float(s) }
+fn cast_text(v)  { cast.text(v) }
+
+{ lower_program: lower_program, lower_expr: lower_expr }
