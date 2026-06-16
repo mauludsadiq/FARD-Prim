@@ -234,6 +234,66 @@ fn use_slots_for_cross(inst) {
   else []
 }
 
+
+// ── Pass: JccFlags+Jmp fusion ────────────────────────────────────────────────
+// Pattern: JccFlags(cmp, L1) + Jmp(L2) + Label(L1) + Jmp(L3)
+// Replace: JccFlags(inv(cmp), L2) + Jmp(L3) [remove Label(L1)+Jmp(L3)]
+// This eliminates one branch in the hot path when the taken branch
+// of JccFlags goes to a block that only contains a single Jmp.
+
+fn invert_cmp(cmp) {
+  if cmp == "eq" then "ne"
+  else if cmp == "ne" then "eq"
+  else if cmp == "lt" then "ge"
+  else if cmp == "le" then "gt"
+  else if cmp == "gt" then "le"
+  else "lt"
+}
+
+fn jcc_jmp_fusion(insts) {
+  let n = list.len(insts) in
+  // Build label->index map
+  let label_map = list.fold(list.build(n, fn(i){i}), {}, fn(acc, i) {
+    let inst = list.get(insts, i) in
+    if inst.op == "Label" then rec.set(acc, str.from(inst.target.id), i)
+    else acc
+  }) in
+  // Find patterns: JccFlags(L1) at i, Jmp(L2) at i+1,
+  //   Label(L1) at j, Jmp(L3) at j+1 (only instruction between label and next label/end)
+  let skip = list.fold(list.build(if n > 1 then n-1 else 0, fn(i){i}), {}, fn(acc, i) {
+    let a = list.get(insts, i) in
+    let b = list.get(insts, i+1) in
+    if a.op != "JccFlags" || b.op != "Jmp" then acc
+    else
+      let l1 = str.from(a.target.id) in
+      if !rec.has(label_map, l1) then acc
+      else
+        let j = rec.get(label_map, l1) in
+        if j + 1 >= n then acc
+        else
+          let c_ = list.get(insts, j+1) in
+          if c_.op != "Jmp" then acc
+          else
+            // Check j+2 is a Label or end (no other insts between j and j+2)
+            let j2ok = j + 2 >= n || list.get(insts, j+2).op == "Label" in
+            if !j2ok then acc
+            else
+              // Fuse: replace a with JccFlags(inv, b.target), replace b with Jmp(c_.target)
+              // Mark j (Label) and j+1 (Jmp) as skip IF label L1 is only targeted by this one JccFlags
+              rec.set(rec.set(rec.set(rec.set(acc,
+                str.from(i), { op: "JccFlags", cmp: invert_cmp(a.cmp), target: b.target }),
+                str.from(i+1), { op: "Jmp", target: c_.target }),
+                str.from(j), "skip"),
+                str.from(j+1), "skip")
+  }) in
+  list.flatten(list.map(list.build(n, fn(i){i}), fn(i) {
+    let tag = rec.getOr(skip, str.from(i), "keep") in
+    if tag == "skip" then []
+    else if tag == "keep" then [list.get(insts, i)]
+    else [tag]
+  }))
+}
+
 fn peephole_func(f) {
   // Pass 1: Forward copy propagation (block-local, clear at Label)
   // Never eliminate a CopyI64 whose dst is read in a LATER block (cross-block-live):
@@ -329,6 +389,7 @@ fn peephole_func(f) {
     else [inst]
   })) in
   let after_dse = after_cmp_fold in
+  let after_dse = jcc_jmp_fusion(after_dse) in
 
   // Pass: fold MovRegToStack(slot,rax)+MovRegToReg(rax,X)+AddRegStack(rax,slot)
   // -> AddRegReg(rax,X)
