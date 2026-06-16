@@ -85,7 +85,7 @@ No external linker. No C runtime. No libSystem.
 
   fib(35), macOS x86-64, user time:
 
-  FARD Prim   0.079s
+  FARD Prim   0.078s
   gcc -O0     0.120s   (1.5x faster)
   gcc -O2     0.030s   (2.6x slower than gcc -O2)
 
@@ -106,16 +106,16 @@ Achieved via:
 
 ## Source
 
-9,967 lines of FARD across 40 files in src/orgntr_prim/.
+10,024 lines of FARD across 40 files in src/orgntr_prim/.
 
   x86_64_encode.fard    x86-64 instruction encoding (775 lines)
   fard_ir_to_ocir.fard  flat IR to OCIR block structure (586 lines)
   fard_lower.fard       AST to flat IR lowering, closures, while loops (589 lines)
   fardparse.fard        FARD parser with while expression support (520 lines)
   macho_exe.fard        Mach-O x86-64 emitter (343 lines)
-  omir_peephole.fard    copy prop + DSE + const fold isel (515 lines)
+  omir_peephole.fard    copy prop + DSE + self-move elim + const fold isel (521 lines)
   arm64_encode.fard     ARM64 instruction encoding (575 lines)
-  omir_regalloc.fard    linear-scan register allocator (305 lines)
+  omir_regalloc.fard    linear-scan + copy coalescing register allocator (354 lines)
   ocir_inline.fard      multi-block CFG inliner (216 lines)
   ocir_sccp.fard        sparse conditional constant propagation (205 lines)
   ocir_opt.fard         copy prop, const fold, DCE, empty block elim (306 lines)
