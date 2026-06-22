@@ -151,7 +151,13 @@ fn sccp_func(f) {
   // Executed: set of block labels already executed
   // Lat: register -> lattice value
 
-  let init = { worklist: [entry_label], executed: {}, lat: {} } in
+  // Initialize parameters to Bottom (overdefined/unknown) not Top (unvisited).
+  // Top means "not yet reached" -- parameters are always reachable with unknown values.
+  // If params start as Top, meet(Const(x), Top)=Const(x) which is wrong.
+  let param_lat = list.fold(f.params, {}, fn(acc, p) {
+    lat_set(acc, p.reg, bottom())
+  }) in
+  let init = { worklist: [entry_label], executed: {}, lat: param_lat } in
 
   let result = list.fold(
     list.build(200, fn(i){i}),  // max 200 iterations

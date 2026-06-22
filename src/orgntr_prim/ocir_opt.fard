@@ -75,20 +75,33 @@ fn copy_prop_block(block, cross_block_uses) {
 }
 
 fn collect_cross_block_defs(blocks) {
-  // Find regs defined in one block and used in another
-  // Step 1: collect defs per block
+  // Find regs defined in one block and used in another,
+  // OR defined in multiple blocks (merge registers -- must not be copy-propped).
+  // Step 1: count defs per register across all blocks
+  let def_counts = list.fold(blocks, {}, fn(acc, b) {
+    list.fold(b.insts, acc, fn(a, inst) {
+      if rec.has(inst, "dst") then
+        let k = str.from(inst.dst) in
+        let prev = if rec.has(a, k) then rec.get(a, k) else 0 in
+        rec.set(a, k, prev + 1)
+      else a
+    })
+  }) in
+  // Step 2: collect all defs per block (last write wins for cross-use check)
   let block_defs = list.map(blocks, fn(b) {
     list.fold(b.insts, {}, fn(acc, inst) {
       if rec.has(inst, "dst") then rec.set(acc, str.from(inst.dst), b.label)
       else acc
     })
   }) in
-  // Step 2: collect all uses per block
   let all_defs = list.fold(block_defs, {}, fn(acc, bd) {
     list.fold(rec.keys(bd), acc, fn(a, k) { rec.set(a, k, rec.get(bd, k)) })
   }) in
-  // Step 3: for each use in a block, check if def is from different block
-  list.fold(blocks, {}, fn(cross, b) {
+  // Step 3: mark as cross-block if used in different block OR defined in multiple blocks
+  let cross_from_multi_def = list.fold(rec.keys(def_counts), {}, fn(acc, k) {
+    if rec.get(def_counts, k) > 1 then rec.set(acc, k, true) else acc
+  }) in
+  list.fold(blocks, cross_from_multi_def, fn(cross, b) {
     let uses = collect_uses_term(b.term,
       list.fold(b.insts, {}, fn(acc, inst) { collect_uses_inst(inst, acc) })) in
     list.fold(rec.keys(uses), cross, fn(acc, k) {
