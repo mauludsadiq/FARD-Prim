@@ -545,7 +545,7 @@ fn encode_inst(inst) {
     let rcx = { k: "reg", name: "rcx" } in
     list.concat([
       if inst.lhs.k == "reg" then mov_reg_to_reg(rax, inst.lhs) else load_to_reg(rax, inst.lhs),
-      if inst.rhs.k == "reg" then [rex_wr_for(rax), 59, modrm_reg_reg(0, bits.band(reg_code(inst.rhs),7))]
+      if inst.rhs.k == "reg" then [rex_w_for(inst.rhs), 59, modrm_reg_reg(0, bits.band(reg_code(inst.rhs),7))]
       else [rex_wr_for(rax), 59, modrm_disp8(0, 5), disp8(inst.rhs.slot)]
     ])
   else if inst.op == "CmpRegImm" then
@@ -643,7 +643,7 @@ fn encode_inst(inst) {
     let compute = list.concat([
       reg_or_stack_to_rax(inst.lhs),
       if inst.rhs.k == "reg"
-        then [72, 15, 175, modrm_reg_reg(0, bits.band(reg_code(inst.rhs),7))]  // imul rax, reg
+        then [rex_w_for(inst.rhs), 15, 175, modrm_reg_reg(0, bits.band(reg_code(inst.rhs),7))]  // imul rax, reg (REX.B if r8-r15)
         else imul_reg_stack(rax, inst.rhs)
     ]) in
     if inst.dst.k == "reg"

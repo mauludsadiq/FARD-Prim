@@ -67,7 +67,7 @@ fn free_vars_expr(node) {
   else if node.t == "call" then
     fv_union(free_vars_expr(node.fn_n), list.flatten(list.map(node.args, fn(a) { free_vars_expr(a) })))
   else if node.t == "if" then
-    fv_union(free_vars_expr(node.cond), fv_union(free_vars_expr(node.then_), free_vars_expr(node.else_)))
+    fv_union(free_vars_expr(node.cond), fv_union(free_vars_expr(node.then_n), free_vars_expr(node.else_n)))
   else if node.t == "let" then
     fv_diff(fv_union(free_vars_expr(node.val), free_vars_expr(node.body)), [node.name])
   else if node.t == "fn" then
