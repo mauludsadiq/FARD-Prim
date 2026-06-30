@@ -48,14 +48,14 @@ Linux targets tested via Docker on Ubuntu 22.04.
     -> OCIR (phi elimination, register/stack abstraction)
     -> SCCP (sparse conditional constant propagation)
     -> inliner (multi-block CFG inlining, threshold 12 instructions)
-    -> GVN (global value numbering, eliminates redundant computations)
+    -> GVN (global value numbering)
     -> SSA opts (copy prop, const fold, DCE, empty block elimination)
     -> OMIR (machine instruction selection)
     -> TCO (self-tail-calls -> Jmp to entry)
-    -> register allocation (linear-scan; callee-saved r12-r15
-       for values live across calls, push/pop in prologue/epilogue)
-    -> peephole (cross-block-safe copy propagation, dead-store elimination,
-       CmpRegImmFlags+JccFlags fusion, const-fold isel)
+    -> register allocation (linear scan + copy coalescing;
+       callee-saved r12-r15 for values live across calls)
+    -> peephole (copy prop, DSE, self-move elimination,
+       JccFlags+Jmp fusion, const-fold isel)
     -> encode + fixups (branch patching, reloc resolution)
     -> ELF64 or Mach-O binary
 
@@ -71,15 +71,32 @@ No external linker. No C runtime. No libSystem.
 
   entry stub + fard_alloc (bump allocator) + functions
   Heap: [fn_ptr, cap0, cap1, ...] for closures
-  Closure ABI: closure ptr always as arg0 (__env__), captures via
-               indexed heap load, actual params from arg1 onward
+  Closure ABI: closure ptr always arg0 (__env__), actual params from arg1
 
 ## Regression
 
   fardrun run --program programs/regression.fard --out /tmp/reg
   python3 programs/regression_run.py /tmp/reg/result.json
 
-11 cases, all PASS across all targets.
+11 cases, all PASS.
+
+## Fuzzer
+
+  python3 programs/fuzzer_v2.py 1000 42
+
+Property-based fuzzer with 4 generators: arithmetic, recursive functions,
+closures with captures, closures with conditionals. Compiles programs
+natively, runs them, compares exit code against fard_eval interpreter.
+Bugs found so far:
+
+ - REX.B missing for r8-r15 in MulI64/CmpI64 reg-reg encodings
+   (imul/cmp against r13 silently used rbp -- same low-3-bits, wrong REX)
+ - SCCP parameter lattice initialized to Top instead of Bottom
+   (meet(Const, Top)=Const incorrectly folded merge registers)
+ - free_vars_expr used node.then_ instead of node.then_n for if nodes
+   (crashed when if expressions appeared inside closure bodies)
+
+1000 cases: 936 pass, 64 skip, 0 fail.
 
 ## Performance
 
@@ -90,50 +107,44 @@ No external linker. No C runtime. No libSystem.
   gcc -O2     0.030s   (2.6x slower than gcc -O2)
 
 Achieved via:
- - SCCP: sparse conditional constant propagation, dead branch elimination
- - Multi-block inliner: full CFG inlining of functions <= 12 instructions
-   across all blocks, including branches. classify(5) compiles to mov+ret.
+ - SCCP: sparse conditional constant propagation
+ - Multi-block inliner: full CFG inlining <= 12 instructions
  - GVN: eliminates redundant computations (n*n+n*n -> 1x mul + add)
  - Empty block elimination: collapses chains of unconditional jumps
- - Linear-scan register allocation (callee-saved r12-r15 for values
-   live across recursive calls)
- - Const-fold isel (runs before peephole):
-     MovImm64(C)+Sub/AddI64 -> SubRegImm/AddRegImm -> lea rdi,[r13-1]
-     MovImm64(C)+CmpI64 -> CmpRegImm -> cmp r13,1
- - CmpRegImmFlags+JccFlags: collapses setle/movzx/store/test -> cmp+jcc
- - AddRegReg: fib(n-1)+fib(n-2) add -> 1 instruction
- - Spill-fold: MovRegToStack+MovStackToReg -> MovRegToReg
+ - Copy coalescing: merge-register assignment, eliminates MovRegToReg
+ - Self-move elimination: removes MovRegToReg(r, r) no-ops
+ - JccFlags+Jmp fusion: eliminates double-branch in if/else hot paths
+ - Const-fold isel: MovImm64+Sub/AddI64 -> lea; MovImm64+CmpI64 -> cmp
+ - CmpRegImmFlags+JccFlags: setle/movzx/store/test -> cmp+jcc
+ - Linear-scan RA: callee-saved r12-r15 for cross-call values
 
 ## Source
 
-10,024 lines of FARD across 40 files in src/orgntr_prim/.
+10,104 lines of FARD across 40 files in src/orgntr_prim/.
 
-  x86_64_encode.fard    x86-64 instruction encoding (775 lines)
-  fard_ir_to_ocir.fard  flat IR to OCIR block structure (586 lines)
-  fard_lower.fard       AST to flat IR lowering, closures, while loops (589 lines)
-  fardparse.fard        FARD parser with while expression support (520 lines)
-  macho_exe.fard        Mach-O x86-64 emitter (343 lines)
-  omir_peephole.fard    copy prop + DSE + self-move elim + const fold isel (521 lines)
-  arm64_encode.fard     ARM64 instruction encoding (575 lines)
-  omir_regalloc.fard    linear-scan + copy coalescing register allocator (354 lines)
-  ocir_inline.fard      multi-block CFG inliner (216 lines)
-  ocir_sccp.fard        sparse conditional constant propagation (205 lines)
-  ocir_opt.fard         copy prop, const fold, DCE, empty block elim (306 lines)
-  ocir_gvn.fard         global value numbering (110 lines)
-  lower_ocir_to_omir.fard  OCIR to OMIR instruction selection (391 lines)
-  macho_emit.fard       Mach-O segment/section layout (549 lines)
-  python_to_uvir.fard   Python subset frontend (289 lines)
-  js_to_uvir.fard       JavaScript subset frontend (270 lines)
+  x86_64_encode.fard      x86-64 instruction encoding (775 lines)
+  fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
+  fard_lower.fard         AST to flat IR, closures, while loops (589 lines)
+  fardparse.fard          FARD parser with while expression (520 lines)
+  macho_exe.fard          Mach-O x86-64 emitter (343 lines)
+  omir_peephole.fard      copy prop + DSE + fusion + const fold (521 lines)
+  arm64_encode.fard       ARM64 instruction encoding (575 lines)
+  omir_regalloc.fard      linear scan + copy coalescing (354 lines)
+  ocir_inline.fard        multi-block CFG inliner (216 lines)
+  ocir_sccp.fard          sparse conditional constant propagation (210 lines)
+  ocir_opt.fard           copy prop, const fold, DCE, empty block elim (306 lines)
+  ocir_gvn.fard           global value numbering (110 lines)
+  lower_ocir_to_omir.fard OCIR to OMIR instruction selection (391 lines)
+  python_to_uvir.fard     Python subset frontend (289 lines)
+  js_to_uvir.fard         JavaScript subset frontend (270 lines)
 
 ## Next
 
-  interference-graph register coalescing (eliminate MovRegToReg)
-  instruction scheduling (hide load latency)
-  LICM (loop invariant code motion, requires while loop back-edges)
+  fuzzer: while loops, multi-function, GVN stress programs
+  LICM on while loop back-edges
+  dead function elimination post-inline
   ARM64 optimizer parity
   stdlib native (list.map, str.concat, rec.get)
-  dead function elimination post-SCCP+inline
-  property-based fuzzer for regression
 
 ## Repos
 
