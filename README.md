@@ -50,7 +50,8 @@ Linux targets tested via Docker on Ubuntu 22.04.
     -> inliner (multi-block CFG inlining, threshold 12 instructions)
     -> GVN (global value numbering)
     -> SSA opts (copy prop, const fold, DCE, empty block elimination)
-    -> OMIR (machine instruction selection)
+    -> VMIR (instruction selection, virtual registers -- new layer)
+    -> OMIR (register allocation, physical slots)
     -> TCO (self-tail-calls -> Jmp to entry)
     -> register allocation (linear scan + copy coalescing;
        callee-saved r12-r15 for values live across calls)
@@ -132,7 +133,7 @@ Achieved via:
 
 ## Source
 
-10,104 lines of FARD across 40 files in src/orgntr_prim/.
+10,494 lines of FARD across 42 files in src/orgntr_prim/.
 
   x86_64_encode.fard      x86-64 instruction encoding (775 lines)
   fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -152,10 +153,11 @@ Achieved via:
 
 ## Next
 
-  fuzzer: while loops, multi-function, GVN stress programs
+  pre-RA instruction scheduling on VMIR
   LICM on while loop back-edges
   dead function elimination post-inline
-  ARM64 optimizer parity
+  ARM64 optimizer parity (migrate to VMIR pipeline)
+  interference-graph register allocation upgrade
   stdlib native (list.map, str.concat, rec.get)
 
 ## Repos
