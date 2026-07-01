@@ -221,7 +221,7 @@ fn use_slots_for_cross(inst) {
     if is_stack(inst.src) then [inst.src.slot] else []
   else if op == "LoadArg" then
     if rec.has(inst,"slot") then [inst.slot] else []
-  else if op == "AddRegStack" then
+  else if op == "AddRegStack" || op == "SubRegImm" || op == "CmpRegImm" || op == "CmpRegImmFlags" then
     if rec.has(inst,"src") && is_stack(inst.src) then [inst.src.slot] else []
   else if op == "StoreHeap" then
     list.map(list.filter([inst.ptr, inst.src], fn(o){is_stack(o)}), fn(o){o.slot})

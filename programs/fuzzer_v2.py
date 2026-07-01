@@ -134,6 +134,10 @@ else
         if not os.path.exists(rfile): return None
         data = json.load(open(rfile))['result']
         if data.get('t') == 'int': return data['v']
+        # while returns {chain_hex, steps, value} -- extract value
+        if isinstance(data, dict) and 'value' in data:
+            v = data['value']
+            if isinstance(v, int): return v
         return None
     except Exception:
         return None
@@ -169,6 +173,57 @@ native.compile_and_emit(src, {json.dumps(out_name)})
     finally:
         os.unlink(fname)
 
+def while_expected(init, step, limit):
+    s = init
+    for _ in range(10000):
+        if not (s < limit): break
+        s += step
+    return s
+
+def gen_while_program(seed):
+    init, s = rand_range(seed, 0, 5)
+    step, s = rand_range(s, 1, 4)
+    limit, s = rand_range(s, init + 1, init + 8)
+    expected = while_expected(init, step, limit)
+    lines = [
+        "fn count(n){while " + str(init) +
+        " fn(s){s<n} fn(s){s+" + str(step) + "}}",
+        "count(" + str(limit) + ")"
+    ]
+    src = "\n".join(lines)
+    return src, s, expected
+
+def gen_multi_fn_program(seed):
+    params = ["a", "b"]
+    body1, s = gen_expr(seed, 2, params)
+    body2, s = gen_expr(s, 1, ["x", "y"])
+    op, s = rand_range(s, 0, 3)
+    op = ["+", "-", "*"][op]
+    a, s = rand_range(s, 1, 7)
+    b, s = rand_range(s, 1, 7)
+    src = ("fn helper(a,b){" + body1 + "}\n" +
+           "fn main(x,y){helper(x" + op + "y,y)}\n" +
+           "main(" + str(a) + "," + str(b) + ")")
+    return src, s
+
+def gen_gvn_program(seed):
+    params = ["a", "b"]
+    sub, s = gen_expr(seed, 2, params)
+    op, s = rand_range(s, 0, 3)
+    op = ["+", "-", "*"][op]
+    a, s = rand_range(s, 1, 8)
+    b, s = rand_range(s, 1, 8)
+    src = ("fn f(a,b){(" + sub + ")" + op + "(" + sub + ")}\n" +
+           "f(" + str(a) + "," + str(b) + ")")
+    return src, s
+
+GENERATORS.extend([
+    ("while_loop", gen_while_program),
+    ("multi_fn",   gen_multi_fn_program),
+    ("gvn_stress", gen_gvn_program),
+])
+
+
 def main():
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 200
     seed = int(sys.argv[2]) if len(sys.argv) > 2 else 42
@@ -177,8 +232,9 @@ def main():
     for i in range(n):
         gen_idx, seed = rand_range(seed, 0, len(GENERATORS))
         name, gen_fn = GENERATORS[gen_idx]
-        src, seed = gen_fn(seed)
-        expected = eval_with_fard(src)
+        _r = gen_fn(seed)
+        src, seed = _r[0], _r[1]
+        expected = _r[2] if len(_r) > 2 else eval_with_fard(src)
         if expected is None or expected < -50 or expected > 100:
             stats[name]['skip'] += 1
             continue
@@ -209,3 +265,41 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
+
+# ── While loop generator ───────────────────────────────────────────────────────
+# fn count(n){ while INIT fn(s){s<n} fn(s){s+STEP} }
+# count(N)  -- result is the final state value
+
+# ── Multi-function generator ───────────────────────────────────────────────────
+# Two functions: helper + main. main calls helper.
+# Tests inliner, cross-function optimization.
+
+def gen_multi_fn_program(seed):
+    params = ['a', 'b']
+    body1, s = gen_expr(seed, 2, params)
+    body2, s = gen_expr(s, 1, ['x', 'y'])
+    # main calls helper with transformed args
+    op, s = rand_range(s, 0, 3)
+    op = ['+', '-', '*'][op]
+    a, s = rand_range(s, 1, 7)
+    b, s = rand_range(s, 1, 7)
+    src = (f'fn helper(a,b){{{body1}}}\n'
+           f'fn main(x,y){{helper(x{op}y,y)}}\n'
+           f'main({a},{b})')
+    return src, s
+
+# ── GVN stress generator ───────────────────────────────────────────────────────
+# Repeated subexpressions: (a+b)*(a+b) -- GVN should compute a+b once.
+# Tests that GVN doesn't miscompile duplicate subexpressions.
+
+def gen_gvn_program(seed):
+    params = ['a', 'b']
+    sub, s = gen_expr(seed, 2, params)
+    op, s = rand_range(s, 0, 3)
+    op = ['+', '-', '*'][op]
+    a, s = rand_range(s, 1, 8)
+    b, s = rand_range(s, 1, 8)
+    # expr is (sub) OP (sub) -- same subexpression twice
+    src = f'fn f(a,b){{({sub}){op}({sub})}}\nf({a},{b})'
+    return src, s
+
