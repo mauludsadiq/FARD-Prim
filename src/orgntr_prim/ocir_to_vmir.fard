@@ -1,0 +1,142 @@
+// ocir_to_vmir.fard -- OCIR -> VMIR (instruction selection, virtual registers)
+//
+// VMIR operands:
+//   { k: "vreg", r: N }        -- virtual register N (from OCIR)
+//   { k: "imm", val: N }       -- integer immediate
+//   { k: "label", id: N }      -- block label
+//
+// All OCIR register references become vreg operands.
+// No stack slots, no physical registers, no frame layout.
+// The allocator (vmir_regalloc) maps vregs to stack slots or physical regs.
+
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+
+fn vreg(r) { { k: "vreg", r: r } }
+fn imm(v)  { { k: "imm", val: v } }
+fn lbl(id) { { k: "label", id: id } }
+
+// ── Instruction builders ──────────────────────────────────────────────────────
+
+fn vi_imm(dst, val)         { { op: "Imm",     dst: vreg(dst), val: val } }
+fn vi_copy(dst, src)        { { op: "Copy",     dst: vreg(dst), src: vreg(src) } }
+fn vi_add(dst, lhs, rhs)    { { op: "Add",      dst: vreg(dst), lhs: vreg(lhs), rhs: vreg(rhs) } }
+fn vi_sub(dst, lhs, rhs)    { { op: "Sub",      dst: vreg(dst), lhs: vreg(lhs), rhs: vreg(rhs) } }
+fn vi_mul(dst, lhs, rhs)    { { op: "Mul",      dst: vreg(dst), lhs: vreg(lhs), rhs: vreg(rhs) } }
+fn vi_cmp(dst, lhs, rhs, cmp) { { op: "Cmp",   dst: vreg(dst), lhs: vreg(lhs), rhs: vreg(rhs), cmp: cmp } }
+fn vi_call(dst, callee, args) { { op: "Call",   dst: vreg(dst), callee: callee, args: list.map(args, fn(a){ vreg(a) }) } }
+fn vi_call_indirect(dst, closure, args) {
+  { op: "CallIndirect", dst: vreg(dst), closure: vreg(closure),
+    args: list.map(args, fn(a){ vreg(a) }) }
+}
+fn vi_make_closure(dst, ptr_reg, fn_name, captures) {
+  { op: "MakeClosure", dst: vreg(dst), ptr_reg: vreg(ptr_reg),
+    fn_name: fn_name, captures: list.map(captures, fn(c){ vreg(c) }) }
+}
+fn vi_load_heap(dst, ptr, offset) {
+  { op: "LoadHeap", dst: vreg(dst), ptr: vreg(ptr), offset: offset }
+}
+fn vi_load_heap_dyn(dst, ptr, idx) {
+  { op: "LoadHeapDyn", dst: vreg(dst), ptr: vreg(ptr), idx: vreg(idx) }
+}
+fn vi_store_heap(ptr, offset, src) {
+  { op: "StoreHeap", ptr: vreg(ptr), offset: offset, src: vreg(src) }
+}
+fn vi_alloc(dst, size) {
+  { op: "Alloc", dst: vreg(dst), size: size }
+}
+fn vi_const_str(dst, s) {
+  { op: "ConstStr", dst: vreg(dst), s: s }
+}
+fn vi_ret(src)  { { op: "Ret",    src: vreg(src) } }
+fn vi_br(to)    { { op: "Br",     to: to } }
+fn vi_brcond(cond, then_blk, else_blk) {
+  { op: "BrCond", cond: vreg(cond), then_blk: then_blk, else_blk: else_blk }
+}
+fn vi_label(id) { { op: "Label",  id: id } }
+
+// ── Instruction selection ─────────────────────────────────────────────────────
+
+fn sel_inst(inst) {
+  let op = inst.op in
+  if op == "ImmI64" || op == "ImmBool" then
+    [vi_imm(inst.dst, if op == "ImmBool" then (if inst.val then 1 else 0) else inst.val)]
+  else if op == "CopyI64" || op == "MoveI64" then
+    [vi_copy(inst.dst, inst.src)]
+  else if op == "AddI64" then
+    [vi_add(inst.dst, inst.lhs, inst.rhs)]
+  else if op == "SubI64" then
+    [vi_sub(inst.dst, inst.lhs, inst.rhs)]
+  else if op == "MulI64" then
+    [vi_mul(inst.dst, inst.lhs, inst.rhs)]
+  else if op == "CmpI64" then
+    [vi_cmp(inst.dst, inst.lhs, inst.rhs, inst.cmp)]
+  else if op == "CallI64" then
+    [vi_call(inst.dst, inst.callee, inst.args)]
+  else if op == "CallIndirect" then
+    [vi_call_indirect(inst.dst, inst.closure_reg, inst.args)]
+  else if op == "MakeClosure" then
+    [vi_make_closure(inst.dst, inst.ptr_reg, inst.fn_name, inst.captures)]
+  else if op == "LoadHeap" || op == "ListLen" || op == "LoadHeapStaticIdx" then
+    let offset = if op == "ListLen" then 0
+      else if op == "LoadHeapStaticIdx" then 8 + inst.field_idx * 8
+      else inst.offset in
+    [vi_load_heap(inst.dst, inst.ptr, offset)]
+  else if op == "LoadHeapDyn" then
+    [vi_load_heap_dyn(inst.dst, inst.ptr, inst.idx)]
+  else if op == "StoreHeap" then
+    [vi_store_heap(inst.ptr, inst.offset, inst.src)]
+  else if op == "AllocHeap" then
+    [vi_alloc(inst.dst, inst.size)]
+  else if op == "ConstStr" then
+    // Expand to: Alloc ptr_reg, StoreHeap len, StoreHeap chars, Copy dst=ptr_reg
+    // Use scratch vregs 50000 + dst*1000 + i to avoid collisions
+    let s = inst.s in
+    let n = str.len(s) in
+    let size = (1 + n) * 8 in
+    let base = 50000 + inst.dst * 1000 in
+    let ptr_r = base in
+    let len_r = base + 1 in
+    let alloc_inst = { op: "Alloc", dst: vreg(ptr_r), size: size } in
+    let len_inst = vi_imm(len_r, n) in
+    let len_store = { op: "StoreHeap", ptr: vreg(ptr_r), offset: 0, src: vreg(len_r) } in
+    let char_insts = list.flatten(list.build(n, fn(i) {
+      let ch = str.char_code(str.char_at(s, i)) in
+      let cr = base + 2 + i in
+      [vi_imm(cr, ch),
+       { op: "StoreHeap", ptr: vreg(ptr_r), offset: 8 + i * 8, src: vreg(cr) }]
+    })) in
+    let copy_inst = vi_copy(inst.dst, ptr_r) in
+    list.concat([[alloc_inst, len_inst, len_store], char_insts, [copy_inst]])
+  else
+    [{ op: "SelError", message: "unknown ocir op", ocir_op: op }]
+}
+
+fn sel_term(term) {
+  let op = term.op in
+  if op == "RetI64" then [vi_ret(term.src)]
+  else if op == "Br" then [vi_br(term.to)]
+  else if op == "BrCond" then [vi_brcond(term.cond, term.then_blk, term.else_blk)]
+  else [{ op: "TermError", ocir_op: op }]
+}
+
+fn sel_block(block) {
+  let insts = list.flatten(list.map(block.insts, sel_inst)) in
+  let term  = sel_term(block.term) in
+  list.concat([[vi_label(block.label)], insts, term])
+}
+
+fn sel_func(f) {
+  {
+    name:   f.name,
+    params: f.params,
+    insts:  list.flatten(list.map(f.blocks, sel_block))
+  }
+}
+
+fn sel_module(m) {
+  { entry: m.entry, funcs: list.map(m.funcs, sel_func) }
+}
+
+export { sel_module, vreg, imm }

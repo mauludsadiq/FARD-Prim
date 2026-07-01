@@ -1,0 +1,245 @@
+// vmir_to_omir.fard -- VMIR -> OMIR (register allocation + code generation)
+//
+// Takes the flat VMIR instruction list (virtual registers as {k:"vreg",r:N})
+// and produces the existing OMIR format with stack slots and physical registers.
+//
+// Strategy:
+//   1. Collect all vreg numbers used in the function
+//   2. Assign each a stack slot (same as lower_ocir_to_omir did)
+//   3. Rewrite each VMIR instruction into OMIR load/store sequences
+//
+// This preserves full compatibility with the existing OMIR pipeline
+// (tco, regalloc, peephole, encode). The improvement is that pre-RA
+// scheduling and analysis can now operate on VMIR before this pass.
+
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("std/bits") as bits
+
+// ── Slot assignment ───────────────────────────────────────────────────────────
+
+fn slot_key(r) { str.from(r) }
+
+fn collect_vregs(insts) {
+  // Collect all vreg numbers referenced in the instruction list
+  list.fold(insts, {}, fn(acc, inst) {
+    let acc = if rec.has(inst,"dst") && inst.dst.k == "vreg"
+      then rec.set(acc, slot_key(inst.dst.r), true) else acc in
+    let acc = if rec.has(inst,"src") && inst.src.k == "vreg"
+      then rec.set(acc, slot_key(inst.src.r), true) else acc in
+    let acc = if rec.has(inst,"lhs") && inst.lhs.k == "vreg"
+      then rec.set(acc, slot_key(inst.lhs.r), true) else acc in
+    let acc = if rec.has(inst,"rhs") && inst.rhs.k == "vreg"
+      then rec.set(acc, slot_key(inst.rhs.r), true) else acc in
+    let acc = if rec.has(inst,"cond") && inst.cond.k == "vreg"
+      then rec.set(acc, slot_key(inst.cond.r), true) else acc in
+    let acc = if rec.has(inst,"closure") && inst.closure.k == "vreg"
+      then rec.set(acc, slot_key(inst.closure.r), true) else acc in
+    let acc = if rec.has(inst,"ptr") && inst.ptr.k == "vreg"
+      then rec.set(acc, slot_key(inst.ptr.r), true) else acc in
+    let acc = if rec.has(inst,"idx") && inst.idx.k == "vreg"
+      then rec.set(acc, slot_key(inst.idx.r), true) else acc in
+    let acc = if rec.has(inst,"ptr_reg") && inst.ptr_reg.k == "vreg"
+      then rec.set(acc, slot_key(inst.ptr_reg.r), true) else acc in
+    let acc = if rec.has(inst,"args")
+      then list.fold(inst.args, acc, fn(a, arg) {
+        if arg.k == "vreg" then rec.set(a, slot_key(arg.r), true) else a
+      }) else acc in
+    let acc = if rec.has(inst,"captures")
+      then list.fold(inst.captures, acc, fn(a, cap) {
+        if cap.k == "vreg" then rec.set(a, slot_key(cap.r), true) else a
+      }) else acc in
+
+    acc
+  })
+}
+
+fn assign_slots(vreg_keys) {
+  // Assign a stack slot to each vreg key (string).
+  // Order is deterministic via rec.keys ordering.
+  let keys = rec.keys(vreg_keys) in
+  list.fold(keys, { offset: 0, slots: {} }, fn(acc, k) {
+    let next = acc.offset + 8 in
+    { offset: next,
+      slots: rec.set(acc.slots, k, { k: "stack", slot: 0 - next }) }
+  })
+}
+
+fn slot_for(slots, vreg) {
+  rec.get(slots, str.from(vreg.r))
+}
+
+fn align16(n) { if n % 16 == 0 then n else n + (16 - n % 16) }
+
+// ── OMIR helpers ──────────────────────────────────────────────────────────────
+
+fn rax() { { k: "reg", name: "rax" } }
+fn rdi() { { k: "reg", name: "rdi" } }
+
+fn mov_imm(val)       { { op: "MovImm64", dst: rax(), val: val } }
+fn mov_r2s(dst, src)  { { op: "MovRegToStack", dst: dst, src: src } }
+fn mov_s2r(dst, src)  { { op: "MovStackToReg", dst: dst, src: src } }
+fn add_rs(dst, src)   { { op: "AddRegStack", dst: dst, src: src } }
+fn call_r(n)          { { op: "CallReloc", name: n } }
+fn load_arg(idx, slot){ { op: "LoadArg", arg_idx: idx, slot: slot } }
+
+// ── Instruction lowering ──────────────────────────────────────────────────────
+
+fn lower_vmir_inst(inst, slots) {
+  let op = inst.op in
+  if op == "Label" then
+    [{ op: "Label", target: { k: "label", id: inst.id } }]
+  else if op == "Imm" then
+    let dst = slot_for(slots, inst.dst) in
+    [mov_imm(inst.val), mov_r2s(dst, rax())]
+  else if op == "Copy" then
+    let src = slot_for(slots, inst.src) in
+    let dst = slot_for(slots, inst.dst) in
+    [{ op: "CopyI64", src: src, dst: dst }]
+  else if op == "Add" then
+    let dst = slot_for(slots, inst.dst) in
+    let lhs = slot_for(slots, inst.lhs) in
+    let rhs = slot_for(slots, inst.rhs) in
+    [mov_s2r(rax(), lhs), add_rs(rax(), rhs), mov_r2s(dst, rax())]
+  else if op == "Sub" then
+    let dst = slot_for(slots, inst.dst) in
+    let lhs = slot_for(slots, inst.lhs) in
+    let rhs = slot_for(slots, inst.rhs) in
+    [{ op: "SubI64", lhs: lhs, rhs: rhs, dst: dst }]
+  else if op == "Mul" then
+    let dst = slot_for(slots, inst.dst) in
+    let lhs = slot_for(slots, inst.lhs) in
+    let rhs = slot_for(slots, inst.rhs) in
+    [{ op: "MulI64", lhs: lhs, rhs: rhs, dst: dst }]
+  else if op == "Cmp" then
+    let dst = slot_for(slots, inst.dst) in
+    let lhs = slot_for(slots, inst.lhs) in
+    let rhs = slot_for(slots, inst.rhs) in
+    [{ op: "CmpI64", lhs: lhs, rhs: rhs, dst: dst, cmp: inst.cmp }]
+  else if op == "Call" then
+    let dst = slot_for(slots, inst.dst) in
+    let arg_moves = list.build(list.len(inst.args), fn(i) {
+      load_arg(i, slot_for(slots, list.get(inst.args, i)).slot)
+    }) in
+    list.concat([arg_moves, [{ op: "CallReloc", name: inst.callee }], [mov_r2s(dst, rax())]])
+  else if op == "CallIndirect" then
+    let dst = slot_for(slots, inst.dst) in
+    let closure_slot = slot_for(slots, inst.closure) in
+    let n = list.len(inst.args) in
+    let explicit_moves = list.build(n, fn(i) {
+      load_arg(1 + i, slot_for(slots, list.get(inst.args, i)).slot)
+    }) in
+    list.concat([
+      [load_arg(0, closure_slot.slot)],
+      explicit_moves,
+      [{ op: "CallIndirect", closure: closure_slot }],
+      [mov_r2s(dst, rax())]
+    ])
+  else if op == "MakeClosure" then
+    let n_caps = list.len(inst.captures) in
+    let heap_size = (1 + n_caps) * 8 in
+    let ptr_slot = slot_for(slots, inst.ptr_reg) in
+    let dst_slot = slot_for(slots, inst.dst) in
+    let cap_stores = list.build(n_caps, fn(i) {
+      { op: "StoreHeap", ptr: ptr_slot, offset: 8 + i * 8,
+        src: slot_for(slots, list.get(inst.captures, i)) }
+    }) in
+    list.concat([
+      [{ op: "MovImm64", dst: rdi(), val: heap_size },
+       { op: "CallReloc", name: "fard_alloc" },
+       mov_r2s(ptr_slot, rax()),
+       { op: "StoreFnPtr", ptr: ptr_slot, fn_name: inst.fn_name }],
+      cap_stores,
+      [mov_s2r(rax(), ptr_slot), mov_r2s(dst_slot, rax())]
+    ])
+  else if op == "LoadHeap" then
+    let dst = slot_for(slots, inst.dst) in
+    let ptr = slot_for(slots, inst.ptr) in
+    [{ op: "LoadHeap", dst: dst, ptr: ptr, offset: inst.offset }]
+  else if op == "LoadHeapDyn" then
+    let dst = slot_for(slots, inst.dst) in
+    let ptr = slot_for(slots, inst.ptr) in
+    let idx = slot_for(slots, inst.idx) in
+    [{ op: "LoadHeapDyn", dst: dst, ptr: ptr, idx: idx }]
+  else if op == "StoreHeap" then
+    let ptr = slot_for(slots, inst.ptr) in
+    let src = slot_for(slots, inst.src) in
+    [{ op: "StoreHeap", ptr: ptr, offset: inst.offset, src: src }]
+  else if op == "Alloc" then
+    let dst = slot_for(slots, inst.dst) in
+    [{ op: "MovImm64", dst: rdi(), val: inst.size },
+     { op: "CallReloc", name: "fard_alloc" },
+     mov_r2s(dst, rax())]
+
+  else if op == "Ret" then
+    let src = slot_for(slots, inst.src) in
+    [mov_s2r(rax(), src)]
+  else if op == "Br" then
+    [{ op: "Jmp", target: { k: "label", id: inst.to } }]
+  else if op == "BrCond" then
+    let cond = slot_for(slots, inst.cond) in
+    [{ op: "CmpStackZero", src: cond },
+     { op: "Jne", target: { k: "label", id: inst.then_blk } },
+     { op: "Jmp", target: { k: "label", id: inst.else_blk } }]
+  else
+    [{ op: "LowerError", vmir_op: op }]
+}
+
+fn lower_vmir_func(f) {
+  // Also collect param regs -- they may not appear in any instruction
+  // (e.g. __env__ param of a closure with no captures)
+  let param_vregs = list.fold(f.params, {}, fn(acc, p) {
+    rec.set(acc, slot_key(p.reg), true)
+  }) in
+  let vregs = list.fold(rec.keys(collect_vregs(f.insts)), param_vregs, fn(acc, k) {
+    rec.set(acc, k, true)
+  }) in
+  let layout = assign_slots(vregs) in
+  let frame_size = align16(layout.offset) in
+  let slots = layout.slots in
+
+  // Collect params: assign LoadParam instructions
+  let n_params = list.len(f.params) in
+  let param_insts = list.build(n_params, fn(i) {
+    let p = list.get(f.params, i) in
+    let s = slot_for(slots, { r: p.reg }) in
+    { op: "MovRegToStack", dst: s, src: { k: "reg", name:
+        if i == 0 then "rdi"
+        else if i == 1 then "rsi"
+        else if i == 2 then "rdx"
+        else if i == 3 then "rcx"
+        else if i == 4 then "r8"
+        else "r9" } }
+  }) in
+
+  // Callee-saved regs (empty for now, regalloc adds them)
+  let prologue = { op: "Prologue", frame_size: frame_size } in
+  let epilogue = { op: "Epilogue", frame_size: frame_size } in
+  let ret_inst = { op: "Ret" } in
+
+  let body = list.flatten(list.map(f.insts, fn(i){ lower_vmir_inst(i, slots) })) in
+
+  // Insert prologue + param spills at start, epilogue+ret before final Ret
+  // Find the Ret in body and replace with Epilogue+Ret
+  let n = list.len(body) in
+  let with_ep = list.flatten(list.map(list.build(n, fn(i){i}), fn(i) {
+    let inst = list.get(body, i) in
+    if inst.op == "MovStackToReg" && rec.has(inst,"dst") &&
+       inst.dst.k == "reg" && inst.dst.name == "rax" &&
+       i + 1 < n && list.get(body, i+1).op == "LowerError" then [inst]
+    else [inst]
+  })) in
+
+  { name: f.name,
+    params: f.params,
+    frame_size: frame_size,
+    insts: list.concat([[prologue], param_insts, body, [epilogue, ret_inst]]),
+    reg_assignments: {} }
+}
+
+fn lower_module(m) {
+  { entry: m.entry, funcs: list.map(m.funcs, lower_vmir_func) }
+}
+
+export { lower_module }

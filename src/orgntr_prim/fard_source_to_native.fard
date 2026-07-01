@@ -11,7 +11,8 @@ import("../orgntr_prim/ocir_inline")    as inl
 import("../orgntr_prim/ocir_gvn")       as gvn
 import("../orgntr_prim/ocir_sccp")      as sccp
 import("../orgntr_prim/verify")          as verify
-import("../orgntr_prim/lower_ocir_to_omir") as omir_lower
+import("../orgntr_prim/ocir_to_vmir")        as vmir_sel
+import("../orgntr_prim/vmir_to_omir")        as vmir_lower
 import("../orgntr_prim/omir_tco")           as tco
 import("../orgntr_prim/omir_peephole")      as peep
 import("../orgntr_prim/omir_regalloc")      as ra
@@ -37,7 +38,8 @@ fn compile_and_emit(src, out_path) {
   let ocir_mod = sccp.sccp_module(ocir_mod) in
   let ocir_mod = inl.inline_module(opt.opt_module(ocir_mod)) in
   let ocir_mod = opt.opt_module(gvn.gvn_module(sccp.sccp_module(opt.opt_module(ocir_mod)))) in
-  let omir_mod = omir_lower.lower_module(ocir_mod) in
+  let vmir_mod = vmir_sel.sel_module(ocir_mod) in
+  let omir_mod = vmir_lower.lower_module(vmir_mod) in
   let omir_mod = tco.tco_module(omir_mod) in
   let omir_mod = ra.regalloc_module(omir_mod) in
   let omir_mod = peep.peephole_module(omir_mod) in

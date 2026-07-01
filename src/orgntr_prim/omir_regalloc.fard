@@ -106,7 +106,8 @@ fn unrewritable_slots(insts) {
       else if op == "LoadHeap" then list.concat([unsafe_slot(inst.ptr), unsafe_slot(inst.dst)])
       else if op == "LoadHeapDyn" then list.concat([unsafe_slot(inst.ptr), unsafe_slot(inst.idx), unsafe_slot(inst.dst)])
       else if op == "LoadHeapStaticIdx" then list.concat([unsafe_slot(inst.ptr), unsafe_slot(inst.dst)])
-      else if op == "MakeClosure" then unsafe_slot(inst.dst)
+      else if op == "MakeClosure" then list.concat([unsafe_slot(inst.dst), if rec.has(inst,"ptr") then unsafe_slot(inst.ptr) else []])
+      else if op == "StoreFnPtr" then if rec.has(inst,"ptr") then unsafe_slot(inst.ptr) else []
       else if op == "ConstStr" || op == "ConstStrChar" then
         if rec.has(inst,"dst") then unsafe_slot(inst.dst) else []
       else if op == "LoadArg" then
