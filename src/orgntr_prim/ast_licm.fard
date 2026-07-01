@@ -1,0 +1,218 @@
+// ast_licm.fard -- Loop Invariant Code Motion on the FARD AST
+//
+// Operates after parsing, before lowering.
+// For each while node:
+//   1. Identify loop state variables (params of cond and step fns)
+//   2. Walk cond/step bodies for subexpressions free of state vars
+//   3. Hoist invariant subexpressions into let bindings before the while
+//
+// Transforms:
+//   while INIT fn(s){s < n*2} fn(s){s+1}
+// Into:
+//   let __licm_0 = n*2 in
+//   while INIT fn(s){s < __licm_0} fn(s){s+1}
+
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+
+// -- Free variable analysis --
+
+fn empty_set() { rec.set({}, "__empty", false) }
+
+fn free_vars(node, bound) {
+  let t = node.t in
+  if t == "var" then
+    if rec.has(bound, node.v) then empty_set() else rec.set({}, node.v, true)
+  else if t == "int" || t == "bool" || t == "str_lit" then empty_set()
+  else if t == "bin" then
+    rec_union(free_vars(node.left, bound), free_vars(node.right, bound))
+  else if t == "unary" then
+    free_vars(node.operand, bound)
+  else if t == "if" then
+    rec_union(free_vars(node.cond, bound),
+      rec_union(free_vars(node.then_n, bound), free_vars(node.else_n, bound)))
+  else if t == "call" then
+    list.fold(node.args, free_vars(node.fn_n, bound), fn(acc, a) {
+      rec_union(acc, free_vars(a, bound))
+    })
+  else if t == "fn" then
+    let new_bound = list.fold(node.params, bound, fn(acc, p) {
+      rec.set(acc, p, true)
+    }) in
+    free_vars(node.body, new_bound)
+  else if t == "let" then
+    let rhs_fv = free_vars(node.value, bound) in
+    let new_bound = rec.set(bound, node.name, true) in
+    rec_union(rhs_fv, free_vars(node.body, new_bound))
+  else empty_set()
+}
+
+fn rec_union(a, b) {
+  list.fold(rec.keys(b), a, fn(acc, k) { rec.set(acc, k, true) })
+}
+
+fn has_any(fvs, names) {
+  list.len(list.filter(names, fn(n){ rec.has(fvs, n) })) > 0
+}
+
+// -- Invariant subexpression detection --
+// Returns list of {expr, id} for hoistable subexpressions in node.
+// A subexpression is hoistable if:
+//   - it is a non-trivial binary op (not a simple var or int)
+//   - its free variables do not include any state_vars
+//   - it is not already a single var/int (no benefit to hoist)
+
+fn find_invariants(node, state_vars, counter) {
+  let t = node.t in
+  let fvs = free_vars(node, {}) in
+  if t == "int" || t == "bool" || t == "var" || t == "str_lit" then
+    { found: [], counter: counter }
+  else if !has_any(fvs, state_vars) && (t == "bin" || t == "call") then
+    // This whole expression is invariant -- hoist it
+    { found: [{ expr: node, id: counter }], counter: counter + 1 }
+  else if t == "bin" then
+    let l = find_invariants(node.left, state_vars, counter) in
+    let r = find_invariants(node.right, state_vars, l.counter) in
+    { found: list.concat([l.found, r.found]), counter: r.counter }
+  else if t == "if" then
+    let c = find_invariants(node.cond, state_vars, counter) in
+    let th = find_invariants(node.then_n, state_vars, c.counter) in
+    let el = find_invariants(node.else_n, state_vars, th.counter) in
+    { found: list.concat([c.found, list.concat([th.found, el.found])]),
+      counter: el.counter }
+  else if t == "call" then
+    list.fold(node.args, { found: [], counter: counter }, fn(acc, a) {
+      let r = find_invariants(a, state_vars, acc.counter) in
+      { found: list.concat([acc.found, r.found]), counter: r.counter }
+    })
+  else { found: [], counter: counter }
+}
+
+// -- Substitution --
+// Replace occurrences of invariant expressions with their hoisted var names.
+
+fn expr_eq(a, b) {
+  if a.t != b.t then false
+  else if a.t == "int" then a.v == b.v
+  else if a.t == "var" then a.v == b.v
+  else if a.t == "bin" then a.op == b.op && expr_eq(a.left, b.left) && expr_eq(a.right, b.right)
+  else false
+}
+
+fn subst_expr(node, invariants) {
+  // Check if node matches any invariant
+  let found_inv = list.fold(invariants, null, fn(acc, inv) {
+    if acc != null then acc
+    else if expr_eq(node, inv.expr) then inv
+    else null
+  }) in
+  if found_inv != null then
+    { t: "var", v: str.concat(["__licm_", str.from(found_inv.id)]), line: 0, col: 0 }
+  else
+    let t = node.t in
+    if t == "bin" then
+      { t: t, op: node.op,
+        left:  subst_expr(node.left,  invariants),
+        right: subst_expr(node.right, invariants) }
+    else if t == "if" then
+      { t: t,
+        cond:   subst_expr(node.cond,   invariants),
+        then_n: subst_expr(node.then_n, invariants),
+        else_n: subst_expr(node.else_n, invariants) }
+    else if t == "call" then
+      { t: t, fn_n: subst_expr(node.fn_n, invariants),
+        args: list.map(node.args, fn(a){ subst_expr(a, invariants) }) }
+    else if t == "fn" then
+      { t: t, params: node.params, body: subst_expr(node.body, invariants),
+        line: node.line }
+    else node
+}
+
+// -- While transformation --
+
+fn licm_while(node, counter) {
+  // Collect state variable names from cond params
+  let state_vars = node.cond.params in
+
+  // Find invariants in cond body
+  let cond_inv = find_invariants(node.cond.body, state_vars, counter) in
+  // Find invariants in step body
+  let step_inv = find_invariants(node.step.body, state_vars, cond_inv.counter) in
+
+  let all_inv = list.concat([cond_inv.found, step_inv.found]) in
+
+  if list.len(all_inv) == 0 then { node: node, counter: step_inv.counter }
+  else
+    // Substitute invariants in cond and step bodies
+    let new_cond_body = subst_expr(node.cond.body, all_inv) in
+    let new_step_body = subst_expr(node.step.body, all_inv) in
+    let new_while = {
+      t: "while",
+      init: node.init,
+      cond: { t: "fn", params: node.cond.params, body: new_cond_body, line: node.cond.line },
+      step: { t: "fn", params: node.step.params, body: new_step_body, line: node.step.line },
+      line: node.line
+    } in
+    // Wrap in let bindings: let __licm_0 = expr0 in let __licm_1 = expr1 in while...
+    let wrapped = list.fold(
+      list.build(list.len(all_inv), fn(i){ list.len(all_inv) - 1 - i }),
+      new_while,
+      fn(inner, i) {
+        let inv = list.get(all_inv, i) in
+        { t: "let",
+          name: str.concat(["__licm_", str.from(inv.id)]),
+          val: inv.expr,
+          body: inner,
+          line: 0 }
+      }
+    ) in
+    { node: wrapped, counter: step_inv.counter }
+}
+
+// -- AST walker --
+
+fn licm_expr(node, counter) {
+  if node.t == "while" then licm_while(node, counter)
+  else if node.t == "fn" then
+    let r = licm_expr(node.body, counter) in
+    { node: { t: "fn", params: node.params, body: r.node, line: node.line },
+      counter: r.counter }
+  else if node.t == "let" then
+    let rv = licm_expr(node.val, counter) in
+    let rb = licm_expr(node.body, rv.counter) in
+    { node: { t: "let", name: node.name, val: rv.node, body: rb.node, line: node.line },
+      counter: rb.counter }
+  else if node.t == "if" then
+    let rc = licm_expr(node.cond, counter) in
+    let rt = licm_expr(node.then_n, rc.counter) in
+    let re = licm_expr(node.else_n, rt.counter) in
+    { node: { t: "if", cond: rc.node, then_n: rt.node, else_n: re.node }, counter: re.counter }
+  else if node.t == "bin" then
+    let rl = licm_expr(node.left, counter) in
+    let rr = licm_expr(node.right, rl.counter) in
+    { node: { t: "bin", op: node.op, left: rl.node, right: rr.node }, counter: rr.counter }
+  else { node: node, counter: counter }
+}
+
+fn licm_item(item, counter) {
+  if item.t == "fn_item" then
+    let r = licm_expr(item.body, counter) in
+    { item: { t: "fn_item", name: item.name, params: item.params,
+              body: r.node, line: item.line },
+      counter: r.counter }
+  else if item.t == "expr_item" then
+    let r = licm_expr(item.expr, counter) in
+    { item: { t: "expr_item", expr: r.node }, counter: r.counter }
+  else { item: item, counter: counter }
+}
+
+fn licm_module(m) {
+  let result = list.fold(m.items, { items: [], counter: 0 }, fn(acc, item) {
+    let r = licm_item(item, acc.counter) in
+    { items: list.append(acc.items, r.item), counter: r.counter }
+  }) in
+  { t: "module", items: result.items }
+}
+
+export { licm_module }
