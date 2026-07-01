@@ -133,7 +133,7 @@ Achieved via:
 
 ## Source
 
-10,494 lines of FARD across 42 files in src/orgntr_prim/.
+10,714 lines of FARD across 43 files in src/orgntr_prim/.
 
   x86_64_encode.fard      x86-64 instruction encoding (775 lines)
   fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -153,11 +153,11 @@ Achieved via:
 
 ## Next
 
-  pre-RA instruction scheduling on VMIR
-  LICM on while loop back-edges
   dead function elimination post-inline
+  pre-RA instruction scheduling on VMIR
   ARM64 optimizer parity (migrate to VMIR pipeline)
   interference-graph register allocation upgrade
+  LICM extension: nested loops, call-site invariants
   stdlib native (list.map, str.concat, rec.get)
 
 ## Repos
