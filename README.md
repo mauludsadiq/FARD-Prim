@@ -84,19 +84,31 @@ No external linker. No C runtime. No libSystem.
 
   python3 programs/fuzzer_v2.py 1000 42
 
-Property-based fuzzer with 4 generators: arithmetic, recursive functions,
-closures with captures, closures with conditionals. Compiles programs
-natively, runs them, compares exit code against fard_eval interpreter.
-Bugs found so far:
+Property-based fuzzer with 7 generators: arithmetic, recursive functions,
+closures with captures, closures with conditionals, while loops,
+multi-function programs, GVN stress (repeated subexpressions).
+Compiles programs natively, runs them, compares exit code against
+fard_eval interpreter. Bugs found so far:
 
- - REX.B missing for r8-r15 in MulI64/CmpI64 reg-reg encodings
-   (imul/cmp against r13 silently used rbp -- same low-3-bits, wrong REX)
- - SCCP parameter lattice initialized to Top instead of Bottom
-   (meet(Const, Top)=Const incorrectly folded merge registers)
- - free_vars_expr used node.then_ instead of node.then_n for if nodes
-   (crashed when if expressions appeared inside closure bodies)
+ 1. REX.B missing for r8-r15 in MulI64/CmpI64 reg-reg encodings.
+    imul/cmp against r13 silently used rbp (same low-3-bits, no REX.B).
+    Found by: recursive generator.
 
-1000 cases: 936 pass, 64 skip, 0 fail.
+ 2. SCCP parameter lattice initialized to Top instead of Bottom.
+    meet(Const, Top)=Const incorrectly folded merge registers when
+    one branch carried a parameter value and the other a constant.
+    Found by: arith generator -- fn f(a,b){(1+3)*if b==b then b else 9}.
+
+ 3. free_vars_expr used node.then_ instead of node.then_n for if nodes.
+    Crashed when if expressions appeared inside closure bodies.
+    Found by: closure_cond generator.
+
+ 4. SubRegImm/CmpRegImm missing from use_slots_for_cross in peephole.
+    Cross-block CopyI64 feeding a SubRegImm was incorrectly eliminated,
+    leaving the destination slot unwritten (stale stack value at runtime).
+    Found by: multi_fn generator -- fn main(x,y){helper(x+y,y)}.
+
+1000 cases: 917 pass, 83 skip, 0 fail.
 
 ## Performance
 
