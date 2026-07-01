@@ -133,7 +133,7 @@ Achieved via:
 
 ## Source
 
-10,714 lines of FARD across 43 files in src/orgntr_prim/.
+10,769 lines of FARD across 44 files in src/orgntr_prim/.
 
   x86_64_encode.fard      x86-64 instruction encoding (775 lines)
   fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -153,7 +153,6 @@ Achieved via:
 
 ## Next
 
-  dead function elimination post-inline
   pre-RA instruction scheduling on VMIR
   ARM64 optimizer parity (migrate to VMIR pipeline)
   interference-graph register allocation upgrade
