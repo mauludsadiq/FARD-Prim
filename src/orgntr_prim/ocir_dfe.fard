@@ -1,0 +1,53 @@
+// ocir_dfe.fard -- Dead Function Elimination
+//
+// After inlining, functions that were only called from one site
+// and got inlined are no longer referenced. Remove them.
+//
+// Algorithm:
+//   1. Build call graph: for each function, collect all function names
+//      it references (CallI64 callee, MakeClosure fn_name)
+//   2. BFS/DFS from entry ("fard_main") to find all reachable functions
+//   3. Remove unreachable functions
+
+import("std/list") as list
+import("std/rec") as rec
+
+fn collect_refs(f) {
+  // Collect all function names referenced by this function
+  list.fold(f.blocks, {}, fn(acc, b) {
+    list.fold(b.insts, acc, fn(iacc, inst) {
+      let op = inst.op in
+      if op == "CallI64" then rec.set(iacc, inst.callee, true)
+      else if op == "MakeClosure" then rec.set(iacc, inst.fn_name, true)
+      else iacc
+    })
+  })
+}
+
+fn build_call_graph(funcs) {
+  list.fold(funcs, {}, fn(acc, f) {
+    rec.set(acc, f.name, collect_refs(f))
+  })
+}
+
+fn reachable(graph, worklist, visited) {
+  if list.len(worklist) == 0 then visited
+  else
+    let name = list.get(worklist, 0) in
+    let rest = list.filter(worklist, fn(n){ n != name }) in
+    if rec.has(visited, name) then reachable(graph, rest, visited)
+    else
+      let new_visited = rec.set(visited, name, true) in
+      let refs = if rec.has(graph, name) then rec.keys(rec.get(graph, name)) else [] in
+      let new_work = list.filter(refs, fn(n){ !rec.has(new_visited, n) }) in
+      reachable(graph, list.concat([rest, new_work]), new_visited)
+}
+
+fn dfe_module(m) {
+  let graph = build_call_graph(m.funcs) in
+  let live = reachable(graph, ["fard_main"], {}) in
+  let kept = list.filter(m.funcs, fn(f){ rec.has(live, f.name) }) in
+  { entry: m.entry, funcs: kept }
+}
+
+export { dfe_module }

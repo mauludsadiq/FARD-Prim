@@ -186,7 +186,7 @@ fn collect_uses_func(f) {
 
 fn has_side_effects(inst) {
   let op = inst.op in
-  op == "CallI64" || op == "CallIndirect" || op == "StoreHeap" || op == "MakeClosure"
+  op == "CallI64" || op == "CallIndirect" || op == "StoreHeap"
 }
 
 fn dce_block(block, uses) {

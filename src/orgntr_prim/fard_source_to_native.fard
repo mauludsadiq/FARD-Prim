@@ -9,6 +9,7 @@ import("../orgntr_prim/fard_ir_to_ocir") as bridge
 import("../orgntr_prim/ocir")            as ocir
 import("../orgntr_prim/ocir_opt")       as opt
 import("../orgntr_prim/ocir_inline")    as inl
+import("../orgntr_prim/ocir_dfe")        as dfe
 import("../orgntr_prim/ocir_gvn")       as gvn
 import("../orgntr_prim/ocir_sccp")      as sccp
 import("../orgntr_prim/verify")          as verify
@@ -40,6 +41,7 @@ fn compile_and_emit(src, out_path) {
   let ocir_mod = sccp.sccp_module(ocir_mod) in
   let ocir_mod = inl.inline_module(opt.opt_module(ocir_mod)) in
   let ocir_mod = opt.opt_module(gvn.gvn_module(sccp.sccp_module(opt.opt_module(ocir_mod)))) in
+  let ocir_mod = dfe.dfe_module(ocir_mod) in
   let vmir_mod = vmir_sel.sel_module(ocir_mod) in
   let omir_mod = vmir_lower.lower_module(vmir_mod) in
   let omir_mod = tco.tco_module(omir_mod) in
