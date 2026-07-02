@@ -1,0 +1,229 @@
+// vmir_sched.fard -- Pre-RA instruction scheduling on VMIR
+//
+// List scheduling within each basic block (between Label boundaries).
+// Goal: hide load/multiply latency by moving independent instructions
+// between a producer and its consumers.
+//
+// Latency model (x86-64 Skylake):
+//   LoadHeap/LoadHeapDyn: 5 cycles
+//   Mul:                  3 cycles
+//   Add/Sub/Cmp/Imm/Copy: 1 cycle
+//   Call/CallIndirect:    not moved (control dependency)
+//
+// Algorithm: list scheduling with critical-path priority.
+//   1. Build def map: vreg -> instruction index
+//   2. Build dep graph: for each inst, find all insts it depends on
+//   3. Compute earliest start time (EST) for each inst
+//   4. Greedily emit: at each cycle, pick ready inst with highest
+//      critical path weight
+
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+
+fn latency(op) {
+  if op == "LoadHeap" || op == "LoadHeapDyn" then 5
+  else if op == "Mul" then 3
+  else if op == "Call" || op == "CallIndirect" || op == "Alloc" then 20
+  else 1
+}
+
+fn is_barrier(op) {
+  op == "Call" || op == "CallIndirect" || op == "Alloc" ||
+  op == "StoreHeap" || op == "MakeClosure"
+}
+
+// Collect defined vreg for an instruction (null if none)
+fn def_of(inst) {
+  if rec.has(inst,"dst") && inst.dst.k == "vreg" then inst.dst.r else null
+}
+
+// Collect all vreg uses of an instruction
+fn uses_of(inst) {
+  let op = inst.op in
+  let acc = [] in
+  let acc = if rec.has(inst,"src") && inst.src.k == "vreg"
+    then list.append(acc, inst.src.r) else acc in
+  let acc = if rec.has(inst,"lhs") && inst.lhs.k == "vreg"
+    then list.append(acc, inst.lhs.r) else acc in
+  let acc = if rec.has(inst,"rhs") && inst.rhs.k == "vreg"
+    then list.append(acc, inst.rhs.r) else acc in
+  let acc = if rec.has(inst,"ptr") && inst.ptr.k == "vreg"
+    then list.append(acc, inst.ptr.r) else acc in
+  let acc = if rec.has(inst,"idx") && inst.idx.k == "vreg"
+    then list.append(acc, inst.idx.r) else acc in
+  let acc = if rec.has(inst,"closure") && inst.closure.k == "vreg"
+    then list.append(acc, inst.closure.r) else acc in
+  let acc = if rec.has(inst,"cond") && inst.cond.k == "vreg"
+    then list.append(acc, inst.cond.r) else acc in
+  let acc = if rec.has(inst,"ptr_reg") && inst.ptr_reg.k == "vreg"
+    then list.append(acc, inst.ptr_reg.r) else acc in
+  let acc = if rec.has(inst,"args")
+    then list.concat([acc, list.map(
+      list.filter(inst.args, fn(a){ a.k == "vreg" }), fn(a){ a.r })])
+    else acc in
+  let acc = if rec.has(inst,"captures")
+    then list.concat([acc, list.map(
+      list.filter(inst.captures, fn(c){ c.k == "vreg" }), fn(c){ c.r })])
+    else acc in
+  acc
+}
+
+// Schedule a single basic block (list of non-Label instructions)
+fn is_store_like(op) {
+  op == "StoreHeap" || op == "Alloc" || op == "MakeClosure"
+}
+
+fn is_call_like(op) {
+  op == "Call" || op == "CallIndirect"
+}
+
+fn is_load_like(op) {
+  op == "LoadHeap" || op == "LoadHeapDyn"
+}
+
+fn schedule_block(insts) {
+  let n = list.len(insts) in
+  if n <= 1 then insts
+  else
+    let def_map = list.fold(list.build(n, fn(i){i}), {}, fn(acc, i) {
+      let d = def_of(list.get(insts, i)) in
+      if d != null then rec.set(acc, str.from(d), i) else acc
+    }) in
+
+    // Data dependencies
+    let data_deps = list.map(list.build(n, fn(i){i}), fn(i) {
+      let used = uses_of(list.get(insts, i)) in
+      list.filter(list.map(used, fn(r) {
+        let k = str.from(r) in
+        if rec.has(def_map, k) then rec.get(def_map, k) else -1
+      }), fn(j){ j >= 0 && j != i })
+    }) in
+
+    // Memory ordering: StoreHeap/Alloc/MakeClosure must complete before
+    // any subsequent Call/CallIndirect, and Calls must complete before
+    // any subsequent LoadHeap/LoadHeapDyn.
+    // Add ordering edges: for each call at index i, depend on all
+    // store-like ops at j < i; for each load at i, depend on all
+    // calls at j < i.
+    let mem_deps = list.map(list.build(n, fn(i){i}), fn(i) {
+      let op_i = list.get(insts, i).op in
+      if is_call_like(op_i) then
+        // Call depends on all preceding stores
+        list.filter(list.build(i, fn(j){j}), fn(j){
+          is_store_like(list.get(insts, j).op)
+        })
+      else if is_load_like(op_i) then
+        // Load depends on all preceding calls and stores
+        list.filter(list.build(i, fn(j){j}), fn(j){
+          is_call_like(list.get(insts, j).op) || is_store_like(list.get(insts, j).op)
+        })
+      else if is_store_like(op_i) then
+        // Store depends on all preceding calls
+        list.filter(list.build(i, fn(j){j}), fn(j){
+          is_call_like(list.get(insts, j).op)
+        })
+      else []
+    }) in
+
+    // Merge data and memory deps
+    let deps = list.map(list.build(n, fn(i){i}), fn(i) {
+      let dd = list.get(data_deps, i) in
+      let md = list.get(mem_deps, i) in
+      list.fold(md, dd, fn(acc, j) {
+        if list.len(list.filter(acc, fn(k){k==j})) > 0 then acc
+        else list.append(acc, j)
+      })
+    }) in
+
+    // EST computation
+    let est = list.fold(list.build(n, fn(i){i}), {}, fn(acc, i) {
+      let my_deps = list.get(deps, i) in
+      let e = list.fold(my_deps, 0, fn(mx, j) {
+        let je = if rec.has(acc, str.from(j)) then rec.get(acc, str.from(j)) else 0 in
+        let jl = latency(list.get(insts, j).op) in
+        if je + jl > mx then je + jl else mx
+      }) in
+      rec.set(acc, str.from(i), e)
+    }) in
+
+    let get_est = fn(i) { if rec.has(est, str.from(i)) then rec.get(est, str.from(i)) else 0 } in
+    let get_prio = fn(i) { get_est(i) + latency(list.get(insts, i).op) } in
+
+    let result = list.fold(list.build(n, fn(_){0}),
+      { out: [], sched: {} },
+      fn(acc, _) {
+        if list.len(acc.out) >= n then acc
+        else
+          let ready = list.filter(list.build(n, fn(i){i}), fn(i) {
+            !rec.has(acc.sched, str.from(i)) &&
+            list.len(list.filter(list.get(deps, i),
+              fn(j){ !rec.has(acc.sched, str.from(j)) })) == 0
+          }) in
+          if list.len(ready) == 0 then acc
+          else
+            let chosen = list.fold(ready, list.get(ready, 0), fn(best, i) {
+              if get_prio(i) > get_prio(best) then i else best
+            }) in
+            { out: list.append(acc.out, list.get(insts, chosen)),
+              sched: rec.set(acc.sched, str.from(chosen), true) }
+      }) in
+    result.out
+}
+
+
+// Schedule a function's flat instruction list
+// Split at Label boundaries, schedule each block, reassemble
+fn schedule_func(f) {
+  let insts = f.insts in
+  let n = list.len(insts) in
+
+  // Split into segments between Labels
+  let segments = list.fold(list.build(n, fn(i){i}), { segs: [], cur: [] }, fn(acc, i) {
+    let inst = list.get(insts, i) in
+    if inst.op == "Label" then
+      // Flush current segment, start new one with this label
+      let segs2 = if list.len(acc.cur) > 0
+        then list.append(acc.segs, acc.cur) else acc.segs in
+      { segs: segs2, cur: [inst] }
+    else if inst.op == "Br" || inst.op == "BrCond" || inst.op == "Ret" then
+      // Terminator: flush including this
+      let cur2 = list.append(acc.cur, inst) in
+      { segs: list.append(acc.segs, cur2), cur: [] }
+    else
+      { segs: acc.segs, cur: list.append(acc.cur, inst) }
+  }) in
+  let all_segs = if list.len(segments.cur) > 0
+    then list.append(segments.segs, segments.cur)
+    else segments.segs in
+
+  // Schedule each segment: skip the Label header and terminator
+  let scheduled_segs = list.map(all_segs, fn(seg) {
+    let sn = list.len(seg) in
+    if sn == 0 then seg
+    else if sn == 1 then seg  // just a label or single inst
+    else
+      let first = list.get(seg, 0) in
+      // Only schedule if first inst is a Label
+      if first.op != "Label" then seg
+      else if sn == 2 then seg  // label + terminator only
+      else
+        let term = list.get(seg, sn - 1) in
+        // Skip scheduling if terminator is a back-edge (Br to earlier label)
+        let is_backedge = term.op == "Br" && rec.has(term,"to") && term.to <= first.id in
+        if is_backedge then seg
+        else
+          let body = list.filter(list.build(sn - 2, fn(i){ list.get(seg, i + 1) }), fn(x){true}) in
+          let sched_body = schedule_block(body) in
+          list.concat([[first], sched_body, [term]])
+  }) in
+
+  { name: f.name, params: f.params,
+    insts: list.flatten(scheduled_segs) }
+}
+
+fn schedule_module(m) {
+  { entry: m.entry, funcs: list.map(m.funcs, schedule_func) }
+}
+
+export { schedule_module }
