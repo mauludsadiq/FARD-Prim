@@ -46,7 +46,7 @@ fn patch_bcond19(bytes, at, byte_offset) {
   let old_enc = bits.bor(bits.bor(bits.bshl(old_b3, 24), bits.bshl(old_b2, 16)),
     bits.bor(bits.bshl(old_b1, 8), old_b0)) in
   // Clear imm19 field (bits 5-23), set new value
-  let cleared = bits.band(old_enc, 4278190113) in  // ~(134217696) & 4294967295... approx
+  let cleared = bits.band(old_enc, bits.bor(bits.bshl(65280, 16), 31)) in  // 0xFF00001F: keep bits 0-4 and 24-31
   let new_enc = bits.bor(cleared, bits.bshl(masked, 5)) in
   let b0 = bits.band(new_enc, 255) in
   let b1 = bits.band(bits.bshr(new_enc, 8), 255) in
@@ -91,6 +91,10 @@ fn scan_labels_and_patches(insts) {
       { pc: acc.pc + 4, labels: acc.labels,
         patches: list.append(acc.patches,
           { kind: "B", at: acc.pc, next_ip: acc.pc + 4, target: inst.target.id }) }
+    else if op == "JccFlags" || op == "Je" then
+      { pc: acc.pc + 4, labels: acc.labels,
+        patches: list.append(acc.patches,
+          { kind: "Bcond", at: acc.pc, next_ip: acc.pc + 4, target: inst.target.id }) }
     else if op == "CallReloc" then
       { pc: acc.pc + 4, labels: acc.labels,
         patches: list.append(acc.patches,

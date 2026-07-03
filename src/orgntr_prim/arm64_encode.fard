@@ -11,7 +11,7 @@ import("../orgntr_prim/omir") as omir
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn le32(n) {
-  let n = if n < 0 then n + 4294967296 else n in
+  let n = if n < 0 then n + bits.bshl(0, 16) else n in
   [bits.band(n, 255),
    bits.band(bits.bshr(n, 8), 255),
    bits.band(bits.bshr(n, 16), 255),
@@ -19,7 +19,7 @@ fn le32(n) {
 }
 
 fn le64(n) {
-  list.concat([le32(bits.band(n, 4294967295)), le32(bits.bshr(n, 32))])
+  list.concat([le32(bits.band(n, bits.bor(bits.bshl(65535, 16), 65535))), le32(bits.bshr(n, 32))])
 }
 
 fn zeros(n) { list.build(n, fn(_) { 0 }) }
@@ -42,6 +42,10 @@ fn x86_to_arm64(name) {
   else if name == "rbx" then x19()  // callee-saved
   else if name == "r10" then x10()
   else if name == "r11" then x11()
+  else if name == "r12" then x20()
+  else if name == "r13" then x21()
+  else if name == "r14" then x22()
+  else if name == "r15" then x23()
   else x9()  // default scratch
 }
 
@@ -51,7 +55,7 @@ fn x19() { 19 }
 fn x0()  { 0 }  fn x1()  { 1 }  fn x2()  { 2 }  fn x3()  { 3 }
 fn x4()  { 4 }  fn x5()  { 5 }  fn x6()  { 6 }  fn x7()  { 7 }
 fn x8()  { 8 }  fn x9()  { 9 }  fn x10() { 10 } fn x11() { 11 } fn x16() { 16 }
-fn x17() { 17 } fn x29() { 29 } fn x30() { 30 } fn xzr() { 31 }
+fn x12() { 12 } fn x13() { 13 } fn x14() { 14 } fn x15() { 15 } fn x16() { 16 } fn x17() { 17 } fn x20() { 20 } fn x21() { 21 } fn x22() { 22 } fn x23() { 23 } fn x29() { 29 } fn x30() { 30 } fn xzr() { 31 }
 
 fn arg_reg(i) {
   if i == 0 then x0() else if i == 1 then x1()
@@ -67,7 +71,7 @@ fn movz(rd, imm16) {
   // encoding: 1 10 100101 hw imm16 Rd
   // hw=00 (shift 0), 64-bit
   let enc = bits.bor(
-    bits.bor(3531603968, bits.bshl(bits.band(imm16, 65535), 5)),
+    bits.bor(bits.bshl(53888, 16), bits.bshl(bits.band(imm16, 65535), 5)),
     bits.band(rd, 31)) in
   le32(enc)
 }
@@ -77,7 +81,7 @@ fn movk(rd, imm16, shift) {
   // shift: 0,16,32,48 -> hw: 0,1,2,3
   let hw = shift / 16 in
   let enc = bits.bor(bits.bor(bits.bor(
-    4068474880,
+    bits.bshl(62080, 16),
     bits.bshl(bits.band(hw, 3), 21)),
     bits.bshl(bits.band(imm16, 65535), 5)),
     bits.band(rd, 31)) in
@@ -87,7 +91,7 @@ fn movk(rd, imm16, shift) {
 // MOV xDst, xSrc  (ORR xDst, xzr, xSrc)
 fn mov_reg(rd, rn) {
   let enc = bits.bor(bits.bor(bits.bor(
-    2852126720,
+    bits.bshl(43520, 16),
     bits.bshl(bits.band(rn, 31), 16)),
     bits.bshl(31, 5)),   // xzr
     bits.band(rd, 31)) in
@@ -113,7 +117,7 @@ fn ldr_fp(rd, offset) {
   // offset must be positive multiple of 8, imm12 = offset/8
   let imm12 = offset / 8 in
   let enc = bits.bor(bits.bor(bits.bor(
-    4181721088,
+    bits.bshl(63808, 16),
     bits.bshl(bits.band(imm12, 4095), 10)),
     bits.bshl(x29(), 5)),
     bits.band(rd, 31)) in
@@ -124,7 +128,7 @@ fn ldr_fp(rd, offset) {
 fn str_fp(rs, offset) {
   let imm12 = offset / 8 in
   let enc = bits.bor(bits.bor(bits.bor(
-    4177526784,
+    bits.bshl(63744, 16),
     bits.bshl(bits.band(imm12, 4095), 10)),
     bits.bshl(x29(), 5)),
     bits.band(rs, 31)) in
@@ -134,7 +138,7 @@ fn str_fp(rs, offset) {
 // ADD xDst, xLhs, xRhs
 fn add_reg(rd, rn, rm) {
   let enc = bits.bor(bits.bor(bits.bor(
-    2332033024, bits.bshl(bits.band(rm, 31), 16)),
+    bits.bshl(35584, 16), bits.bshl(bits.band(rm, 31), 16)),
     bits.bshl(bits.band(rn, 31), 5)),
     bits.band(rd, 31)) in
   le32(enc)
@@ -143,7 +147,7 @@ fn add_reg(rd, rn, rm) {
 // SUB xDst, xLhs, xRhs
 fn sub_reg(rd, rn, rm) {
   let enc = bits.bor(bits.bor(bits.bor(
-    3405774848, bits.bshl(bits.band(rm, 31), 16)),
+    bits.bshl(51968, 16), bits.bshl(bits.band(rm, 31), 16)),
     bits.bshl(bits.band(rn, 31), 5)),
     bits.band(rd, 31)) in
   le32(enc)
@@ -152,7 +156,7 @@ fn sub_reg(rd, rn, rm) {
 // MUL xDst, xLhs, xRhs  (MADD with xzr)
 fn mul_reg(rd, rn, rm) {
   let enc = bits.bor(bits.bor(bits.bor(bits.bor(
-    2600468480,
+    bits.bshl(39680, 16),
     bits.bshl(bits.band(rm, 31), 16)),
     bits.bshl(31, 10)),   // Ra = xzr
     bits.bshl(bits.band(rn, 31), 5)),
@@ -161,18 +165,11 @@ fn mul_reg(rd, rn, rm) {
 }
 
 // CMP xLhs, xRhs  (SUBS xzr, lhs, rhs)
-fn cmp_reg(rn, rm) {
-  let enc = bits.bor(bits.bor(bits.bor(
-    3942645760, bits.bshl(bits.band(rm, 31), 16)),
-    bits.bshl(bits.band(rn, 31), 5)),
-    31) in   // rd = xzr
-  le32(enc)
-}
 
 // CMP xN, #0  (SUBS xzr, xN, #0)
 fn cmp_zero(rn) {
   // SUBS xzr, rn, #0
-  let enc = bits.bor(bits.bor(4043309087, bits.bshl(bits.band(rn, 31), 5)), 0) in
+  let enc = bits.bor(bits.bor(bits.bor(bits.bshl(61696, 16), 31), bits.bshl(bits.band(rn, 31), 5)), 0) in
   le32(enc)
 }
 
@@ -182,7 +179,7 @@ fn bne_placeholder() { le32(1409286145) }  // B.NE +0 (patched)
 // B #offset  (unconditional)
 fn b_placeholder()   { le32(335544320) }  // B +0 (patched)
 // BL #offset  (branch with link = call)
-fn bl_placeholder()  { le32(2483027968) }  // BL +0 (patched)
+fn bl_placeholder()  { le32(bits.bshl(37888, 16)) }  // BL +0 (patched)
 
 // CSET xDst, cond  — set register to 0 or 1 based on condition
 fn cset(rd, cond) {
@@ -196,7 +193,7 @@ fn cset(rd, cond) {
     else if cond == 13 then 12         // LE -> GT
     else 1 in
   let enc = bits.bor(bits.bor(bits.bor(bits.bor(
-    2594113504,
+    bits.bor(bits.bshl(39583, 16), 2016),
     bits.bshl(bits.band(inv_cond, 15), 12)),
     bits.bshl(31, 16)),  // Rm = xzr
     bits.bshl(31, 5)),   // Rn = xzr
@@ -215,7 +212,7 @@ fn cond_gt() { 12 } fn cond_ge() { 10 }
 fn ldr_reg_shifted(rd, rn, rm) {
   // LDR xd, [xn, xm, LSL #3]
   let enc = bits.bor(bits.bor(bits.bor(bits.bor(
-    4167071744,
+    bits.bor(bits.bshl(63584, 16), 30720),
     bits.bshl(bits.band(rm, 31), 16)),
     bits.bshl(bits.band(rn, 31), 5)),
     bits.band(rd, 31)),
@@ -227,7 +224,7 @@ fn ldr_reg_shifted(rd, rn, rm) {
 fn ldr_imm(rd, rn, offset) {
   let imm12 = offset / 8 in
   let enc = bits.bor(bits.bor(bits.bor(
-    4181721088,
+    bits.bshl(63808, 16),
     bits.bshl(bits.band(imm12, 4095), 10)),
     bits.bshl(bits.band(rn, 31), 5)),
     bits.band(rd, 31)) in
@@ -238,7 +235,7 @@ fn ldr_imm(rd, rn, offset) {
 fn str_imm(rs, rn, offset) {
   let imm12 = offset / 8 in
   let enc = bits.bor(bits.bor(bits.bor(
-    4177526784,
+    bits.bshl(63744, 16),
     bits.bshl(bits.band(imm12, 4095), 10)),
     bits.bshl(bits.band(rn, 31), 5)),
     bits.band(rs, 31)) in
@@ -248,7 +245,7 @@ fn str_imm(rs, rn, offset) {
 // STR xSrc, [xBase, xIdx, LSL #3]
 fn str_reg_shifted(rs, rn, rm) {
   let enc = bits.bor(bits.bor(bits.bor(bits.bor(
-    4162877440,
+    bits.bor(bits.bshl(63520, 16), 30720),
     bits.bshl(bits.band(rm, 31), 16)),
     bits.bshl(bits.band(rn, 31), 5)),
     bits.band(rs, 31)),
@@ -259,42 +256,42 @@ fn str_reg_shifted(rs, rn, rm) {
 // SUB sp, sp, #imm  (allocate stack frame)
 fn sub_sp_imm(imm) {
   // SUB SP, SP, #imm  (imm must be multiple of 16, max 4095*16)
-  let enc = bits.bor(3506439167, bits.bshl(bits.band(imm, 4095), 10)) in
+  let enc = bits.bor(bits.bor(bits.bshl(53504, 16), 1023), bits.bshl(bits.band(imm, 4095), 10)) in
   le32(enc)
 }
 
 // ADD sp, sp, #imm  (deallocate stack frame)
 fn add_sp_imm(imm) {
-  let enc = bits.bor(2432697343, bits.bshl(bits.band(imm, 4095), 10)) in
+  let enc = bits.bor(bits.bor(bits.bshl(37120, 16), 1023), bits.bshl(bits.band(imm, 4095), 10)) in
   le32(enc)
 }
 
 // STP x29, x30, [sp, #-16]!  (push fp and lr)
 fn stp_fp_lr() {
   // STP x29, x30, [sp, #-16]!  pre-index
-  le32(2847898621)
+  le32(bits.bor(bits.bshl(43455, 16), 31741))
 }
 
 // LDP x29, x30, [sp], #16  (pop fp and lr)
 fn ldp_fp_lr() {
-  le32(2831252477)
+  le32(bits.bor(bits.bshl(43201, 16), 31741))
 }
 
 // MOV x29, sp  (set frame pointer)
 fn mov_fp_sp() {
   // ADD x29, sp, #0
-  le32(2432697341)
+  le32(bits.bor(bits.bshl(37120, 16), 1021))
 }
 
 // RET  (return via x30)
-fn ret_inst() { le32(3596551104) }
+fn ret_inst() { le32(bits.bor(bits.bshl(54879, 16), 960)) }
 
 // NOP
-fn nop() { le32(3573751839) }
+fn nop() { le32(bits.bor(bits.bshl(54531, 16), 8223)) }
 
 // BLR xN  (call register)
 fn blr(rn) {
-  let enc = bits.bor(3594452992, bits.bshl(bits.band(rn, 31), 5)) in
+  let enc = bits.bor(bits.bshl(54847, 16), bits.bshl(bits.band(rn, 31), 5)) in
   le32(enc)
 }
 
@@ -312,7 +309,7 @@ fn ldur_fp(rd, offset) {
   // LDUR: size=11, V=0, opc=01, imm9 signed
   let imm9 = if offset < 0 then offset + 512 else offset in
   let enc = bits.bor(bits.bor(bits.bor(
-    4164943872,
+    bits.bshl(63552, 16),
     bits.bshl(bits.band(imm9, 511), 12)),
     bits.bshl(x29(), 5)),
     bits.band(rd, 31)) in
@@ -323,7 +320,7 @@ fn ldur_fp(rd, offset) {
 fn stur_fp(rs, offset) {
   let imm9 = if offset < 0 then offset + 512 else offset in
   let enc = bits.bor(bits.bor(bits.bor(
-    4160749568,
+    bits.bshl(63488, 16),
     bits.bshl(bits.band(imm9, 511), 12)),
     bits.bshl(x29(), 5)),
     bits.band(rs, 31)) in
@@ -358,8 +355,12 @@ fn slot_of(v) { if v.k == "stack" then v.slot else 0 }
 
 fn encode_inst(inst, frame_size) {
   let op = inst.op in
-  if op == "Prologue" then prologue(frame_size)
-  else if op == "Epilogue" then epilogue(frame_size)
+  if op == "Prologue" then
+    let regs = if rec.has(inst, "used_callee_saved") then inst.used_callee_saved else [] in
+    if list.len(regs) > 0 then prologue_with_callee(frame_size, regs) else prologue(frame_size)
+  else if op == "Epilogue" then
+    let regs = if rec.has(inst, "used_callee_saved") then inst.used_callee_saved else [] in
+    if list.len(regs) > 0 then epilogue_with_callee(frame_size, regs) else epilogue(frame_size)
   else if op == "MovImm64" then
     // dst is a register in OMIR - just load into that register
     let dr = if rec.has(inst, "dst") && inst.dst.k == "reg"
@@ -401,36 +402,18 @@ fn encode_inst(inst, frame_size) {
       stur_fp(x9(), slot_of(inst.dst))
     ])
   else if op == "CopyI64" then
-    list.concat([
-      ldur_fp(x9(), slot_of(inst.src)),
-      stur_fp(x9(), slot_of(inst.dst))
-    ])
+    list.concat([load_op(inst.src, x9(), frame_size), store_op(inst.dst, x9())])
   else if op == "SubI64" then
-    list.concat([
-      ldur_fp(x9(), slot_of(inst.lhs)),
-      ldur_fp(x10(), slot_of(inst.rhs)),
-      sub_reg(x9(), x9(), x10()),
-      stur_fp(x9(), slot_of(inst.dst))
-    ])
+    list.concat([load_op(inst.lhs, x9(), frame_size), load_op(inst.rhs, x10(), frame_size), sub_reg(x9(), x9(), x10()), store_op(inst.dst, x9())])
   else if op == "MulI64" then
-    list.concat([
-      ldur_fp(x9(), slot_of(inst.lhs)),
-      ldur_fp(x10(), slot_of(inst.rhs)),
-      mul_reg(x9(), x9(), x10()),
-      stur_fp(x9(), slot_of(inst.dst))
-    ])
+    list.concat([load_op(inst.lhs, x9(), frame_size), load_op(inst.rhs, x10(), frame_size), mul_reg(x9(), x9(), x10()), store_op(inst.dst, x9())])
   else if op == "ImmI64" then
     list.concat([
       mov_imm64(x9(), inst.val),
       stur_fp(x9(), slot_of(inst.dst))
     ])
   else if op == "AddI64" then
-    list.concat([
-      ldur_fp(x9(), slot_of(inst.lhs)),
-      ldur_fp(x10(), slot_of(inst.rhs)),
-      add_reg(x9(), x9(), x10()),
-      stur_fp(x9(), slot_of(inst.dst))
-    ])
+    list.concat([load_op(inst.lhs, x9(), frame_size), load_op(inst.rhs, x10(), frame_size), add_reg(x9(), x9(), x10()), store_op(inst.dst, x9())])
   else if op == "CmpI64" then
     let cond = if inst.cmp == "eq" then cond_eq()
       else if inst.cmp == "ne" then cond_ne()
@@ -443,7 +426,7 @@ fn encode_inst(inst, frame_size) {
       ldur_fp(x10(), slot_of(inst.rhs)),
       cmp_reg(x9(), x10()),
       cset(x9(), cond),
-      stur_fp(x9(), slot_of(inst.dst))
+      store_op(inst.dst, x9())
     ])
   else if op == "ImmBool" then
     list.concat([
@@ -502,6 +485,32 @@ fn encode_inst(inst, frame_size) {
       bl_placeholder(),                         // call fard_alloc -> x0 = ptr
       stur_fp(x0(), slot_of(inst.ptr))
     ])
+  else if op == "MovRegToReg" then
+    let dst = x86_to_arm64(inst.dst.name) in
+    let src = x86_to_arm64(inst.src.name) in
+    if dst == src then [] else mov_reg(dst, src)
+  else if op == "AddRegReg" then
+    let dr = if rec.has(inst,"dst") && inst.dst.k == "reg" then x86_to_arm64(inst.dst.name) else x0() in
+    add_reg(dr, dr, x86_to_arm64(inst.src.name))
+  else if op == "SubRegImm" then
+    sub_imm(x86_to_arm64(inst.dst.name), x86_to_arm64(inst.src.name), inst.val)
+  else if op == "AddRegImm" then
+    add_imm(x86_to_arm64(inst.dst.name), x86_to_arm64(inst.src.name), inst.val)
+  else if op == "CmpRegImmFlags" then
+    cmp_imm(x86_to_arm64(inst.src.name), inst.val)
+  else if op == "CmpI64Flags" then
+    list.concat([load_op(inst.lhs, x9(), frame_size), load_op(inst.rhs, x10(), frame_size), cmp_reg(x9(), x10())])
+  else if op == "JccFlags" || op == "Je" then
+    let cc = if inst.cmp == "le" then cond_le() else if inst.cmp == "lt" then cond_lt()
+      else if inst.cmp == "ge" then cond_ge() else if inst.cmp == "gt" then cond_gt()
+      else if inst.cmp == "eq" then cond_eq() else cond_ne() in
+    bcond_placeholder(cc)
+  else if op == "CmpRegZero" then
+    cmp_imm(x86_to_arm64(inst.src.name), 0)
+  else if op == "LoadArgReg" then
+    let dr = x86_to_arm64(inst.dst.name) in
+    let ar = arg_reg(inst.arg_idx) in
+    if dr == ar then [] else mov_reg(dr, ar)
   else if op == "LeaRdiBrp" then
     // ARM64: load address of stack slot into x0
     list.concat([
@@ -564,12 +573,132 @@ fn fard_alloc_stub(bump_ptr_vmaddr) {
 
 fn alloc_stub_size() { 4 * 4 }   // 4 instructions: mov x9,x19; add x19,x19,x0; mov x0,x9; ret
 
+fn x86_callee_to_arm64(name) {
+  if name == "r12" then x20()
+  else if name == "r13" then x21()
+  else if name == "r14" then x22()
+  else x23()
+}
+
+fn stp_preindex(r1, r2) {
+  // STP Xr1, Xr2, [SP, #-16]!
+  let base = bits.bshl(43392, 16) in
+  le32(bits.bor(bits.bor(bits.bor(bits.bor(
+    base, bits.bshl(126, 15)),
+    bits.bshl(bits.band(r2, 31), 10)),
+    bits.bshl(31, 5)),
+    bits.band(r1, 31)))
+}
+
+fn ldp_postindex(r1, r2) {
+  // LDP Xr1, Xr2, [SP], #16
+  let base = bits.bshl(43200, 16) in
+  le32(bits.bor(bits.bor(bits.bor(bits.bor(
+    base, bits.bshl(2, 15)),
+    bits.bshl(bits.band(r2, 31), 10)),
+    bits.bshl(31, 5)),
+    bits.band(r1, 31)))
+}
+
+fn save_callee_saved_in_frame(regs, frame_size) {
+  let n = list.len(regs) in
+  list.flatten(list.map(list.build(n, fn(i){i}), fn(i) {
+    let r = x86_callee_to_arm64(list.get(regs, i)) in
+    let off = 0 - frame_size + i * 8 in
+    stur_fp(r, off)
+  }))
+}
+
+fn restore_callee_saved_from_frame(regs, frame_size) {
+  let n = list.len(regs) in
+  list.flatten(list.map(list.build(n, fn(i){i}), fn(i) {
+    let r = x86_callee_to_arm64(list.get(regs, i)) in
+    let off = 0 - frame_size + i * 8 in
+    ldur_fp(r, off)
+  }))
+}
+
+fn prologue_with_callee(frame_size, regs) {
+  let n = list.len(regs) in
+  let extra = n * 8 in
+  let total = frame_size + extra in
+  let aligned = if total / 16 * 16 == total then total else (total / 16 + 1) * 16 in
+  list.concat([
+    stp_fp_lr(), mov_fp_sp(),
+    if aligned > 0 then sub_sp_imm(aligned) else [],
+    save_callee_saved_in_frame(regs, frame_size)
+  ])
+}
+
+fn epilogue_with_callee(frame_size, regs) {
+  let n = list.len(regs) in
+  let extra = n * 8 in
+  let total = frame_size + extra in
+  let aligned = if total / 16 * 16 == total then total else (total / 16 + 1) * 16 in
+  list.concat([
+    restore_callee_saved_from_frame(regs, frame_size),
+    if aligned > 0 then add_sp_imm(aligned) else [],
+    ldp_fp_lr(), ret_inst()
+  ])
+}
+
+fn load_op(operand, scratch_reg, frame_size) {
+  if operand.k == "reg"
+    then let r = x86_to_arm64(operand.name) in
+      if r == scratch_reg then [] else mov_reg(scratch_reg, r)
+  else ldur_fp(scratch_reg, operand.slot)
+}
+
+fn store_op(operand, src_reg) {
+  if operand.k == "reg"
+    then let r = x86_to_arm64(operand.name) in
+      if r == src_reg then [] else mov_reg(r, src_reg)
+  else stur_fp(src_reg, operand.slot)
+}
+
+fn sub_imm(rd, rn, imm) {
+  le32(bits.bor(bits.bor(bits.bor(
+    bits.bshl(53504, 16),
+    bits.bshl(bits.band(imm, 4095), 10)),
+    bits.bshl(bits.band(rn, 31), 5)),
+    bits.band(rd, 31)))
+}
+
+fn add_imm(rd, rn, imm) {
+  le32(bits.bor(bits.bor(bits.bor(
+    bits.bshl(37120, 16),
+    bits.bshl(bits.band(imm, 4095), 10)),
+    bits.bshl(bits.band(rn, 31), 5)),
+    bits.band(rd, 31)))
+}
+
+fn cmp_reg(rn, rm) {
+  le32(bits.bor(bits.bor(bits.bor(bits.bor(
+    bits.bshl(60160, 16),
+    bits.bshl(bits.band(rm, 31), 16)),
+    bits.bshl(bits.band(rn, 31), 5)),
+    31), 0))
+}
+
+fn cmp_imm(rn, imm) {
+  le32(bits.bor(bits.bor(bits.bor(
+    bits.bshl(61696, 16),
+    bits.bshl(bits.band(imm, 4095), 10)),
+    bits.bshl(bits.band(rn, 31), 5)),
+    31))
+}
+
+fn bcond_placeholder(cond) {
+  list.concat([le32(bits.bor(1409286144, bits.band(cond, 15)))])
+}
+
+
 export {
   encode_func, encode_inst, fard_alloc_stub, alloc_stub_size,
-  movk, add_reg,
+  movk, add_reg, sub_imm, add_imm, cmp_imm, cmp_reg, bcond_placeholder,
   prologue, epilogue, stp_fp_lr, mov_fp_sp, movz, mov_reg, mov_imm64, ldr_imm, str_imm, ldur_fp, stur_fp,
   bl_placeholder, b_placeholder, bne_placeholder, blr,
   le32, le64, ret_inst, nop, zeros,
-  x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x16, x17, x19, x29, x30, xzr, xreg,
+  x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x12, x13, x14, x15, x16, x17, x19, x20, x21, x22, x23, x29, x30, xzr, xreg,
   arg_reg, cond_eq, cond_ne, cond_lt, cond_le, cond_gt, cond_ge
 }
