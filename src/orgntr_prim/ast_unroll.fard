@@ -1,0 +1,194 @@
+// ast_unroll.fard -- Loop unrolling for constant-bound while loops
+//
+// Operates after LICM, before lowering.
+// Detects while loops where:
+//   - init is an integer literal
+//   - cond body is: state_var < int_literal  (or <=, >, >=, !=, ==)
+//   - step body is: state_var + int_literal  (or -)
+//   - trip count <= MAX_UNROLL (16)
+//
+// Transforms:
+//   while 0 fn(s){s<8} fn(s){s+1}
+// Into:
+//   let s0=0 in let s1=s0+1 in ... let s8=s7+1 in s8
+//   (with early termination via if expressions)
+//
+// For partial unrolling (trip count unknown but step known):
+//   Unroll by factor 4, keeping a remainder loop.
+
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("std/cast") as cast
+
+let MAX_UNROLL = 16
+
+// ── Pattern matching helpers ──────────────────────────────────────────────────
+
+fn is_int_lit(node) { node.t == "int" }
+fn int_val(node) { cast.int(node.v) }
+
+fn is_var(node, name) { node.t == "var" && node.v == name }
+
+// Check if expr is: var op int_lit (e.g. s < 8, s + 1)
+fn is_var_op_int(expr, var_name) {
+  expr.t == "bin" && is_var(expr.left, var_name) && is_int_lit(expr.right)
+}
+
+// Extract constant bound from cond body: fn(s){ s < N } -> N
+// Returns null if not recognized pattern
+fn extract_bound(cond_fn) {
+  let s = list.get(cond_fn.params, 0) in
+  let body = cond_fn.body in
+  if is_var_op_int(body, s) then
+    { op: body.op, bound: int_val(body.right), var: s }
+  else null
+}
+
+// Extract step delta from step body: fn(s){ s + N } -> N
+fn extract_step(step_fn) {
+  let s = list.get(step_fn.params, 0) in
+  let body = step_fn.body in
+  if is_var_op_int(body, s) then
+    { op: body.op, delta: int_val(body.right), var: s }
+  else null
+}
+
+// Compute trip count given init, cond, step
+fn trip_count(init_val, cond_op, bound, step_op, delta) {
+  if step_op == "+" then
+    if cond_op == "<"  then (bound - init_val) / delta
+    else if cond_op == "<=" then (bound - init_val + 1) / delta
+    else null
+  else if step_op == "-" then
+    if cond_op == ">"  then (init_val - bound) / delta
+    else if cond_op == ">=" then (init_val - bound + 1) / delta
+    else null
+  else null
+}
+
+// Check cond holds for value
+fn cond_holds(val, cond_op, bound) {
+  if cond_op == "<"  then val < bound
+  else if cond_op == "<=" then val <= bound
+  else if cond_op == ">"  then val > bound
+  else if cond_op == ">=" then val >= bound
+  else if cond_op == "==" then val == bound
+  else if cond_op == "!=" then val != bound
+  else false
+}
+
+// Apply step to value
+fn apply_step(val, step_op, delta) {
+  if step_op == "+" then val + delta
+  else if step_op == "-" then val - delta
+  else val
+}
+
+fn int_node(v) { { t: "int", v: str.from(v), line: 0, col: 0 } }
+fn var_node(name) { { t: "var", v: name, line: 0, col: 0 } }
+
+// ── Full unrolling ────────────────────────────────────────────────────────────
+// Produce: let __u0 = init in let __u1 = step(__u0) in ... __uN
+// Each let only emitted if cond holds for that value
+
+fn unroll_fully(init_val, cond_op, bound, step_op, delta, trips) {
+  // Build list of state values: [0, 1, 2, ..., trips]
+  // Final value after all trips
+  let final_val = list.fold(list.build(trips, fn(_){0}), init_val, fn(v, _) {
+    apply_step(v, step_op, delta)
+  }) in
+  // Build nested let: let s0=init in let s1=step(s0) in ... sN
+  // Use __unroll_i as var names to avoid capture
+  let var_names = list.build(trips + 1, fn(i){ str.concat(["__u", str.from(i)]) }) in
+  // Build from inside out
+  let inner = var_node(list.get(var_names, trips)) in
+  list.fold(
+    list.build(trips, fn(i){ trips - 1 - i }),  // reverse: trips-1 down to 0
+    inner,
+    fn(body, i) {
+      let vname = list.get(var_names, i + 1) in
+      let prev_name = list.get(var_names, i) in
+      let step_expr = {
+        t: "bin", op: step_op, line: 0,
+        left: var_node(prev_name),
+        right: int_node(delta)
+      } in
+      // Wrap the whole remaining chain: let vname = step(prev) in body
+      { t: "let", name: vname, val: step_expr, body: body, line: 0 }
+    }
+  )
+}
+
+fn wrap_init(init_val, trips, inner) {
+  let vname = str.concat(["__u", str.from(0)]) in
+  { t: "let", name: vname, val: int_node(init_val), body: inner, line: 0 }
+}
+
+// ── Main transformation ───────────────────────────────────────────────────────
+
+fn try_unroll_while(node) {
+  if node.t != "while" then null
+  else if !is_int_lit(node.init) then null
+  else
+    let init_val = int_val(node.init) in
+    let cond_info = extract_bound(node.cond) in
+    if cond_info == null then null
+    else
+      let step_info = extract_step(node.step) in
+      if step_info == null then null
+      else
+        let trips = trip_count(init_val, cond_info.op, cond_info.bound,
+                               step_info.op, step_info.delta) in
+        if trips == null then null
+        else if trips < 0 then null
+        else if trips > MAX_UNROLL then null
+        else if trips == 0 then int_node(init_val)  // loop never executes
+        else
+          let unrolled = unroll_fully(init_val, cond_info.op, cond_info.bound,
+                                      step_info.op, step_info.delta, trips) in
+          wrap_init(init_val, trips, unrolled)
+}
+
+// ── AST walker ────────────────────────────────────────────────────────────────
+
+fn unroll_expr(node) {
+  let t = node.t in
+  if t == "while" then
+    let attempt = try_unroll_while(node) in
+    if attempt != null then attempt
+    else
+      { t: t, init: node.init, line: node.line,
+        cond: { t: "fn", params: node.cond.params,
+                body: unroll_expr(node.cond.body), line: node.cond.line },
+        step: { t: "fn", params: node.step.params,
+                body: unroll_expr(node.step.body), line: node.step.line } }
+  else if t == "fn" then
+    { t: t, params: node.params, body: unroll_expr(node.body), line: node.line }
+  else if t == "let" then
+    { t: t, name: node.name, val: unroll_expr(node.val),
+      body: unroll_expr(node.body), line: node.line }
+  else if t == "if" then
+    { t: t, cond: unroll_expr(node.cond),
+      then_n: unroll_expr(node.then_n),
+      else_n: unroll_expr(node.else_n) }
+  else if t == "bin" then
+    { t: t, op: node.op,
+      left: unroll_expr(node.left), right: unroll_expr(node.right) }
+  else node
+}
+
+fn unroll_item(item) {
+  if item.t == "fn_item" then
+    { t: "fn_item", name: item.name, params: item.params,
+      body: unroll_expr(item.body), line: item.line }
+  else if item.t == "expr_item" then
+    { t: "expr_item", expr: unroll_expr(item.expr) }
+  else item
+}
+
+fn unroll_module(m) {
+  { t: "module", items: list.map(m.items, unroll_item) }
+}
+
+export { unroll_module }
