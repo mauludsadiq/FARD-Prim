@@ -69,19 +69,21 @@ fn degree(adj, k) {
 
 fn compute_spill_costs(insts) {
   let n = list.len(insts) in
+  let weights = compute_loop_weights(insts) in
   list.fold(list.build(n, fn(i){i}), {}, fn(acc, i) {
     let inst = list.get(insts, i) in
+    let w = list.get(weights, i) in
     let slots = linear.use_slots(inst) in
     let d = linear.def_slot(inst) in
     let acc2 = list.fold(slots, acc, fn(a, s) {
       let k = slot_key(s) in
       let prev = if rec.has(a, k) then rec.get(a, k) else 0 in
-      rec.set(a, k, prev + 1)
+      rec.set(a, k, prev + w)
     }) in
     if d != -999999 then
       let k = slot_key(d) in
       let prev = if rec.has(acc2, k) then rec.get(acc2, k) else 0 in
-      rec.set(acc2, k, prev + 1)
+      rec.set(acc2, k, prev + w)
     else acc2
   })
 }
@@ -218,6 +220,66 @@ fn assign_colors(keys, adj, intervals, insts, unsafe) {
 }
 
 // ── Main entry point ──────────────────────────────────────────────────────────
+
+
+// -- Loop weight computation -------------------------------------------------
+// Detects back-edges in the flat OMIR instruction list.
+// A back-edge is a Jmp/Jne whose target label appears before the jump.
+// Returns: inst_index -> weight (1 for non-loop, 10 for loop body)
+
+fn label_positions(insts) {
+  // Map label id -> instruction index
+  let n = list.len(insts) in
+  list.fold(list.build(n, fn(i){i}), {}, fn(acc, i) {
+    let inst = list.get(insts, i) in
+    if inst.op == "Label" && rec.has(inst,"target") && inst.target.k == "label"
+      then rec.set(acc, str.from(inst.target.id), i)
+      else acc
+  })
+}
+
+fn find_omir_back_edges(insts, label_pos) {
+  let n = list.len(insts) in
+  list.flatten(list.map(list.build(n, fn(i){i}), fn(i) {
+    let inst = list.get(insts, i) in
+    let is_jump = inst.op == "Jmp" || inst.op == "Jne" || inst.op == "Je" in
+    if !is_jump then []
+    else if !rec.has(inst,"target") then []
+    else if inst.target.k != "label" then []
+    else
+      let target_key = str.from(inst.target.id) in
+      if !rec.has(label_pos, target_key) then []
+      else
+        let target_idx = rec.get(label_pos, target_key) in
+        if target_idx < i
+          then [{ back_src: i, header_idx: target_idx, header_id: inst.target.id }]
+          else []
+  }))
+}
+
+fn compute_loop_weights(insts) {
+  let label_pos = label_positions(insts) in
+  let back_edges = find_omir_back_edges(insts, label_pos) in
+  let n = list.len(insts) in
+  // For each instruction, compute loop depth (how many loops contain it)
+  // Simple: for each back-edge, all instructions in [header_idx, back_src] get +1 depth
+  let depths = list.fold(back_edges,
+    list.map(list.build(n, fn(_){0}), fn(x){x}),
+    fn(acc, be) {
+      let range_len = be.back_src - be.header_idx + 1 in
+      list.map(list.build(n, fn(i){i}), fn(i) {
+        let d = list.get(acc, i) in
+        if i >= be.header_idx && i <= be.back_src then d + 1 else d
+      })
+    }
+  ) in
+  // Weight = 10^depth (1 for depth 0, 10 for depth 1, 100 for depth 2)
+  list.map(depths, fn(d) {
+    if d == 0 then 1
+    else if d == 1 then 10
+    else 100
+  })
+}
 
 fn igra_func(f) {
   let insts = f.insts in
