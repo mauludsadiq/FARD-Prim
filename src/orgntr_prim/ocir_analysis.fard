@@ -246,6 +246,46 @@ fn compute_cross(defs, def_counts, uses, blocks) {
 
 // ── Main entry point ──────────────────────────────────────────────────────────
 
+
+fn find_back_edges_func(f, a) {
+  list.flatten(list.map(f.blocks, fn(b) {
+    let bk = reg_key(b.label) in
+    let dom_b = if rec.has(a.dom, bk) then rec.get(a.dom, bk) else [] in
+    let succs_b = if rec.has(a.succs, bk) then rec.get(a.succs, bk) else [] in
+    list.filter(list.map(succs_b, fn(s) {
+      let s_doms_b = list.len(list.filter(dom_b, fn(d){ d == s })) > 0 in
+      { from: b.label, to: s, is_back: s_doms_b }
+    }), fn(e){ e.is_back })
+  }))
+}
+
+fn loop_body_blocks(header, back_src, preds) {
+  let body_init = [header, back_src] in
+  let result = list.fold(list.build(20, fn(_){0}), { body: body_init, worklist: [back_src] }, fn(acc, _) {
+    if list.len(acc.worklist) == 0 then acc
+    else
+      let node = list.get(acc.worklist, 0) in
+      let rest = list.filter(acc.worklist, fn(x){ x != node }) in
+      if node == header then { body: acc.body, worklist: rest }
+      else
+        let node_preds = if rec.has(preds, reg_key(node)) then rec.get(preds, reg_key(node)) else [] in
+        let new_nodes = list.filter(node_preds, fn(p) {
+          list.len(list.filter(acc.body, fn(b){ b == p })) == 0
+        }) in
+        { body: list.concat([acc.body, new_nodes]),
+          worklist: list.concat([rest, new_nodes]) }
+  }) in
+  result.body
+}
+
+fn find_loops(f, a) {
+  let back_edges = find_back_edges_func(f, a) in
+  list.map(back_edges, fn(e) {
+    { header: e.to, back_src: e.from,
+      body: loop_body_blocks(e.to, e.from, a.preds) }
+  })
+}
+
 fn analyze_func(f) {
   let blocks = f.blocks in
   let succs = compute_succs(blocks) in
@@ -277,4 +317,4 @@ fn analyze_module(m) {
 }
 
 export { analyze_func, analyze_module, collect_inst_uses, collect_term_uses,
-         block_succs, reg_key }
+         block_succs, reg_key, find_loops, find_back_edges_func }
