@@ -35,7 +35,7 @@ All produce the same native binary. Same IR, same backend, same output.
 |--------------|--------|--------|
 | macOS x86-64 | Mach-O | 11/11  |
 | Linux x86-64 | ELF64  | 11/11  |
-| Linux ARM64  | ELF64  | 5/5    |
+| Linux ARM64  | ELF64  | 6/6    |
 | macOS ARM64  | Mach-O | blocked by AppleSystemPolicy (macOS 15) |
 
 Linux targets tested via Docker on Ubuntu 22.04.
@@ -146,10 +146,12 @@ Achieved via:
   - Interference graph RA: Chaitin-Briggs coloring, copy coalescing,
     precise live range interference with inclusive bounds,
     loop-depth spill cost weighting (10x per loop level)
+  - ARM64 parity: full VMIR pipeline, callee-saved reg handling,
+    large literal encoding via bits.bshl (FARD truncates >2^31)
 
 ## Source
 
-11,682 lines of FARD across 47 files in src/orgntr_prim/.
+11,864 lines of FARD across 48 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (775 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -168,6 +170,7 @@ Achieved via:
    vmir_to_omir.fard       VMIR -> OMIR register allocation (237 lines)
    ast_licm.fard           loop invariant code motion, AST level (216 lines)
    ocir_dfe.fard           dead function elimination post-inline (53 lines)
+   fard_source_to_native_arm64.fard ARM64 ELF64 pipeline (47 lines)
    lower_ocir_to_omir.fard OCIR -> OMIR (ARM64/ELF legacy path) (391 lines)
    python_to_uvir.fard     Python subset frontend (289 lines)
    js_to_uvir.fard         JavaScript subset frontend (270 lines)
@@ -175,9 +178,9 @@ Achieved via:
 ## Next
 
    migrate remaining passes to shared analysis (sccp, peephole, inline, sched)
-   ARM64 optimizer parity (migrate to VMIR pipeline)
    profile-guided optimization
    loop unrolling and strength reduction
+   Mach-O ARM64 target (macOS Apple Silicon)
 
 ## Repos
 
