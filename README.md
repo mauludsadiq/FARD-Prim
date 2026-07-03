@@ -46,6 +46,7 @@ Linux targets tested via Docker on Ubuntu 22.04.
      -> frontend (language-specific AST -> UVIR)
      -> UVIR (SSA with phi nodes, type verifier)
      -> LICM (loop invariant code motion, AST level, nested loops)
+     -> loop unrolling (constant-bound while loops, up to 16 iterations)
      -> OCIR (phi elimination, register/stack abstraction)
      -> SCCP (sparse conditional constant propagation)
      -> inliner (multi-block CFG inlining, threshold 12 instructions)
@@ -146,12 +147,14 @@ Achieved via:
   - Interference graph RA: Chaitin-Briggs coloring, copy coalescing,
     precise live range interference with inclusive bounds,
     loop-depth spill cost weighting (10x per loop level)
+  - Loop unrolling: constant-bound while loops fully unrolled at AST level;
+    SCCP+const-fold collapse to single constant (zero overhead)
   - ARM64 parity: full VMIR pipeline, callee-saved reg handling,
     large literal encoding via bits.bshl (FARD truncates >2^31)
 
 ## Source
 
-11,864 lines of FARD across 48 files in src/orgntr_prim/.
+12,060 lines of FARD across 49 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (775 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -171,16 +174,17 @@ Achieved via:
    ast_licm.fard           loop invariant code motion, AST level (216 lines)
    ocir_dfe.fard           dead function elimination post-inline (53 lines)
    fard_source_to_native_arm64.fard ARM64 ELF64 pipeline (47 lines)
+   ast_unroll.fard         loop unrolling, constant-bound while (193 lines)
    lower_ocir_to_omir.fard OCIR -> OMIR (ARM64/ELF legacy path) (391 lines)
    python_to_uvir.fard     Python subset frontend (289 lines)
    js_to_uvir.fard         JavaScript subset frontend (270 lines)
 
 ## Next
 
-   migrate remaining passes to shared analysis (sccp, peephole, inline, sched)
+   strength reduction (multiply by constant -> shift/add)
    profile-guided optimization
-   loop unrolling and strength reduction
    Mach-O ARM64 target (macOS Apple Silicon)
+   migrate remaining passes to shared analysis
 
 ## Repos
 
