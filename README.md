@@ -45,7 +45,7 @@ Linux targets tested via Docker on Ubuntu 22.04.
    FARD / Python / JS source
      -> frontend (language-specific AST -> UVIR)
      -> UVIR (SSA with phi nodes, type verifier)
-     -> LICM (loop invariant code motion, AST level)
+     -> LICM (loop invariant code motion, AST level, nested loops)
      -> OCIR (phi elimination, register/stack abstraction)
      -> SCCP (sparse conditional constant propagation)
      -> inliner (multi-block CFG inlining, threshold 12 instructions)
@@ -148,7 +148,7 @@ Achieved via:
 
 ## Source
 
-11,608 lines of FARD across 47 files in src/orgntr_prim/.
+11,620 lines of FARD across 47 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (775 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -174,7 +174,7 @@ Achieved via:
 ## Next
 
    migrate remaining passes to shared analysis (sccp, peephole, inline, sched)
-   LICM extension: dominator-safe hoisting, nested loops, spill-cost weighting
+   LICM extension: dominator-safe hoisting, spill-cost weighting by loop depth
    ARM64 optimizer parity (migrate to VMIR pipeline)
    profile-guided optimization
    loop unrolling and strength reduction
