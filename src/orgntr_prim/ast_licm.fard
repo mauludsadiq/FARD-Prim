@@ -42,7 +42,7 @@ fn free_vars(node, bound) {
     }) in
     free_vars(node.body, new_bound)
   else if t == "let" then
-    let rhs_fv = free_vars(node.value, bound) in
+    let rhs_fv = free_vars(node.val, bound) in
     let new_bound = rec.set(bound, node.name, true) in
     rec_union(rhs_fv, free_vars(node.body, new_bound))
   else empty_set()
@@ -132,6 +132,18 @@ fn subst_expr(node, invariants) {
 // -- While transformation --
 
 fn licm_while(node, counter) {
+  // First recursively apply LICM to cond and step fn bodies
+  // (handles nested while loops inside step)
+  let cond_r = licm_expr(node.cond.body, counter) in
+  let step_r = licm_expr(node.step.body, cond_r.counter) in
+  let new_cond_fn = { t: "fn", params: node.cond.params,
+                      body: cond_r.node, line: node.cond.line } in
+  let new_step_fn = { t: "fn", params: node.step.params,
+                      body: step_r.node, line: node.step.line } in
+  let node = { t: "while", init: node.init, line: node.line,
+               cond: new_cond_fn, step: new_step_fn } in
+  let counter = step_r.counter in
+
   // Collect state variable names from cond params
   let state_vars = node.cond.params in
 
@@ -154,7 +166,7 @@ fn licm_while(node, counter) {
       step: { t: "fn", params: node.step.params, body: new_step_body, line: node.step.line },
       line: node.line
     } in
-    // Wrap in let bindings: let __licm_0 = expr0 in let __licm_1 = expr1 in while...
+    // Wrap in let bindings: let __licm_0 = expr0 in ... in while...
     let wrapped = list.fold(
       list.build(list.len(all_inv), fn(i){ list.len(all_inv) - 1 - i }),
       new_while,
