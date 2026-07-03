@@ -144,11 +144,12 @@ Achieved via:
   - Const-fold isel: MovImm64+Sub/AddI64 -> lea; MovImm64+CmpI64 -> cmp
   - CmpRegImmFlags+JccFlags: setle/movzx/store/test -> cmp+jcc
   - Interference graph RA: Chaitin-Briggs coloring, copy coalescing,
-    precise live range interference with inclusive bounds
+    precise live range interference with inclusive bounds,
+    loop-depth spill cost weighting (10x per loop level)
 
 ## Source
 
-11,620 lines of FARD across 47 files in src/orgntr_prim/.
+11,682 lines of FARD across 47 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (775 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -174,7 +175,6 @@ Achieved via:
 ## Next
 
    migrate remaining passes to shared analysis (sccp, peephole, inline, sched)
-   LICM extension: dominator-safe hoisting, spill-cost weighting by loop depth
    ARM64 optimizer parity (migrate to VMIR pipeline)
    profile-guided optimization
    loop unrolling and strength reduction
