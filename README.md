@@ -52,10 +52,11 @@ Linux targets tested via Docker on Ubuntu 22.04.
      -> GVN (global value numbering)
      -> SSA opts (copy prop, const fold, DCE, empty block elimination)
      -> dead function elimination (post-inline)
-     -> shared analysis (dominance, liveness, def/use, CFG)
+     -> shared analysis (dominance, liveness, def/use, CFG, loop detection)
      -> VMIR (instruction selection, virtual registers)
      -> pre-RA scheduling (list scheduling, latency hiding)
      -> OMIR (register allocation, physical slots)
+     -> interference graph RA (Chaitin-Briggs graph coloring)
      -> TCO (self-tail-calls -> Jmp to entry)
      -> register allocation (linear scan + copy coalescing;
         callee-saved r12-r15 for values live across calls)
@@ -142,11 +143,12 @@ Achieved via:
   - JccFlags+Jmp fusion: eliminates double-branch in if/else hot paths
   - Const-fold isel: MovImm64+Sub/AddI64 -> lea; MovImm64+CmpI64 -> cmp
   - CmpRegImmFlags+JccFlags: setle/movzx/store/test -> cmp+jcc
-  - Linear-scan RA: callee-saved r12-r15 for cross-call values
+  - Interference graph RA: Chaitin-Briggs coloring, copy coalescing,
+    precise live range interference with inclusive bounds
 
 ## Source
 
-11,282 lines of FARD across 46 files in src/orgntr_prim/.
+11,608 lines of FARD across 47 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (775 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -172,11 +174,10 @@ Achieved via:
 ## Next
 
    migrate remaining passes to shared analysis (sccp, peephole, inline, sched)
-   loop detection using dominance tree (back-edges = edges to dominators)
-   LICM extension: dominator-safe hoisting, nested loops
-   interference-graph register allocation upgrade
+   LICM extension: dominator-safe hoisting, nested loops, spill-cost weighting
    ARM64 optimizer parity (migrate to VMIR pipeline)
    profile-guided optimization
+   loop unrolling and strength reduction
 
 ## Repos
 
