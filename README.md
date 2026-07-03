@@ -52,6 +52,7 @@ Linux targets tested via Docker on Ubuntu 22.04.
      -> GVN (global value numbering)
      -> SSA opts (copy prop, const fold, DCE, empty block elimination)
      -> dead function elimination (post-inline)
+     -> shared analysis (dominance, liveness, def/use, CFG)
      -> VMIR (instruction selection, virtual registers)
      -> pre-RA scheduling (list scheduling, latency hiding)
      -> OMIR (register allocation, physical slots)
@@ -145,7 +146,7 @@ Achieved via:
 
 ## Source
 
-10,999 lines of FARD across 45 files in src/orgntr_prim/.
+11,282 lines of FARD across 46 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (775 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -170,11 +171,12 @@ Achieved via:
 
 ## Next
 
-   ARM64 optimizer parity (migrate to VMIR pipeline)
+   migrate remaining passes to shared analysis (sccp, peephole, inline, sched)
+   loop detection using dominance tree (back-edges = edges to dominators)
+   LICM extension: dominator-safe hoisting, nested loops
    interference-graph register allocation upgrade
-   LICM extension: nested loops, call-site invariants
+   ARM64 optimizer parity (migrate to VMIR pipeline)
    profile-guided optimization
-   stdlib native (list.map, str.concat, rec.get)
 
 ## Repos
 
