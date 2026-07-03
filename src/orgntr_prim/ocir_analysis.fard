@@ -1,0 +1,280 @@
+// ocir_analysis.fard -- Shared analysis layer for OCIR functions
+//
+// Computes once per function, returns a reusable analysis record:
+//
+//   analysis.defs       : reg -> block_label (where each reg is defined)
+//   analysis.uses       : reg -> [block_label, ...] (where each reg is used)
+//   analysis.def_counts : reg -> int (how many times defined)
+//   analysis.cross      : reg -> true (live across block boundaries)
+//   analysis.succs      : block_label -> [block_label] (CFG successors)
+//   analysis.preds      : block_label -> [block_label] (CFG predecessors)
+//   analysis.dom        : block_label -> [block_label] (dominators, incl self)
+//   analysis.live_in    : block_label -> {reg -> true} (live at block entry)
+//   analysis.live_out   : block_label -> {reg -> true} (live at block exit)
+
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+
+// ── Register use collection ───────────────────────────────────────────────────
+
+fn reg_key(r) { str.from(r) }
+
+fn collect_inst_uses(inst, acc) {
+  let op = inst.op in
+  let acc = if op == "CopyI64" || op == "MoveI64" then
+    rec.set(acc, reg_key(inst.src), true) else acc in
+  let acc = if op == "AddI64" || op == "SubI64" || op == "MulI64" || op == "CmpI64" then
+    rec.set(rec.set(acc, reg_key(inst.lhs), true), reg_key(inst.rhs), true) else acc in
+  let acc = if op == "CallI64" then
+    list.fold(inst.args, acc, fn(a, r){ rec.set(a, reg_key(r), true) })
+    else acc in
+  let acc = if op == "CallIndirect" then
+    list.fold(inst.args,
+      rec.set(acc, reg_key(inst.closure_reg), true),
+      fn(a, r){ rec.set(a, reg_key(r), true) })
+    else acc in
+  let acc = if op == "StoreHeap" then
+    rec.set(rec.set(acc, reg_key(inst.ptr), true), reg_key(inst.src), true)
+    else acc in
+  let acc = if op == "LoadHeap" || op == "LoadHeapStaticIdx" || op == "ListLen" then
+    rec.set(acc, reg_key(inst.ptr), true) else acc in
+  let acc = if op == "LoadHeapDyn" then
+    rec.set(rec.set(acc, reg_key(inst.ptr), true), reg_key(inst.idx), true)
+    else acc in
+  let acc = if op == "MakeClosure" then
+    list.fold(inst.captures, acc, fn(a, c){ rec.set(a, reg_key(c), true) })
+    else acc in
+  acc
+}
+
+fn collect_term_uses(term, acc) {
+  let op = term.op in
+  if op == "RetI64" then rec.set(acc, reg_key(term.src), true)
+  else if op == "BrCond" then rec.set(acc, reg_key(term.cond), true)
+  else acc
+}
+
+fn collect_block_uses(block) {
+  collect_term_uses(block.term,
+    list.fold(block.insts, {}, fn(acc, inst){ collect_inst_uses(inst, acc) }))
+}
+
+// ── CFG: successors and predecessors ─────────────────────────────────────────
+
+fn block_succs(block) {
+  let op = block.term.op in
+  if op == "Br" then [block.term.to]
+  else if op == "BrCond" then [block.term.then_blk, block.term.else_blk]
+  else []
+}
+
+fn compute_succs(blocks) {
+  list.fold(blocks, {}, fn(acc, b) {
+    rec.set(acc, reg_key(b.label), block_succs(b))
+  })
+}
+
+fn compute_preds(blocks, succs) {
+  // For each block, collect all blocks that have it as a successor
+  list.fold(blocks, {}, fn(preds, b) {
+    let s = rec.get(succs, reg_key(b.label)) in
+    list.fold(s, preds, fn(acc, succ_label) {
+      let k = reg_key(succ_label) in
+      let existing = if rec.has(acc, k) then rec.get(acc, k) else [] in
+      rec.set(acc, k, list.append(existing, b.label))
+    })
+  })
+}
+
+// ── Dominance (simple iterative) ─────────────────────────────────────────────
+// dom(n) = {n} union (intersection of dom(p) for all predecessors p of n)
+// Uses bit-set represented as sorted label lists.
+
+fn label_set_intersect(a, b) {
+  list.filter(a, fn(x){ list.len(list.filter(b, fn(y){ y == x })) > 0 })
+}
+
+fn label_set_union(a, b) {
+  list.fold(b, a, fn(acc, x) {
+    if list.len(list.filter(acc, fn(y){ y == x })) > 0 then acc
+    else list.append(acc, x)
+  })
+}
+
+fn compute_dominators(blocks, preds) {
+  let all_labels = list.map(blocks, fn(b){ b.label }) in
+  let entry = list.get(blocks, 0).label in
+  // Initialize: dom(entry) = {entry}, dom(others) = all_labels
+  let init = list.fold(blocks, {}, fn(acc, b) {
+    let d = if b.label == entry then [entry] else all_labels in
+    rec.set(acc, reg_key(b.label), d)
+  }) in
+  // Iterate until fixpoint (max n iterations)
+  let result = list.fold(list.build(list.len(blocks) + 1, fn(i){i}), init, fn(dom, _) {
+    list.fold(blocks, dom, fn(acc, b) {
+      if b.label == entry then acc
+      else
+        let k = reg_key(b.label) in
+        let my_preds = if rec.has(preds, k) then rec.get(preds, k) else [] in
+        let new_dom = if list.len(my_preds) == 0 then [b.label]
+          else
+            let pred_doms = list.map(my_preds, fn(p) {
+              let pk = reg_key(p) in
+              if rec.has(acc, pk) then rec.get(acc, pk) else []
+            }) in
+            let isect = list.fold(
+              list.filter(pred_doms, fn(d){ list.len(d) > 0 }),
+              all_labels,
+              fn(a, d){ label_set_intersect(a, d) }
+            ) in
+            label_set_union([b.label], isect)
+        in
+        if list.len(new_dom) == list.len(rec.get(acc, k)) then acc
+        else rec.set(acc, k, new_dom)
+    })
+  }) in
+  result
+}
+
+// ── Liveness (backward dataflow) ─────────────────────────────────────────────
+// live_out(b) = union of live_in(s) for all successors s
+// live_in(b)  = use(b) union (live_out(b) - def(b))
+
+fn compute_block_defs(block) {
+  list.fold(block.insts, {}, fn(acc, inst) {
+    if rec.has(inst, "dst") then rec.set(acc, reg_key(inst.dst), true) else acc
+  })
+}
+
+fn set_union(a, b) {
+  list.fold(rec.keys(b), a, fn(acc, k){ rec.set(acc, k, true) })
+}
+
+fn set_diff(a, b) {
+  list.fold(rec.keys(a), {}, fn(acc, k) {
+    if rec.has(b, k) then acc else rec.set(acc, k, true)
+  })
+}
+
+fn compute_liveness(blocks, succs) {
+  let n = list.len(blocks) in
+  // Initialize live_in and live_out to empty
+  let init_live = list.fold(blocks, {}, fn(acc, b) {
+    rec.set(acc, reg_key(b.label), {})
+  }) in
+  // Compute use and def sets per block
+  let use_sets = list.fold(blocks, {}, fn(acc, b) {
+    rec.set(acc, reg_key(b.label), collect_block_uses(b))
+  }) in
+  let def_sets = list.fold(blocks, {}, fn(acc, b) {
+    rec.set(acc, reg_key(b.label), compute_block_defs(b))
+  }) in
+  // Iterate backward until fixpoint
+  let result = list.fold(list.build(n + 2, fn(i){i}), { lin: init_live, lout: init_live },
+    fn(live, _) {
+      list.fold(blocks, live, fn(acc, b) {
+        let k = reg_key(b.label) in
+        let succs_b = if rec.has(succs, k) then rec.get(succs, k) else [] in
+        // live_out(b) = union of live_in(s) for successors s
+        let new_out = list.fold(succs_b, {}, fn(o, s) {
+          let sk = reg_key(s) in
+          let sin = if rec.has(acc.lin, sk) then rec.get(acc.lin, sk) else {} in
+          set_union(o, sin)
+        }) in
+        // live_in(b) = use(b) union (live_out(b) - def(b))
+        let use_b = if rec.has(use_sets, k) then rec.get(use_sets, k) else {} in
+        let def_b = if rec.has(def_sets, k) then rec.get(def_sets, k) else {} in
+        let new_in = set_union(use_b, set_diff(new_out, def_b)) in
+        { lin: rec.set(acc.lin, k, new_in),
+          lout: rec.set(acc.lout, k, new_out) }
+      })
+    }
+  ) in
+  result
+}
+
+// ── Def/use summary ──────────────────────────────────────────────────────────
+
+fn compute_defs_and_uses(blocks) {
+  // defs: reg -> label of defining block (last write wins for multi-def)
+  // def_counts: reg -> number of definitions
+  // uses: reg -> list of labels where reg is used
+  let defs = list.fold(blocks, {}, fn(acc, b) {
+    list.fold(b.insts, acc, fn(a, inst) {
+      if rec.has(inst, "dst") then rec.set(a, reg_key(inst.dst), b.label) else a
+    })
+  }) in
+  let def_counts = list.fold(blocks, {}, fn(acc, b) {
+    list.fold(b.insts, acc, fn(a, inst) {
+      if rec.has(inst, "dst") then
+        let k = reg_key(inst.dst) in
+        let prev = if rec.has(a, k) then rec.get(a, k) else 0 in
+        rec.set(a, k, prev + 1)
+      else a
+    })
+  }) in
+  let uses = list.fold(blocks, {}, fn(acc, b) {
+    let block_uses = collect_block_uses(b) in
+    list.fold(rec.keys(block_uses), acc, fn(a, k) {
+      let existing = if rec.has(a, k) then rec.get(a, k) else [] in
+      if list.len(list.filter(existing, fn(l){ l == b.label })) > 0 then a
+      else rec.set(a, k, list.append(existing, b.label))
+    })
+  }) in
+  { defs: defs, def_counts: def_counts, uses: uses }
+}
+
+// ── Cross-block liveness ──────────────────────────────────────────────────────
+
+fn compute_cross(defs, def_counts, uses, blocks) {
+  // A register is cross-block if:
+  //   1. Defined in multiple blocks (merge register), OR
+  //   2. Used in a different block than where it's defined
+  let multi_def = list.fold(rec.keys(def_counts), {}, fn(acc, k) {
+    if rec.get(def_counts, k) > 1 then rec.set(acc, k, true) else acc
+  }) in
+  list.fold(blocks, multi_def, fn(cross, b) {
+    let block_uses = collect_block_uses(b) in
+    list.fold(rec.keys(block_uses), cross, fn(acc, k) {
+      if rec.has(defs, k) && rec.get(defs, k) != b.label
+        then rec.set(acc, k, true)
+        else acc
+    })
+  })
+}
+
+// ── Main entry point ──────────────────────────────────────────────────────────
+
+fn analyze_func(f) {
+  let blocks = f.blocks in
+  let succs = compute_succs(blocks) in
+  let preds = compute_preds(blocks, succs) in
+  let dom = compute_dominators(blocks, preds) in
+  let liveness = compute_liveness(blocks, succs) in
+  let du = compute_defs_and_uses(blocks) in
+  let cross = compute_cross(du.defs, du.def_counts, du.uses, blocks) in
+  {
+    succs:      succs,
+    preds:      preds,
+    dom:        dom,
+    live_in:    liveness.lin,
+    live_out:   liveness.lout,
+    defs:       du.defs,
+    def_counts: du.def_counts,
+    uses:       du.uses,
+    cross:      cross
+  }
+}
+
+fn analyze_module(m) {
+  { entry: m.entry,
+    funcs: list.map(m.funcs, fn(f) {
+      { name: f.name, params: f.params, blocks: f.blocks,
+        analysis: analyze_func(f) }
+    })
+  }
+}
+
+export { analyze_func, analyze_module, collect_inst_uses, collect_term_uses,
+         block_succs, reg_key }

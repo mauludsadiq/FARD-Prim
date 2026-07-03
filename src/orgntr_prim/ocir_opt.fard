@@ -8,6 +8,7 @@
 import("std/list") as list
 import("std/rec")  as rec
 import("std/str")  as str
+import("ocir_analysis") as analysis
 
 // ── Register substitution map ─────────────────────────────────────────────────
 
@@ -113,7 +114,9 @@ fn collect_cross_block_defs(blocks) {
 }
 
 fn copy_prop_func(f) {
-  let cross = collect_cross_block_defs(f.blocks) in
+  // Use shared analysis instead of recomputing cross-block defs
+  let a = analysis.analyze_func(f) in
+  let cross = a.cross in
   let new_blocks = list.map(f.blocks, fn(b) { copy_prop_block(b, cross) }) in
   { name: f.name, params: f.params, blocks: new_blocks }
 }
