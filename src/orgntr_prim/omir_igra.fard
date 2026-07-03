@@ -1,0 +1,283 @@
+// omir_igra.fard -- Interference Graph Register Allocator
+//
+// Replaces the linear scan in omir_regalloc with graph coloring.
+// Uses existing compute_intervals and rewrite_inst from omir_regalloc.
+//
+// Algorithm (Chaitin-Briggs simplified):
+//   1. Build interference graph from live intervals
+//   2. Copy coalescing: merge CopyI64(dst,src) pairs if they don't interfere
+//   3. Simplify: repeatedly remove lowest-degree nodes onto a stack
+//      - If node degree < k (available registers), it can always be colored
+//      - Otherwise mark as potential spill candidate
+//   4. Select: pop stack, assign color not used by any neighbor
+//   5. Spill: if no color available, assign stack slot
+//
+// Register classes:
+//   Callee-saved: r12-r15 (for values live across calls)
+//   Caller-saved: r10, r11 (for short-lived values, no calls in range)
+//   rax: pre-assigned to ret-feeding slot
+//
+// Spill cost: proportional to use frequency
+//   (loop body slots cost more to spill than non-loop slots)
+
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+import("omir_regalloc") as linear
+
+fn callee_regs() { ["r12", "r13", "r14", "r15"] }
+fn caller_regs() { ["r10", "r11"] }
+fn all_regs()   { list.concat([callee_regs(), caller_regs()]) }
+fn k_colors()   { list.len(all_regs()) + 1 } // +1 for rax
+
+fn slot_key(s) { str.from(s) }
+
+// ── Interference graph ────────────────────────────────────────────────────────
+
+fn intervals_overlap(iv1, iv2) {
+  iv1.def <= iv2.last_use && iv2.def <= iv1.last_use
+}
+
+fn build_interference_graph(intervals) {
+  // adj: slot_key -> {neighbor_key -> true}
+  let keys = rec.keys(intervals) in
+  let n = list.len(keys) in
+  list.fold(list.build(n, fn(i){i}), {}, fn(adj, i) {
+    let ki = list.get(keys, i) in
+    let ivi = rec.get(intervals, ki) in
+    list.fold(list.build(n, fn(j){j}), adj, fn(acc, j) {
+      if i >= j then acc
+      else
+        let kj = list.get(keys, j) in
+        let ivj = rec.get(intervals, kj) in
+        if intervals_overlap(ivi, ivj) then
+          let ai = if rec.has(acc, ki) then rec.get(acc, ki) else {} in
+          let aj = if rec.has(acc, kj) then rec.get(acc, kj) else {} in
+          rec.set(rec.set(acc, ki, rec.set(ai, kj, true)), kj, rec.set(aj, ki, true))
+        else acc
+    })
+  })
+}
+
+fn degree(adj, k) {
+  if rec.has(adj, k) then list.len(rec.keys(rec.get(adj, k))) else 0
+}
+
+// ── Spill cost ────────────────────────────────────────────────────────────────
+// Count uses of each slot in the instruction list
+// Slots used more frequently are more expensive to spill
+
+fn compute_spill_costs(insts) {
+  let n = list.len(insts) in
+  list.fold(list.build(n, fn(i){i}), {}, fn(acc, i) {
+    let inst = list.get(insts, i) in
+    let slots = linear.use_slots(inst) in
+    let d = linear.def_slot(inst) in
+    let acc2 = list.fold(slots, acc, fn(a, s) {
+      let k = slot_key(s) in
+      let prev = if rec.has(a, k) then rec.get(a, k) else 0 in
+      rec.set(a, k, prev + 1)
+    }) in
+    if d != -999999 then
+      let k = slot_key(d) in
+      let prev = if rec.has(acc2, k) then rec.get(acc2, k) else 0 in
+      rec.set(acc2, k, prev + 1)
+    else acc2
+  })
+}
+
+// ── Copy coalescing ───────────────────────────────────────────────────────────
+// For CopyI64(dst, src): if dst and src don't interfere, merge them
+// by unioning their interference sets and treating them as the same node
+
+fn coalesce_copies(insts, intervals, adj) {
+  let copy_insts = list.filter(insts, fn(i) {
+    i.op == "CopyI64" && rec.has(i,"dst") && i.dst.k == "stack" &&
+    rec.has(i,"src") && i.src.k == "stack"
+  }) in
+  list.fold(copy_insts, { intervals: intervals, adj: adj, aliases: {} }, fn(acc, inst) {
+    let dk = slot_key(inst.dst.slot) in
+    let sk = slot_key(inst.src.slot) in
+    if dk == sk then acc
+    else if !rec.has(acc.intervals, dk) || !rec.has(acc.intervals, sk) then acc
+    else
+      let ivi = rec.get(acc.intervals, dk) in
+      let ivj = rec.get(acc.intervals, sk) in
+      // Only coalesce if they don't interfere
+      if intervals_overlap(ivi, ivj) then acc
+      else
+        // Check no neighbor of dk interferes with sk and vice versa
+        let dk_neighbors = if rec.has(acc.adj, dk) then rec.keys(rec.get(acc.adj, dk)) else [] in
+        let sk_neighbors = if rec.has(acc.adj, sk) then rec.keys(rec.get(acc.adj, sk)) else [] in
+        let conflict = list.len(list.filter(dk_neighbors, fn(n){
+          n != sk && list.len(list.filter(sk_neighbors, fn(m){ m == n })) > 0
+        })) > 0 in
+        if conflict then acc
+        else
+          // Merge sk into dk: extend dk's interval, union neighbors
+          let merged_iv = { def: if ivi.def < ivj.def then ivi.def else ivj.def,
+                            last_use: if ivi.last_use > ivj.last_use then ivi.last_use else ivj.last_use } in
+          let merged_neighbors = list.fold(sk_neighbors, rec.get(acc.adj, dk), fn(a, n) {
+            if n == dk then a else rec.set(a, n, true)
+          }) in
+          { intervals: rec.set(acc.intervals, dk, merged_iv),
+            adj: rec.set(acc.adj, dk, merged_neighbors),
+            aliases: rec.set(acc.aliases, sk, dk) }
+  })
+}
+
+// ── Graph coloring (Chaitin-Briggs) ──────────────────────────────────────────
+
+fn assign_colors(keys, adj, intervals, insts, unsafe) {
+  let n_regs = list.len(all_regs()) in
+  let call_positions = list.filter(
+    list.build(list.len(insts), fn(i){i}),
+    fn(i){ list.get(insts, i).op == "CallReloc" }
+  ) in
+
+  // Pre-assign rax to the ret-feeding slot
+  let ret_slot_key = list.fold(
+    list.build(if list.len(insts) > 1 then list.len(insts)-1 else 0, fn(i){i}),
+    null, fn(acc, i) {
+      let a = list.get(insts, i) in
+      let b = list.get(insts, i+1) in
+      if a.op == "MovStackToReg" && rec.has(a,"dst") && a.dst.k == "reg" &&
+         a.dst.name == "rax" && (b.op == "Epilogue" || b.op == "Ret")
+        then if a.src.k == "stack" then slot_key(a.src.slot) else acc
+        else acc
+    }) in
+
+  // Simplification: build elimination order
+  // Push nodes with degree < n_regs first (guaranteed colorable)
+  // Then push spill candidates
+  let simplify_order = list.fold(
+    list.build(list.len(keys) * 2, fn(_){0}),
+    { stack: [], remaining: keys },
+    fn(acc, _) {
+      if list.len(acc.remaining) == 0 then acc
+      else
+        let low_degree = list.filter(acc.remaining, fn(k) {
+          !rec.has(unsafe, k) && degree(adj, k) < n_regs
+        }) in
+        let chosen = if list.len(low_degree) > 0
+          then list.get(low_degree, 0)
+          else list.get(acc.remaining, 0) // spill candidate
+        in
+        { stack: list.append(acc.stack, chosen),
+          remaining: list.filter(acc.remaining, fn(k){ k != chosen }) }
+    }
+  ) in
+
+  // Select phase: pop stack, assign colors
+  let n_stack = list.len(simplify_order.stack) in
+  let result = list.fold(
+    list.build(n_stack, fn(i){ n_stack - 1 - i }),
+    {},
+    fn(assignments, i) {
+      let k = list.get(simplify_order.stack, i) in
+      if rec.has(unsafe, k) then assignments
+      else
+        // Pre-assign rax to ret slot
+        if ret_slot_key != null && k == ret_slot_key then
+          let iv = if rec.has(intervals, k) then rec.get(intervals, k) else { def: 0, last_use: 0 } in
+          let crosses_call = list.len(list.filter(call_positions, fn(p){
+            p > iv.def && p < iv.last_use
+          })) > 0 in
+          if !crosses_call then rec.set(assignments, k, "rax")
+          // crosses call: fall through to normal coloring below
+          else
+            let available_regs = callee_regs() in
+            let neighbors = if rec.has(adj, k) then rec.keys(rec.get(adj, k)) else [] in
+            let used_colors = list.fold(neighbors, {}, fn(acc, n) {
+              if rec.has(assignments, n) then rec.set(acc, rec.get(assignments, n), true) else acc
+            }) in
+            let free_regs = list.filter(available_regs, fn(r){ !rec.has(used_colors, r) }) in
+            if list.len(free_regs) > 0 then rec.set(assignments, k, list.get(free_regs, 0))
+            else assignments
+        else
+          let iv = if rec.has(intervals, k) then rec.get(intervals, k) else { def: 0, last_use: 0 } in
+          let crosses_call = list.len(list.filter(call_positions, fn(p){
+            p > iv.def && p < iv.last_use
+          })) > 0 in
+          let available_regs = if crosses_call then callee_regs() else all_regs() in
+          let neighbors = if rec.has(adj, k) then rec.keys(rec.get(adj, k)) else [] in
+          let used_colors = list.fold(neighbors, {}, fn(acc, n) {
+            if rec.has(assignments, n)
+              then rec.set(acc, rec.get(assignments, n), true)
+              else acc
+          }) in
+          let free_regs = list.filter(available_regs, fn(r){
+            !rec.has(used_colors, r)
+          }) in
+          if list.len(free_regs) > 0
+            then rec.set(assignments, k, list.get(free_regs, 0))
+            else assignments // spill: no register assigned
+    }
+  ) in
+  result
+}
+
+// ── Main entry point ──────────────────────────────────────────────────────────
+
+fn igra_func(f) {
+  let insts = f.insts in
+  let intervals = linear.compute_intervals(insts) in
+  let unsafe = linear.unrewritable_slots(insts) in
+
+  // Only consider rewritable slots
+  let all_keys = rec.keys(intervals) in
+  let keys = list.filter(all_keys, fn(k){ !rec.has(unsafe, k) }) in
+
+  // Build interference graph
+  let adj = build_interference_graph(intervals) in
+
+  // Copy coalescing
+  let coalesced = coalesce_copies(insts, intervals, adj) in
+  let intervals2 = coalesced.intervals in
+  let adj2 = coalesced.adj in
+  let aliases = coalesced.aliases in
+
+  // Remove aliased slots from keys -- they get color from alias resolution
+  let keys2 = list.filter(keys, fn(k){ !rec.has(aliases, k) }) in
+
+  // Assign colors
+  let assignments = assign_colors(keys2, adj2, intervals2, insts, unsafe) in
+
+  // Apply aliases: if sk was merged into dk, give sk dk's color
+  let assignments2 = list.fold(rec.keys(aliases), assignments, fn(acc, sk) {
+    let dk = rec.get(aliases, sk) in
+    if rec.has(acc, dk) then rec.set(acc, sk, rec.get(acc, dk))
+    else acc
+  }) in
+
+  // Determine used callee-saved registers
+  let used_callee = list.filter(callee_regs(), fn(r) {
+    list.len(list.filter(rec.keys(assignments2), fn(k) {
+      rec.get(assignments2, k) == r
+    })) > 0
+  }) in
+
+  // Rewrite instructions
+  let rewritten = list.map(insts, fn(inst) {
+    linear.rewrite_inst(inst, assignments2)
+  }) in
+
+  // Update Prologue/Epilogue with used callee-saved
+  let final_insts = list.map(rewritten, fn(inst) {
+    if inst.op == "Prologue"
+      then rec.set(inst, "used_callee_saved", used_callee)
+    else if inst.op == "Epilogue"
+      then rec.set(inst, "used_callee_saved", used_callee)
+    else inst
+  }) in
+
+  { name: f.name, frame_size: f.frame_size,
+    insts: final_insts, reg_assignments: assignments2,
+    used_callee_saved: used_callee }
+}
+
+fn igra_module(m) {
+  { entry: m.entry, funcs: list.map(m.funcs, igra_func) }
+}
+
+export { igra_module, igra_func }

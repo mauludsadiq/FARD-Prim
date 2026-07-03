@@ -54,6 +54,7 @@ fn use_slots(inst) {
   else if op == "LoadHeap"      then [inst.ptr.slot]
   else if op == "LoadHeapDyn"   then [inst.ptr.slot, inst.idx.slot]
   else if op == "MovStackToStack" then [inst.src.slot]
+  else if op == "AddRegStack" then [inst.src.slot]
   else if op == "CallIndirect" then
     if inst.closure.k == "stack" then [inst.closure.slot] else []
   else []
@@ -353,4 +354,5 @@ fn regalloc_module(m) {
   { entry: m.entry, funcs: list.map(m.funcs, fn(f) { regalloc_func(f) }) }
 }
 
-export { regalloc_module, compute_intervals, assign_registers }
+export { regalloc_module, compute_intervals, assign_registers,
+         unrewritable_slots, use_slots, def_slot, rewrite_inst }
