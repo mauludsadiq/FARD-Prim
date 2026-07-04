@@ -11,6 +11,7 @@ import("../orgntr_prim/ocir")            as ocir
 import("../orgntr_prim/ocir_opt")       as opt
 import("../orgntr_prim/ocir_inline")    as inl
 import("../orgntr_prim/ocir_dfe")        as dfe
+import("../orgntr_prim/ocir_sr")         as sr
 import("../orgntr_prim/vmir_sched")       as sched
 import("../orgntr_prim/ocir_gvn")       as gvn
 import("../orgntr_prim/ocir_sccp")      as sccp
