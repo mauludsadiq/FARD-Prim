@@ -47,6 +47,7 @@ Linux targets tested via Docker on Ubuntu 22.04.
      -> UVIR (SSA with phi nodes, type verifier)
      -> LICM (loop invariant code motion, AST level, nested loops)
      -> loop unrolling (constant-bound while loops, up to 16 iterations)
+     -> strength reduction (MulI64 by power-of-2 -> AddI64 doubling chain)
      -> OCIR (phi elimination, register/stack abstraction)
      -> SCCP (sparse conditional constant propagation)
      -> inliner (multi-block CFG inlining, threshold 12 instructions)
@@ -149,12 +150,13 @@ Achieved via:
     loop-depth spill cost weighting (10x per loop level)
   - Loop unrolling: constant-bound while loops fully unrolled at AST level;
     SCCP+const-fold collapse to single constant (zero overhead)
+  - Strength reduction: MulI64(n, 2^k) -> k AddI64 doublings (n*4 = 2 adds)
   - ARM64 parity: full VMIR pipeline, callee-saved reg handling,
     large literal encoding via bits.bshl (FARD truncates >2^31)
 
 ## Source
 
-12,060 lines of FARD across 49 files in src/orgntr_prim/.
+12,156 lines of FARD across 50 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (775 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -175,15 +177,16 @@ Achieved via:
    ocir_dfe.fard           dead function elimination post-inline (53 lines)
    fard_source_to_native_arm64.fard ARM64 ELF64 pipeline (47 lines)
    ast_unroll.fard         loop unrolling, constant-bound while (193 lines)
+   ocir_sr.fard            strength reduction, mul->add doubling (95 lines)
    lower_ocir_to_omir.fard OCIR -> OMIR (ARM64/ELF legacy path) (391 lines)
    python_to_uvir.fard     Python subset frontend (289 lines)
    js_to_uvir.fard         JavaScript subset frontend (270 lines)
 
 ## Next
 
-   strength reduction (multiply by constant -> shift/add)
    profile-guided optimization
    Mach-O ARM64 target (macOS Apple Silicon)
+   induction variable strength reduction (loop iv * const -> repeated add)
    migrate remaining passes to shared analysis
 
 ## Repos
