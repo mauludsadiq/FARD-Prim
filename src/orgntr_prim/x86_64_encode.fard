@@ -383,7 +383,8 @@ fn ret() {
 }
 
 fn encode_inst(inst) {
-  if inst.op == "Prologue" then
+  if inst.op == "IncrCounter" then incr_counter(inst.id)
+  else if inst.op == "Prologue" then
     let base = append_bytes(prologue(), sub_rsp(inst.frame_size)) in
     if rec.has(inst, "used_callee_saved")
       then list.concat([base, push_callee_saved(inst.used_callee_saved)])
@@ -709,7 +710,33 @@ fn encode_module(m) {
   }
 }
 
+fn profile_base_vmaddr() { bits.bor(bits.bshl(1, 32), bits.bshl(3, 12)) }  // 0x100003000
+
+fn incr_counter(id) {
+  // Increment counter at profile_base + id*8
+  // Save rax and rcx (both caller-saved, safe to clobber)
+  // Use rcx as addr register, rax as value
+  let addr = profile_base_vmaddr() + id * 8 in
+  let a0 = bits.band(addr, 255) in
+  let a1 = bits.band(bits.bshr(addr, 8), 255) in
+  let a2 = bits.band(bits.bshr(addr, 16), 255) in
+  let a3 = bits.band(bits.bshr(addr, 24), 255) in
+  let a4 = bits.band(bits.bshr(addr, 32), 255) in
+  list.concat([
+    [80],                                          // push rax
+    [81],                                          // push rcx
+    [72, 185, a0, a1, a2, a3, a4, 0, 0, 0],      // movabs rcx, addr
+    [72, 139, 1],                                  // mov rax, [rcx]
+    [72, 255, 192],                                // inc rax
+    [72, 137, 1],                                  // mov [rcx], rax
+    [89],                                          // pop rcx
+    [88]                                           // pop rax
+  ])
+}
+
+
 export {
+  profile_base_vmaddr, incr_counter,
   fard_alloc_stub,
   write_fval_int_enc,
   unbox_int_enc,

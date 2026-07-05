@@ -109,6 +109,8 @@ fn sel_inst(inst) {
     })) in
     let copy_inst = vi_copy(inst.dst, ptr_r) in
     list.concat([[alloc_inst, len_inst, len_store], char_insts, [copy_inst]])
+  else if op == "IncrCounter" then
+    [inst]  // pass through directly to OMIR
   else
     [{ op: "SelError", message: "unknown ocir op", ocir_op: op }]
 }

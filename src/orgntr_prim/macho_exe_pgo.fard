@@ -1,0 +1,73 @@
+// macho_exe_pgo.fard -- PGO instrumented Mach-O emitter
+//
+// The profile counter array lives as a static __DATA section at
+// profile_vmaddr() = 0x100003000, initialized to zeros.
+// IncrCounter instructions write directly to this address range.
+//
+// On exit, the instrumented entry stub writes the 4096-byte counter
+// page to fd=2 (stderr) before calling exit.
+//
+// Profile collection:
+//   ./instrumented 2> profile.raw
+//
+// Profile format: 4096 raw bytes, counter[id] at offset id*8.
+// id = func_index * 10000 + block_label
+
+import("../orgntr_prim/x86_64_encode") as enc
+import("../orgntr_prim/macho_exe") as base
+import("std/list") as list
+import("std/bits") as bits
+
+fn le32(n) { enc.le32(n) }
+
+fn profile_base_vmaddr() { enc.profile_base_vmaddr() }  // 0x100003000
+
+// After fard_main returns:
+//   save retval in rbx
+//   write(2, profile_base, 4096)
+//   exit(rbx)
+fn dump_and_exit() {
+  let base = profile_base_vmaddr() in
+  let b0 = bits.band(base, 255) in
+  let b1 = bits.band(bits.bshr(base, 8), 255) in
+  let b2 = bits.band(bits.bshr(base, 16), 255) in
+  let b3 = bits.band(bits.bshr(base, 24), 255) in
+  let b4 = bits.band(bits.bshr(base, 32), 255) in
+  list.concat([
+    [80],                                                // push rax
+    [72, 191, 2, 0, 0, 0, 0, 0, 0, 0],                 // mov rdi, 2
+    [72, 190, b0, b1, b2, b3, b4, 0, 0, 0],            // mov rsi, profile_base
+    [72, 186, 0, 16, 0, 0, 0, 0, 0, 0],                // mov rdx, 4096
+    [72, 184, 4, 0, 0, 2, 0, 0, 0, 0],                 // mov rax, 0x2000004
+    [15, 5],                                             // syscall (write)
+    [95],                                                // pop rdi
+    [72, 184, 1, 0, 0, 2, 0, 0, 0, 0],                 // mov rax, 0x2000001
+    [15, 5]                                              // syscall (exit)
+  ])
+}
+
+fn entry_stub_pgo(fard_main_offset) {
+  let dump = dump_and_exit() in
+  let dump_size = list.len(dump) in
+  // push rbp(1) + mov rbp,rsp(3) = 4, call rel32 = 5
+  // next_ip = 4 + 5 = 9
+  let rel = fard_main_offset - 9 in
+  list.concat([
+    [85, 72, 137, 229],  // push rbp; mov rbp, rsp
+    [232], le32(rel),    // call fard_main
+    dump
+  ])
+}
+
+fn pgo_stub_size() {
+  // push/mov(4) + call(5) + dump_and_exit size
+  4 + 5 + list.len(dump_and_exit())
+}
+
+// Emit instrumented Mach-O: uses pgo entry stub + static profile section
+// The profile section is emitted as extra zeros in __DATA
+fn emit_exe_pgo(linked, entry_func) {
+  base.emit_exe_pgo_full(linked, entry_func, entry_stub_pgo)
+}
+
+export { entry_stub_pgo, pgo_stub_size, profile_base_vmaddr, emit_exe_pgo }

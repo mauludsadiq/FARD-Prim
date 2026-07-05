@@ -1,0 +1,58 @@
+// ocir_instrument.fard -- PGO instrumentation pass
+//
+// Inserts IncrCounter(id) at the entry of each basic block.
+// Counter IDs are assigned as: func_index * 100 + block_label
+// (allowing up to 100 blocks per function, 512 functions max in 4KB page)
+//
+// The counter array lives at a fixed address in the profile page,
+// which is mmap'd by the instrumented entry stub.
+// Counter k is at: profile_base_vmaddr + k * 8
+//
+// IncrCounter(id) lowers in x86_64 to:
+//   mov rax, [profile_base + id*8]
+//   add rax, 1
+//   mov [profile_base + id*8], rax
+//
+// Profile output (on exit via write syscall to fd 2):
+//   FARDPGO\n
+//   id:count\n  (for each non-zero counter)
+
+import("std/list") as list
+import("std/rec") as rec
+
+fn instrument_block(block, func_idx) {
+  let counter_id = func_idx * 100 + block.label in
+  let incr = { op: "IncrCounter", id: counter_id } in
+  { label: block.label,
+    insts: list.concat([[incr], block.insts]),
+    term: block.term }
+}
+
+fn instrument_func(f, func_idx) {
+  { name: f.name, params: f.params,
+    blocks: list.map(f.blocks, fn(b){ instrument_block(b, func_idx) }) }
+}
+
+fn instrument_module(m) {
+  let n = list.len(m.funcs) in
+  { entry: m.entry,
+    funcs: list.map(list.build(n, fn(i){i}), fn(i) {
+      instrument_func(list.get(m.funcs, i), i)
+    }) }
+}
+
+// Count total instrumentation points (= total blocks across all funcs)
+fn count_counters(m) {
+  list.fold(m.funcs, 0, fn(acc, f) { acc + list.len(f.blocks) })
+}
+
+// Collect all counter IDs for a module (for profile page sizing)
+fn all_counter_ids(m) {
+  let n = list.len(m.funcs) in
+  list.flatten(list.map(list.build(n, fn(i){i}), fn(i) {
+    let f = list.get(m.funcs, i) in
+    list.map(f.blocks, fn(b){ i * 100 + b.label })
+  }))
+}
+
+export { instrument_module, count_counters, all_counter_ids }

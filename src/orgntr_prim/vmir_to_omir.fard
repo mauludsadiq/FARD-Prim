@@ -182,6 +182,7 @@ fn lower_vmir_inst(inst, slots) {
     [{ op: "CmpStackZero", src: cond },
      { op: "Jne", target: { k: "label", id: inst.then_blk } },
      { op: "Jmp", target: { k: "label", id: inst.else_blk } }]
+  else if op == "IncrCounter" then [inst]  // PGO counter -- pass through
   else
     [{ op: "LowerError", vmir_op: op }]
 }

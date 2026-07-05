@@ -23,6 +23,8 @@ fn text_vmaddr()         { 4294971392 }  // 0x100001000
 fn data_file_offset()    { 8192 }        // 0x2000
 fn data_vmaddr()         { 4294975488 }  // 0x100002000
 fn data_size()           { 4096 }        // 4KB heap
+fn profile_vmaddr()      { bits.bor(bits.bshl(1, 32), bits.bshl(3, 12)) }  // 0x100003000
+fn profile_size()        { 4096 }        // 4KB = 512 x 64-bit counters
 fn heap_bump_ptr_vmaddr() { 4294975488 } // first 8 bytes of __DATA
 fn heap_base_vmaddr()    { 4294975496 }  // heap_bump_ptr + 8
 fn linkedit_file_offset() { 12288 }      // 0x3000
@@ -254,8 +256,7 @@ fn build_text(linked, entry_func) {
   list.concat([entry_stub, alloc_stub, linked.text])
 }
 
-fn build_symtab(linked) {
-  let stub_size = 24 in
+fn build_symtab_with_stub(linked, stub_size) {
   let func_names = list.map(linked.funcs, fn(f) { f.name }) in
   let func_strx = exe_strtab_indices(func_names) in
   let mh_sym = mh_execute_header_sym(1) in
@@ -270,6 +271,10 @@ fn build_symtab(linked) {
   list.concat([mh_sym, main_sym, func_syms])
 }
 
+fn build_symtab(linked) {
+  build_symtab_with_stub(linked, 24)
+}
+
 fn build_load_cmds(total_text_len, linkedit_size, symoff, nsyms, stroff, strsize) {
   let lc_pz = lc_pagezero() in
   let lc_tx = lc_text(total_text_len) in
@@ -282,6 +287,41 @@ fn build_load_cmds(total_text_len, linkedit_size, symoff, nsyms, stroff, strsize
   list.concat([lc_pz, lc_tx, lc_da, lc_le, lc_st, lc_dy, lc_cs, lc_ut])
 }
 
+fn emit_exe_with_entry(linked, entry_func, stub_fn) {
+  // Same layout as emit_exe but with custom entry stub
+  let alloc_stub = enc.fard_alloc_stub(heap_bump_ptr_vmaddr()) in
+  let func_offset = find_func_offset(linked.funcs, entry_func) in
+  // Compute stub size via dummy call (stub size is independent of offset for PGO stub)
+  let dummy_stub = stub_fn(0) in
+  let stub_size = list.len(dummy_stub) in
+  let real_main_offset = stub_size + alloc_stub_size() + func_offset in
+  let entry_stub = stub_fn(real_main_offset) in
+  let total_text = list.concat([entry_stub, alloc_stub, linked.text]) in
+  let total_text_len = list.len(total_text) in
+  let nlist_bytes = build_symtab_with_stub(linked, stub_size) in
+  let func_names = list.map(linked.funcs, fn(f) { f.name }) in
+  let strtab = exe_strtab(func_names) in
+  let strsize = list.len(strtab) in
+  let nsyms = 2 + list.len(linked.funcs) in
+  let symoff = pgo_linkedit_file_offset() in  // overridden in lc_st below
+  let heap_bump = le64(heap_base_vmaddr()) in
+  let heap_rest = zeros(data_size() - 8) in
+  let heap_init = list.concat([heap_bump, heap_rest]) in
+  let stroff = symoff + nsyms * 16 in
+  let linkedit_size = nsyms * 16 + strsize in
+  let load_cmds = build_load_cmds(total_text_len, linkedit_size, symoff, nsyms, stroff, strsize) in
+  let hdr = exe_header(8, 696) in
+  let header_and_lc = list.concat([hdr, load_cmds]) in
+  let pad_to_text = zeros(text_file_offset() - list.len(header_and_lc)) in
+  let pad_to_text_end = zeros(data_file_offset() - text_file_offset() - total_text_len) in
+  let pad_to_linkedit = zeros(linkedit_file_offset() - data_file_offset() - data_size()) in
+  list.concat([
+    header_and_lc, pad_to_text, total_text,
+    pad_to_text_end, heap_init, pad_to_linkedit,
+    nlist_bytes, strtab
+  ])
+}
+
 fn emit_exe(linked, entry_func) {
   let total_text = build_text(linked, entry_func) in
   let total_text_len = list.len(total_text) in
@@ -290,7 +330,7 @@ fn emit_exe(linked, entry_func) {
   let strtab = exe_strtab(func_names) in
   let strsize = list.len(strtab) in
   let nsyms = 2 + list.len(linked.funcs) in
-  let symoff = linkedit_file_offset() in
+  let symoff = pgo_linkedit_file_offset() in  // overridden in lc_st below
   let heap_bump = le64(heap_base_vmaddr()) in
   let heap_rest = zeros(data_size() - 8) in
   let heap_init = list.concat([heap_bump, heap_rest]) in
@@ -314,8 +354,75 @@ fn emit_exe(linked, entry_func) {
   ])
 }
 
+fn pgo_data_size() { 8192 }  // heap(4KB) + profile(4KB)
+fn pgo_linkedit_file_offset() { 16384 }  // 0x4000
+fn pgo_linkedit_vmaddr() { bits.bor(bits.bshl(1, 32), bits.bshl(4, 12)) }  // 0x100004000
+
+fn lc_data_pgo() {
+  // __DATA segment covering heap (4KB) + profile counters (4KB) = 8KB
+  let heap_sect = sect64("__heap", "__DATA",
+    data_vmaddr(), data_size(),
+    data_file_offset(), 0, 0, 0, 0) in
+  let profile_sect = sect64("__profile", "__DATA",
+    profile_vmaddr(), profile_size(),
+    data_file_offset() + data_size(), 0, 0, 0, 0) in
+  let sections = list.concat([heap_sect, profile_sect]) in
+  lc_seg64("__DATA", data_vmaddr(), pgo_data_size(),
+    data_file_offset(), pgo_data_size(),
+    7, 3, 2, 0, sections)
+}
+
+
+fn emit_exe_pgo_full(linked, entry_func, stub_fn) {
+  // Same as emit_exe_with_entry but with extended __DATA for profile counters
+  let alloc_stub = enc.fard_alloc_stub(heap_bump_ptr_vmaddr()) in
+  let func_offset = find_func_offset(linked.funcs, entry_func) in
+  let dummy_stub = stub_fn(0) in
+  let stub_size = list.len(dummy_stub) in
+  let real_main_offset = stub_size + alloc_stub_size() + func_offset in
+  let entry_stub = stub_fn(real_main_offset) in
+  let total_text = list.concat([entry_stub, alloc_stub, linked.text]) in
+  let total_text_len = list.len(total_text) in
+  let nlist_bytes = build_symtab_with_stub(linked, stub_size) in
+  let func_names = list.map(linked.funcs, fn(f) { f.name }) in
+  let strtab = exe_strtab(func_names) in
+  let strsize = list.len(strtab) in
+  let nsyms = 2 + list.len(linked.funcs) in
+  let symoff = pgo_linkedit_file_offset() in  // overridden in lc_st below
+  let heap_bump = le64(heap_base_vmaddr()) in
+  let heap_rest = zeros(data_size() - 8) in
+  let heap_init = list.concat([heap_bump, heap_rest]) in
+  // Profile section: 4KB zeros after heap
+  let profile_zeros = zeros(profile_size()) in
+  let full_data = list.concat([heap_init, profile_zeros]) in
+  let stroff = symoff + nsyms * 16 in
+  let linkedit_size = nsyms * 16 + strsize in
+  // Use pgo_data_size for load commands
+  let lc_pz = lc_pagezero() in
+  let lc_tx = lc_text(total_text_len) in
+  let lc_da = lc_data_pgo() in
+  let lc_le = lc_seg64("__LINKEDIT", pgo_linkedit_vmaddr(), 4096, pgo_linkedit_file_offset(), linkedit_size, 1, 1, 0, 0, []) in
+  let lc_st = lc_symtab(pgo_linkedit_file_offset(), nsyms, pgo_linkedit_file_offset() + nsyms * 16, strsize) in
+  let lc_dy = lc_dysymtab_minimal() in
+  let lc_cs = lc_code_sig_stub() in
+  let lc_ut = lc_unixthread(text_vmaddr()) in
+  let load_cmds = list.concat([lc_pz, lc_tx, lc_da, lc_le, lc_st, lc_dy, lc_cs, lc_ut]) in
+  let hdr = exe_header(8, 776) in
+  let header_and_lc = list.concat([hdr, load_cmds]) in
+  let pad_to_text = zeros(text_file_offset() - list.len(header_and_lc)) in
+  let pad_to_text_end = zeros(data_file_offset() - text_file_offset() - total_text_len) in
+  let pad_to_linkedit = zeros(pgo_linkedit_file_offset() - data_file_offset() - pgo_data_size()) in  // 0x4000-0x2000-0x2000=0  // 0x4000-0x2000-0x2000=0
+  list.concat([
+    header_and_lc, pad_to_text, total_text,
+    pad_to_text_end, full_data, pad_to_linkedit,
+    nlist_bytes, strtab
+  ])
+}
+
+
 export {
-  emit_exe,
+  emit_exe, emit_exe_with_entry, emit_exe_pgo_full, build_symtab_with_stub,
+  profile_vmaddr, profile_size, pgo_data_size, pgo_linkedit_file_offset, lc_data_pgo,
   lc_pagezero,
   lc_text,
   lc_linkedit,
