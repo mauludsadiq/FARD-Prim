@@ -201,6 +201,37 @@ fn inline_func(f, inline_map) {
   { name: f.name, params: f.params, blocks: result }
 }
 
+
+fn pgo_threshold(func_name, hotness_map) {
+  if !rec.has(hotness_map, func_name) then 12  // unknown -> default
+  else
+    let count = rec.get(hotness_map, func_name) in
+    if count > 50 then 50       // hot: inline up to 50 insts
+    else if count == 0 then 0   // cold: never inline
+    else 12                     // warm: default threshold
+}
+
+fn is_inline_candidate_pgo(f, hotness_map) {
+  let threshold = pgo_threshold(f.name, hotness_map) in
+  let total_insts = list.fold(f.blocks, 0, fn(acc,b){ acc + list.len(b.insts) }) in
+  let all_safe = list.len(list.filter(f.blocks, fn(b){ !is_leaf_block(b) })) == 0 in
+  total_insts <= threshold && all_safe
+}
+
+fn build_inline_map_pgo(funcs, hotness_map) {
+  list.fold(
+    list.filter(funcs, fn(f){ is_inline_candidate_pgo(f, hotness_map) }),
+    {},
+    fn(acc, f) { rec.set(acc, f.name, f) }
+  )
+}
+
+fn inline_module_with_profile(m, hotness_map) {
+  let inline_map = build_inline_map_pgo(m.funcs, hotness_map) in
+  let inlined_funcs = list.map(m.funcs, fn(f){ inline_func(f, inline_map) }) in
+  { entry: m.entry, funcs: inlined_funcs }
+}
+
 fn inline_module(m) {
   let inline_map = build_inline_map(m.funcs) in
   { entry: m.entry,
@@ -213,4 +244,4 @@ fn inline_module(m) {
   }
 }
 
-export { inline_module, is_inline_candidate, build_inline_map }
+export { inline_module, inline_module_with_profile, build_inline_map_pgo, pgo_threshold, is_inline_candidate, build_inline_map }

@@ -24,6 +24,7 @@ import("../orgntr_prim/ocir_opt")             as opt
 import("../orgntr_prim/ocir_sccp")            as sccp
 import("../orgntr_prim/ocir_sr")              as sr
 import("../orgntr_prim/ocir_inline")          as inl
+import("../orgntr_prim/pgo_inline")           as pgo_inl
 import("../orgntr_prim/ocir_gvn")             as gvn
 import("../orgntr_prim/ocir_dfe")             as dfe
 import("../orgntr_prim/ocir_instrument")      as instrument
@@ -66,4 +67,30 @@ fn emit_instrumented(src, out_path) {
   fs.write_bytes(out_path, bytes.of_list(binary))
 }
 
-export { emit_instrumented, compile_instrumented }
+fn compile_guided(src, hotness_map) {
+  // Same as compile_instrumented but with profile-guided inlining
+  let parsed   = par.parse_module(lex.tokenize(src), 0) in
+  let lm       = licm.licm_module(parsed.node) in
+  let u        = unroll.unroll_module(lm) in
+  let ir       = lower.lower_program(u) in
+  let ocir     = bridge.lower_module(ir) in
+  let p1       = opt.opt_module(sccp.sccp_module(opt.opt_module(ocir))) in
+  let p2       = sr.sr_module(p1) in
+  // Profile-guided inlining: hot callees inlined more aggressively
+  let p3       = inl.inline_module_with_profile(p2, hotness_map) in
+  let p4       = dfe.dfe_module(opt.opt_module(gvn.gvn_module(sccp.sccp_module(opt.opt_module(p3))))) in
+  let vmir_mod = sched.schedule_module(vmir_sel.sel_module(p4)) in
+  let omir_mod = peep.peephole_module(igra.igra_module(tco.tco_module(vmir_lower.lower_module(vmir_mod)))) in
+  omir_mod
+}
+
+fn emit_guided(src, hotness_map, out_path) {
+  let omir_mod = compile_guided(src, hotness_map) in
+  let encoded  = fixups.encode_module_with_fixups(omir_mod) in
+  let linked   = link.link_module(encoded) in
+  let binary   = exe.emit_exe(linked, "fard_main") in
+  fs.write_bytes(out_path, bytes.of_list(binary))
+}
+
+
+export { emit_instrumented, compile_instrumented, emit_guided, compile_guided }
