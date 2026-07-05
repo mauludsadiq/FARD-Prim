@@ -160,12 +160,15 @@ Achieved via:
     IncrCounter at each block, profile dump to fd=2 on exit
   - PGO Phase 2: profile-guided inliner; hot functions (count>50) get
     threshold 50, cold (count=0) never inlined; pgo_compile.py driver
+  - ARM64 Mach-O: complete emitter with all 16 load commands required by
+    Apple Silicon (LC_DYLD_CHAINED_FIXUPS, LC_LOAD_DYLIB libSystem, etc.)
+    Binary validates via codesign --verify; blocked by AMFI/SIP ad-hoc signing
   - ARM64 parity: full VMIR pipeline, callee-saved reg handling,
     large literal encoding via bits.bshl (FARD truncates >2^31)
 
 ## Source
 
-12,643 lines of FARD across 53 files in src/orgntr_prim/.
+12,857 lines of FARD across 55 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (775 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -194,8 +197,8 @@ Achieved via:
 ## Next
 
    PGO Phase 3: profile-guided RA spill cost weighting by block frequency
-   Mach-O ARM64 target (macOS Apple Silicon)
    induction variable strength reduction
+   SIP-off or Developer ID signing for native ARM64 Mach-O execution
 
 ## Repos
 
