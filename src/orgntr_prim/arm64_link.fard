@@ -94,4 +94,15 @@ fn link_module_elf_arm64(encoded_module) {
   link_module_with_vmaddr(encoded_module, 4198400)
 }
 
-export { link_module_with_vmaddr, link_module_elf_arm64, layout_funcs, build_symbol_table, fn_vmaddr_with_base }
+fn link_module_macho_arm64(encoded_module) {
+  // text_vmaddr for ARM64 Mach-O = 0x100001000 = 4294971392
+  // entry_stub_size + alloc_stub_size precede functions in text
+  // entry_stub_size = 20, alloc_stub_size = 16 (4 instrs * 4 bytes)
+  // base_vmaddr = text_vmaddr + entry_stub_size + alloc_stub_size = 4294971392 + 36
+  let text_vmaddr = bits.bor(bits.bshl(1, 32), bits.bshl(1, 12)) in  // 0x100001000
+  let stub_size = 36 in  // entry_stub(20) + alloc_stub(16)
+  link_module_with_vmaddr(encoded_module, text_vmaddr + stub_size)
+}
+
+
+export { link_module_with_vmaddr, link_module_elf_arm64, link_module_macho_arm64, layout_funcs, build_symbol_table, fn_vmaddr_with_base }

@@ -1,0 +1,52 @@
+/// fard_source_to_native_arm64_macho -- FARD source -> ARM64 Mach-O binary
+/// Targets macOS Apple Silicon (arm64).
+/// Requires ad-hoc code signing: codesign -s - <binary>
+
+import("../orgntr_prim/fardlex")         as lex
+import("../orgntr_prim/fardparse")       as par
+import("../orgntr_prim/ast_licm")        as licm
+import("../orgntr_prim/ast_unroll")      as unroll
+import("../orgntr_prim/fard_lower")      as lower
+import("../orgntr_prim/fard_ir_to_ocir") as bridge
+import("../orgntr_prim/ocir_opt")        as opt
+import("../orgntr_prim/ocir_sccp")       as sccp
+import("../orgntr_prim/ocir_sr")         as sr
+import("../orgntr_prim/ocir_inline")     as inl
+import("../orgntr_prim/ocir_gvn")        as gvn
+import("../orgntr_prim/ocir_dfe")        as dfe
+import("../orgntr_prim/ocir_to_vmir")    as vmir_sel
+import("../orgntr_prim/vmir_sched")      as sched
+import("../orgntr_prim/vmir_to_omir")    as vmir_lower
+import("../orgntr_prim/omir_tco")        as tco
+import("../orgntr_prim/omir_regalloc")   as ra
+import("../orgntr_prim/omir_peephole")   as peep
+import("../orgntr_prim/arm64_fixups")    as fixups
+import("../orgntr_prim/arm64_link")      as link
+import("../orgntr_prim/macho_arm64")     as exe
+import("std/fs")    as fs
+import("std/bytes") as bytes
+import("std/list")  as list
+
+fn compile_module(src) {
+  let parsed  = par.parse_module(lex.tokenize(src), 0) in
+  let lm      = licm.licm_module(parsed.node) in
+  let u       = unroll.unroll_module(lm) in
+  let ir      = lower.lower_program(u) in
+  let ocir    = bridge.lower_module(ir) in
+  let p1      = opt.opt_module(sccp.sccp_module(opt.opt_module(ocir))) in
+  let p2      = sr.sr_module(p1) in
+  let p3      = inl.inline_module(p2) in
+  let p4      = dfe.dfe_module(opt.opt_module(gvn.gvn_module(sccp.sccp_module(opt.opt_module(p3))))) in
+  let vmir_mod = sched.schedule_module(vmir_sel.sel_module(p4)) in
+  peep.peephole_module(ra.regalloc_module(tco.tco_module(vmir_lower.lower_module(vmir_mod))))
+}
+
+fn emit_macho_arm64(src, out_path) {
+  let omir_mod = compile_module(src) in
+  let encoded  = fixups.encode_module_with_fixups(omir_mod) in
+  let linked   = link.link_module_macho_arm64(encoded) in
+  let binary   = exe.emit_exe(linked, "fard_main") in
+  fs.write_bytes(out_path, bytes.of_list(binary))
+}
+
+export { emit_macho_arm64, compile_module }

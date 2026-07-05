@@ -1,14 +1,50 @@
-/// macho_arm64 — Mach-O ARM64 emitter
-/// Uses hardcoded segment name bytes to avoid str import ordering issues.
+/// macho_arm64.fard -- Mach-O ARM64 executable emitter for macOS
+///
+/// Produces a binary that matches Apple Silicon loader requirements:
+///   LC_SEGMENT_64 __PAGEZERO
+///   LC_SEGMENT_64 __TEXT  (r-x, maxprot=5 initprot=5)
+///   LC_SEGMENT_64 __DATA  (rw-, maxprot=3 initprot=3)
+///   LC_SEGMENT_64 __LINKEDIT
+///   LC_DYLD_CHAINED_FIXUPS
+///   LC_DYLD_EXPORTS_TRIE
+///   LC_SYMTAB
+///   LC_DYSYMTAB
+///   LC_LOAD_DYLINKER /usr/lib/dyld
+///   LC_UUID
+///   LC_BUILD_VERSION  (macOS 14.0)
+///   LC_SOURCE_VERSION
+///   LC_MAIN
+///   LC_LOAD_DYLIB /usr/lib/libSystem.B.dylib
+///   LC_FUNCTION_STARTS
+///   LC_DATA_IN_CODE
+///
+/// After emit, sign with: codesign -s - <binary>
 
-import("std/list") as list
-import("std/rec")  as rec
-import("std/bits") as bits
 import("../orgntr_prim/arm64_encode") as enc
+import("std/list") as list
+import("std/bits") as bits
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+fn image_base()           { bits.bshl(1, 32) }          // 0x100000000
+fn text_vmaddr()          { bits.bor(bits.bshl(1, 32), bits.bshl(1, 12)) }  // 0x100001000
+fn data_vmaddr()          { bits.bor(bits.bshl(1, 32), bits.bshl(2, 12)) }  // 0x100002000
+fn linkedit_vmaddr()      { bits.bor(bits.bshl(1, 32), bits.bshl(3, 12)) }  // 0x100003000
+fn heap_bump_ptr_vmaddr() { data_vmaddr() }
+fn heap_base_vmaddr()     { data_vmaddr() + 8 }
+
+fn text_file_offset()     { 4096 }     // 0x1000
+fn data_file_offset()     { 8192 }     // 0x2000
+fn linkedit_file_offset() { 12288 }    // 0x3000
+
+fn entry_stub_size()  { 20 }
+fn alloc_stub_size()  { enc.alloc_stub_size() }
+
+// ── Primitives ────────────────────────────────────────────────────────────────
 
 fn le32(n) { enc.le32(n) }
 fn le64(n) { enc.le64(n) }
-fn zeros(n) { list.build(n, fn(_) { 0 }) }
+fn zeros(n) { list.build(n, fn(_){0}) }
 
 fn pad_to(bytes, target) {
   let n = list.len(bytes) in
@@ -16,131 +52,203 @@ fn pad_to(bytes, target) {
   else list.concat([bytes, zeros(target - n)])
 }
 
-// Hardcoded 16-byte segment/section names
-fn seg_text()  { [95,95,84,69,88,84, 0,0,0,0,0,0,0,0,0,0] }  // __TEXT
-fn seg_data()  { [95,95,68,65,84,65, 0,0,0,0,0,0,0,0,0,0] }  // __DATA
-fn sec_text()  { [95,95,116,101,120,116, 0,0,0,0,0,0,0,0,0,0] } // __text
-fn sec_data()  { [95,95,100,97,116,97, 0,0,0,0,0,0,0,0,0,0] }   // __data
+fn name16(b0,b1,b2,b3,b4,b5,b6,b7,b8,b9,b10,b11,b12,b13,b14,b15) {
+  [b0,b1,b2,b3,b4,b5,b6,b7,b8,b9,b10,b11,b12,b13,b14,b15]
+}
 
-fn text_vmaddr()          { 4294971392 }  // 0x100001000
-fn data_vmaddr()          { 4294975488 }  // 0x100002000
-fn heap_bump_ptr_vmaddr() { 4294975488 }
-fn heap_base_vmaddr()     { 4294975496 }
-fn image_base()           { 4294967296 }  // 0x100000000
+// Segment/section name bytes
+fn n_PAGEZERO()    { [95,95,80,65,71,69,90,69,82,79,0,0,0,0,0,0] }
+fn n_TEXT()        { [95,95,84,69,88,84,0,0,0,0,0,0,0,0,0,0] }
+fn n_text()        { [95,95,116,101,120,116,0,0,0,0,0,0,0,0,0,0] }
+fn n_DATA()        { [95,95,68,65,84,65,0,0,0,0,0,0,0,0,0,0] }
+fn n_data()        { [95,95,100,97,116,97,0,0,0,0,0,0,0,0,0,0] }
+fn n_LINKEDIT()    { [95,95,76,73,78,75,69,68,73,84,0,0,0,0,0,0] }
+fn n_dyld()        { [47,117,115,114,47,108,105,98,47,100,121,108,100,0,0,0,0,0,0,0] }
+fn n_libSystem()   { [47,117,115,114,47,108,105,98,47,108,105,98,83,121,115,
+                       116,101,109,46,66,46,100,121,108,105,98,0,0,0,0,0,0] }
 
-fn exe_header(ncmds, sizeofcmds) {
+// ── Mach-O Header ─────────────────────────────────────────────────────────────
+
+fn macho_header(ncmds, sizeofcmds) {
   list.concat([
-    le32(4277009103),  // MH_MAGIC_64
-    le32(16777228),    // CPU_TYPE_ARM64
-    le32(0),           // cpusubtype
-    le32(2),           // MH_EXECUTE
+    le32(bits.bor(bits.bshl(65261, 16), 64207)),  // MH_MAGIC_64 = 0xFEEDFACF
+    le32(16777228),     // CPU_TYPE_ARM64 = 0x0100000C
+    le32(0),            // CPU_SUBTYPE_ARM64_ALL
+    le32(2),            // MH_EXECUTE
     le32(ncmds),
     le32(sizeofcmds),
-    le32(33029),       // flags
-    le32(0)            // reserved
+    le32(131205),       // flags = 0x00200085 (PIE|TWOLEVEL|NOUNDEFS|DYLDLINK)
+    le32(0)             // reserved (mach_header_64 has 8 fields)
   ])
 }
 
-fn lc_pagezero() {
+// ── Segment64 builder ─────────────────────────────────────────────────────────
+
+fn seg64(segname, vmaddr, vmsize, fileoff, filesize, maxprot, initprot, nsects, flags, sections) {
+  let cmdsize = 72 + nsects * 80 in
   list.concat([
-    le32(25), le32(72),
-    zeros(16),
-    le64(0), le64(4294967296),
-    le64(0), le64(0),
-    le32(0), le32(0),
-    le32(0), le32(0)
+    le32(25), le32(cmdsize),
+    segname,
+    le64(vmaddr), le64(vmsize),
+    le64(fileoff), le64(filesize),
+    le32(maxprot), le32(initprot),
+    le32(nsects), le32(flags),
+    sections
   ])
+}
+
+fn sect64(sectname, segname, addr, size, fileoff, align, flags) {
+  list.concat([
+    sectname, segname,
+    le64(addr), le64(size),
+    le32(fileoff), le32(align),
+    le32(0), le32(0),   // reloff, nreloc
+    le32(flags),
+    le32(0), le32(0), le32(0)  // reserved
+  ])
+}
+
+// ── Load Commands ─────────────────────────────────────────────────────────────
+
+fn lc_pagezero() {
+  seg64(n_PAGEZERO(), 0, image_base(), 0, 0, 0, 0, 0, 0, [])
 }
 
 fn lc_text(text_size) {
-  // LC_SEGMENT_64 with 1 section = 64 + 80 + 4*padding = no, fixed 232 bytes
-  // segment: 64 bytes header
-  // section: 80 bytes
-  // total: 144... but standard is 72 (seg) + 80 (sect) = 152? No.
-  // LC_SEGMENT_64 header = 8 (cmd+size) + 16 (name) + 8+8+8+8 (vm+file) + 4+4+4+4 = 72
-  // Section64 = 16+16+8+8+4+4+4+4+4+4+4 = 80
-  // cmdsize = 72 + 80 = 152
-  list.concat([
-    // Segment header (72 bytes)
-    le32(25), le32(152),
-    seg_text(),
-    le64(image_base()),
-    le64(8192),
-    le64(0),
-    le64(4096 + text_size),
-    le32(7), le32(5),
-    le32(1), le32(0),
-    // Section (80 bytes)
-    sec_text(),
-    seg_text(),
-    le64(text_vmaddr()),
-    le64(text_size),
-    le32(4096), le32(2),
-    le32(0), le32(0),
-    le32(2147484672),
-    le32(0), le32(0), le32(0)
-  ])
+  let filesize = if (text_file_offset() + text_size) / 4096 * 4096 == text_file_offset() + text_size
+    then text_file_offset() + text_size
+    else ((text_file_offset() + text_size) / 4096 + 1) * 4096 in
+  let vmsize = filesize in
+  let section = sect64(n_text(), n_TEXT(),
+    text_vmaddr(), text_size,
+    text_file_offset(), 2,
+    2147484672) in  // S_REGULAR | S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS
+  seg64(n_TEXT(), image_base(), vmsize, 0, filesize, 5, 5, 1, 0, section)
 }
 
 fn lc_data() {
-  list.concat([
-    le32(25), le32(152),
-    seg_data(),
-    le64(data_vmaddr()),
-    le64(4096),
-    le64(8192),
-    le64(4096),
-    le32(3), le32(3),
-    le32(1), le32(0),
-    sec_data(),
-    seg_data(),
-    le64(data_vmaddr()),
-    le64(4096),
-    le32(8192), le32(3),
-    le32(0), le32(0),
-    le32(0),
-    le32(0), le32(0), le32(0)
-  ])
+  let section = sect64(n_data(), n_DATA(),
+    data_vmaddr(), 4096,
+    data_file_offset(), 3, 0) in
+  seg64(n_DATA(), data_vmaddr(), 4096, data_file_offset(), 4096, 3, 3, 1, 0, section)
+}
+
+fn lc_linkedit(filesize) {
+  seg64(n_LINKEDIT(), linkedit_vmaddr(), 4096, linkedit_file_offset(), filesize, 1, 1, 0, 0, [])
+}
+
+fn lc_dyld_chained_fixups(dataoff, datasize) {
+  list.concat([le32(bits.bor(bits.bshl(32768, 16), 52)), le32(16), le32(dataoff), le32(datasize)])
+}  // 0x80000034
+
+fn lc_dyld_exports_trie(dataoff, datasize) {
+  list.concat([le32(bits.bor(bits.bshl(32768, 16), 51)), le32(16), le32(dataoff), le32(datasize)])
+}  // 0x80000033
+
+fn lc_symtab(symoff, nsyms, stroff, strsize) {
+  list.concat([le32(2), le32(24), le32(symoff), le32(nsyms), le32(stroff), le32(strsize)])
+}
+
+fn lc_dysymtab() {
+  // Minimal LC_DYSYMTAB: all zeros except header
+  list.concat([le32(11), le32(80), zeros(72)])
+}
+
+fn lc_load_dylinker() {
+  list.concat([le32(14), le32(32), le32(12), n_dyld()])
+}
+
+fn lc_uuid() {
+  // Placeholder UUID
+  list.concat([le32(27), le32(24),
+    [250,206,176,12,222,173,190,239,202,254,186,190,254,237,240,13]])
 }
 
 fn lc_build_version() {
-  // LC_BUILD_VERSION = 0x32, platform=1 (macOS), minos=14.0, sdk=14.0
+  // LC_BUILD_VERSION=0x32, platform=1(macOS), minos=14.0.0, sdk=14.0.0, ntools=0
+  list.concat([le32(50), le32(24), le32(1), le32(917504), le32(917504), le32(0)])
+}
+
+fn lc_source_version() {
+  list.concat([le32(42), le32(16), le64(0)])
+}
+
+fn lc_main(entryoff) {
+  list.concat([le32(bits.bor(bits.bshl(32768, 16), 40)), le32(24), le64(entryoff), le64(0)])
+}  // 0x80000028
+
+fn lc_load_libsystem() {
   list.concat([
-    le32(50), le32(24),   // LC_BUILD_VERSION=0x32, cmdsize
-    le32(1),              // platform: PLATFORM_MACOS
-    le32(917504),         // minos: 14.0.0 = 0x000E0000
-    le32(917504),         // sdk:   14.0.0
-    le32(0)               // ntools
+    le32(12), le32(56),
+    le32(24),          // name offset
+    le32(2),           // timestamp
+    le32(85393408),    // current_version (1316.0.0)
+    le32(65536),       // compat_version (1.0.0)
+    n_libSystem()
   ])
 }
 
-fn lc_main(entry_file_offset) {
-  list.concat([
-    le32(2147483688),
-    le32(24),
-    le64(entry_file_offset),
-    le64(0)
-  ])
+fn lc_function_starts(dataoff, datasize) {
+  list.concat([le32(38), le32(16), le32(dataoff), le32(datasize)])
 }
 
-fn entry_stub_size() { 20 }
-fn alloc_stub_size() { enc.alloc_stub_size() }
+fn lc_data_in_code(dataoff) {
+  list.concat([le32(41), le32(16), le32(dataoff), le32(0)])
+}
+
+fn lc_code_signature(dataoff, datasize) {
+  list.concat([le32(29), le32(16), le32(dataoff), le32(datasize)])
+}
+
+// ── LINKEDIT data ─────────────────────────────────────────────────────────────
+// Minimal __LINKEDIT: chained fixups, exports trie, symtab, strtab
+
+fn chained_fixups_data() {
+  // Minimal LC_DYLD_CHAINED_FIXUPS blob (56 bytes, all zeros except header)
+  list.concat([le32(3), le32(56), zeros(48)])
+}
+
+fn exports_trie_data() {
+  // Minimal exports trie: just a terminator node (48 bytes)
+  zeros(48)
+}
+
+fn symtab_data() {
+  // 2 symbols * 16 bytes each = 32 bytes (minimal nlist_64 entries, all zero)
+  zeros(32)
+}
+
+fn strtab_data() {
+  // 32 bytes string table
+  zeros(32)
+}
+
+fn function_starts_data() {
+  // 8 bytes: ULEB128 offset to first function from text start
+  // entry stub is at text_vmaddr() - text_vmaddr() = 0, encode as [0, 0]
+  [0, 0, 0, 0, 0, 0, 0, 0]
+}
+
+// ── Entry stub ────────────────────────────────────────────────────────────────
 
 fn find_func_offset(funcs, name) {
   let found = list.find(funcs, fn(f) { f.name == name }) in
   if rec.has(found, "some") then found.some.base else 0
 }
 
+import("std/rec") as rec
+
 fn entry_stub_arm64(fn_offset) {
+  // stp x29,x30,[sp,#-16]!  mov x29,sp  bl fard_main  movz x16,#1  svc #0x80
   let rel_bytes = fn_offset - 8 in
   let bl_instr_off = rel_bytes / 4 in
-  let bl_enc = bits.bor(2483027968, bits.band(bl_instr_off, 67108863)) in
+  let bl_enc = bits.bor(bits.bshl(148, 24), bits.band(bl_instr_off, 67108863)) in
   list.concat([
-    enc.stp_fp_lr(),           // stp x29, x30, [sp, #-16]!
-    enc.mov_fp_sp(),           // mov x29, sp
-    enc.le32(bl_enc),          // bl entry_func
-    enc.movz(16, 1),           // movz x16, #1
-    enc.le32(3556769793)       // svc #0x80  (0xD4001001)
+    enc.stp_fp_lr(),
+    enc.mov_fp_sp(),
+    enc.le32(bl_enc),
+    enc.movz(16, 1),
+    enc.le32(bits.bor(bits.bshl(54272, 16), 4097))
   ])
 }
 
@@ -153,22 +261,65 @@ fn build_text(linked, entry_func) {
 }
 
 fn build_data() {
-  list.concat([le64(heap_base_vmaddr()), zeros(4088)])
+  list.concat([enc.le64(heap_base_vmaddr()), zeros(4088)])
 }
+
+// ── Main emitter ──────────────────────────────────────────────────────────────
 
 fn emit_exe(linked, entry_func) {
   let text = build_text(linked, entry_func) in
   let text_size = list.len(text) in
-  let lc_pz = lc_pagezero() in
-  let lc_tx = lc_text(text_size) in
-  let lc_da = lc_data() in
-  let lc_bv = lc_build_version() in
-  let lc_mn = lc_main(4096) in
-  let cmds = list.concat([lc_pz, lc_tx, lc_da, lc_bv, lc_mn]) in
-  let hdr = exe_header(5, list.len(cmds)) in
-  let header_section = pad_to(list.concat([hdr, cmds]), 4096) in
-  let text_section = pad_to(list.concat([header_section, text]), 8192) in
-  list.concat([text_section, build_data()])
+
+  // LINKEDIT layout (all at linkedit_file_offset = 0x3000):
+  let cf_data = chained_fixups_data() in   // 56 bytes
+  let et_data = exports_trie_data() in     // 48 bytes
+  let sym_data = symtab_data() in          // 32 bytes
+  let str_data = strtab_data() in          // 32 bytes
+  let fs_data  = function_starts_data() in // 8 bytes
+  // data_in_code: 0 bytes at offset after function_starts
+
+  let cf_off  = linkedit_file_offset() in
+  let et_off  = cf_off + list.len(cf_data) in
+  let sym_off = et_off + list.len(et_data) in
+  let str_off = sym_off + list.len(sym_data) in
+  let fs_off  = str_off + list.len(str_data) in
+  let dic_off = fs_off + list.len(fs_data) in
+  let linkedit_size = dic_off - linkedit_file_offset() in
+
+  // Build load commands (16 total)
+  let lc_pz  = lc_pagezero() in
+  let lc_tx  = lc_text(text_size) in
+  let lc_da  = lc_data() in
+  let lc_le  = lc_linkedit(linkedit_size) in
+  let lc_cf  = lc_dyld_chained_fixups(cf_off, list.len(cf_data)) in
+  let lc_et  = lc_dyld_exports_trie(et_off, list.len(et_data)) in
+  let lc_st  = lc_symtab(sym_off, 0, str_off, list.len(str_data)) in
+  let lc_dys = lc_dysymtab() in
+  let lc_dy  = lc_load_dylinker() in
+  let lc_uu  = lc_uuid() in
+  let lc_bv  = lc_build_version() in
+  let lc_sv  = lc_source_version() in
+  let lc_mn  = lc_main(text_file_offset()) in
+  let lc_ls  = lc_load_libsystem() in
+  let lc_fs  = lc_function_starts(fs_off, list.len(fs_data)) in
+  let lc_dic = lc_data_in_code(dic_off) in
+
+  let cmds = list.concat([lc_pz, lc_tx, lc_da, lc_le, lc_cf, lc_et,
+                           lc_st, lc_dys, lc_dy, lc_uu, lc_bv, lc_sv,
+                           lc_mn, lc_ls, lc_fs, lc_dic]) in
+  let hdr  = macho_header(16, list.len(cmds)) in
+
+  // File layout:
+  // [0..4096)    header + load commands
+  // [4096..8192) __TEXT (code)
+  // [8192..12288) __DATA (heap)
+  // [12288..)    __LINKEDIT
+  let header_page = pad_to(list.concat([hdr, cmds]), 4096) in
+  let text_page   = pad_to(text, data_file_offset() - text_file_offset()) in
+  let data_page   = build_data() in
+  let linkedit    = list.concat([cf_data, et_data, sym_data, str_data, fs_data]) in
+
+  list.concat([header_page, text_page, data_page, linkedit])
 }
 
 export { emit_exe, text_vmaddr, heap_bump_ptr_vmaddr, heap_base_vmaddr,
