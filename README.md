@@ -48,6 +48,11 @@ Linux targets tested via Docker on Ubuntu 22.04.
      -> LICM (loop invariant code motion, AST level, nested loops)
      -> loop unrolling (constant-bound while loops, up to 16 iterations)
      -> strength reduction (MulI64 by power-of-2 -> AddI64 doubling chain)
+
+Instrumented pipeline (fard_source_to_native_pgo.fard):
+     same as above, plus IncrCounter at each block entry
+     entry stub: mmap profile page, dump 4096 bytes to fd=2 on exit
+     profile format: 512 x 64-bit counters at profile_base + id*8
      -> OCIR (phi elimination, register/stack abstraction)
      -> SCCP (sparse conditional constant propagation)
      -> inliner (multi-block CFG inlining, threshold 12 instructions)
@@ -151,12 +156,15 @@ Achieved via:
   - Loop unrolling: constant-bound while loops fully unrolled at AST level;
     SCCP+const-fold collapse to single constant (zero overhead)
   - Strength reduction: MulI64(n, 2^k) -> k AddI64 doublings (n*4 = 2 adds)
+  - PGO Phase 1: instrumented compilation pipeline, static __profile section
+    in Mach-O __DATA, IncrCounter instructions, profile dump on exit
+    fib(10) verified: 177 calls counted correctly
   - ARM64 parity: full VMIR pipeline, callee-saved reg handling,
     large literal encoding via bits.bshl (FARD truncates >2^31)
 
 ## Source
 
-12,156 lines of FARD across 50 files in src/orgntr_prim/.
+12,585 lines of FARD across 53 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (775 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -184,10 +192,10 @@ Achieved via:
 
 ## Next
 
-   profile-guided optimization
+   PGO Phase 2: profile-guided inliner (inline hot callees, skip cold ones)
+   PGO Phase 3: profile-guided RA spill cost weighting by block frequency
    Mach-O ARM64 target (macOS Apple Silicon)
-   induction variable strength reduction (loop iv * const -> repeated add)
-   migrate remaining passes to shared analysis
+   induction variable strength reduction
 
 ## Repos
 
