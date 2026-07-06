@@ -10,13 +10,33 @@
 import sys, struct, subprocess, os, tempfile, json
 
 def parse_profile(path):
+    """Returns list of {func_idx, block, count} dicts for non-zero counters"""
     with open(path,"rb") as f: data = f.read()
-    h = {}
+    counters = []
     for i in range(min(len(data)//8, 512)):
         v = struct.unpack_from('<q', data, i*8)[0]
         if v > 0:
-            h[i//100] = h.get(i//100, 0) + v
-    return h  # func_idx -> count
+            counters.append({"func_idx": i//100, "block": i%100, "count": v})
+    return counters
+
+
+def func_hotness(counters):
+    h = {}
+    for entry in counters:
+        fi = entry["func_idx"]
+        h[fi] = h.get(fi, 0) + entry["count"]
+    return h
+
+def block_hotness(counters):
+    result = {}
+    for entry in counters:
+        fi = entry["func_idx"]
+        bl = entry["block"]
+        cnt = entry["count"]
+        if fi not in result:
+            result[fi] = {}
+        result[fi][bl] = result[fi].get(bl, 0) + cnt
+    return result
 
 def get_func_names(src_str):
     # Run FARD to get function names in OCIR order
@@ -63,7 +83,9 @@ def main():
         sys.exit(1)
 
     src_str, profile_path, output_path = sys.argv[1], sys.argv[2], sys.argv[3]
-    hotness_idx = parse_profile(profile_path)
+    counters = parse_profile(profile_path)
+    hotness_idx = {e["func_idx"]: 0 for e in counters}
+    for e in counters: hotness_idx[e["func_idx"]] = hotness_idx.get(e["func_idx"],0) + e["count"]
     print(f"Raw hotness by index: {hotness_idx}")
 
     func_names = get_func_names(src_str)
@@ -75,16 +97,26 @@ def main():
         hotness_by_name[name] = hotness_idx.get(idx, 0)
     print(f"Hotness by name: {hotness_by_name}")
 
-    # Build FARD record literal
+    # Build FARD record literal for function hotness
     pairs = [f'  "{k}": {v}' for k,v in hotness_by_name.items()]
     hotness_literal = "{\n" + ",\n".join(pairs) + "\n}"
+
+    # Build block hotness map: {func_name: {block_label: count}}
+    blk_hotness_idx = block_hotness(counters)  # {func_idx: {block: count}}
+    block_pairs = []
+    for idx, name in enumerate(func_names):
+        blk_map = blk_hotness_idx.get(idx, {})
+        inner_pairs = [f'    "{bl}": {cnt}' for bl,cnt in blk_map.items()]
+        block_pairs.append(f'  "{name}": {{\n' + ",\n".join(inner_pairs) + "\n  }")
+    block_hotness_literal = "{\n" + ",\n".join(block_pairs) + "\n}"
 
     # Ensure \n in src is a FARD string escape, not double-escaped
     fard_src = json.dumps(src_str.replace("\\n", "\n"))
     driver = f'''import("../src/orgntr_prim/fard_source_to_native_pgo") as pgo
 let src = {fard_src} in
 let hotness_map = {hotness_literal} in
-pgo.emit_guided(src, hotness_map, {json.dumps(output_path)})
+let block_hotness_map = {block_hotness_literal} in
+pgo.emit_guided(src, hotness_map, block_hotness_map, {json.dumps(output_path)})
 '''
 
     with tempfile.NamedTemporaryFile(mode='w', suffix='.fard', dir='tests',

@@ -1,0 +1,115 @@
+// ocir_block_order.fard -- Profile-guided basic block reordering
+//
+// Reorders OCIR basic blocks so the hottest successor becomes fallthrough.
+// This reduces unconditional jumps on hot paths and improves I-cache layout.
+//
+// Algorithm: greedy trace scheduling
+//   1. Start from entry block (label 0)
+//   2. At each block, pick the hottest unvisited successor as the next block
+//   3. Append unvisited blocks (cold code) at the end
+//
+// Input: OCIR module + hotness map {func_name -> {block_label -> count}}
+// Output: OCIR module with blocks reordered within each function
+//
+// The block labels and branch targets are NOT changed -- only the order
+// of blocks in the block list changes. The code generator emits blocks
+// in list order, inserting jumps as needed.
+
+import("std/list") as list
+import("std/rec") as rec
+import("std/str") as str
+
+// Get execution count for a block
+fn block_count(func_name, block_label, hotness_map) {
+  let fkey = func_name in
+  if !rec.has(hotness_map, fkey) then 0
+  else
+    let fmap = rec.get(hotness_map, fkey) in
+    let bkey = str.from(block_label) in
+    if rec.has(fmap, bkey) then rec.get(fmap, bkey) else 0
+}
+
+// Get successor block labels from a terminator
+fn term_succs(term) {
+  let op = term.op in
+  if op == "Br" then [term.to]
+  else if op == "BrCond" then [term.then_blk, term.else_blk]
+  else []
+}
+
+// Build label -> block map
+fn build_block_map(blocks) {
+  list.fold(blocks, {}, fn(acc, b) {
+    rec.set(acc, str.from(b.label), b)
+  })
+}
+
+// Greedy trace: emit entry first, then for each block emit hottest
+// unvisited successor immediately after (fallthrough), repeat.
+// Unvisited blocks appended cold at the end.
+fn is_return_block(block) {
+  block.term.op == "RetI64" || block.term.op == "Ret"
+}
+
+fn greedy_order(blocks, func_name, hotness_map) {
+  let block_map = build_block_map(blocks) in
+  let n = list.len(blocks) in
+  let entry = list.get(list.filter(blocks, fn(b){ b.label == 0 }), 0) in
+  // Separate return blocks -- they always go last
+  let non_ret = list.filter(blocks, fn(b){ !is_return_block(b) }) in
+  let ret_blocks = list.filter(blocks, fn(b){ is_return_block(b) }) in
+  // Build order greedily from entry, only over non-return blocks
+  let state = list.fold(
+    list.build(n, fn(_){0}),
+    { order: [entry], visited: rec.set({}, "0", true) },
+    fn(acc, _) {
+      let last = list.get(acc.order, list.len(acc.order) - 1) in
+      let succs = term_succs(last.term) in
+      // Only consider non-return unvisited successors for chain extension
+      let best_succ = list.fold(succs, null, fn(best, lbl) {
+        let key = str.from(lbl) in
+        if rec.has(acc.visited, key) then best
+        else
+          let candidate_blocks = list.filter(non_ret, fn(b){ b.label == lbl }) in
+          if list.len(candidate_blocks) == 0 then best  // skip return blocks
+          else
+            let cnt = block_count(func_name, lbl, hotness_map) in
+            if best == null then { lbl: lbl, cnt: cnt }
+            else if cnt > best.cnt then { lbl: lbl, cnt: cnt }
+            else best
+      }) in
+      if best_succ != null && rec.has(block_map, str.from(best_succ.lbl)) then
+        let nb = rec.get(block_map, str.from(best_succ.lbl)) in
+        { order: list.append(acc.order, nb),
+          visited: rec.set(acc.visited, str.from(best_succ.lbl), true) }
+      else
+        // Chain ended -- pick hottest unvisited non-return block
+        let unvisited = list.filter(non_ret, fn(b){ !rec.has(acc.visited, str.from(b.label)) }) in
+        if list.len(unvisited) == 0 then acc
+        else
+          let next = list.fold(unvisited, list.get(unvisited, 0), fn(best, b) {
+            let cnt = block_count(func_name, b.label, hotness_map) in
+            let best_cnt = block_count(func_name, best.label, hotness_map) in
+            if cnt > best_cnt then b else best
+          }) in
+          { order: list.append(acc.order, next),
+            visited: rec.set(acc.visited, str.from(next.label), true) }
+    }
+  ) in
+  // Append return blocks last
+  list.concat([state.order, ret_blocks])
+}
+
+fn reorder_func(f, hotness_map) {
+  if list.len(f.blocks) <= 1 then f
+  else
+    let new_blocks = greedy_order(f.blocks, f.name, hotness_map) in
+    { name: f.name, params: f.params, blocks: new_blocks }
+}
+
+fn reorder_module(m, hotness_map) {
+  { entry: m.entry,
+    funcs: list.map(m.funcs, fn(f){ reorder_func(f, hotness_map) }) }
+}
+
+export { reorder_module, reorder_func, block_count }

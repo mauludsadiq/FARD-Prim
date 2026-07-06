@@ -24,6 +24,7 @@ import("../orgntr_prim/ocir_opt")             as opt
 import("../orgntr_prim/ocir_sccp")            as sccp
 import("../orgntr_prim/ocir_sr")              as sr
 import("../orgntr_prim/ocir_inline")          as inl
+import("../orgntr_prim/ocir_block_order")     as block_order
 import("../orgntr_prim/pgo_inline")           as pgo_inl
 import("../orgntr_prim/ocir_gvn")             as gvn
 import("../orgntr_prim/ocir_dfe")             as dfe
@@ -67,8 +68,8 @@ fn emit_instrumented(src, out_path) {
   fs.write_bytes(out_path, bytes.of_list(binary))
 }
 
-fn compile_guided(src, hotness_map) {
-  // Same as compile_instrumented but with profile-guided inlining
+fn compile_guided(src, hotness_map, block_hotness_map) {
+  // Same as compile_instrumented but with profile-guided inlining + block reordering
   let parsed   = par.parse_module(lex.tokenize(src), 0) in
   let lm       = licm.licm_module(parsed.node) in
   let u        = unroll.unroll_module(lm) in
@@ -79,13 +80,15 @@ fn compile_guided(src, hotness_map) {
   // Profile-guided inlining: hot callees inlined more aggressively
   let p3       = inl.inline_module_with_profile(p2, hotness_map) in
   let p4       = dfe.dfe_module(opt.opt_module(gvn.gvn_module(sccp.sccp_module(opt.opt_module(p3))))) in
-  let vmir_mod = sched.schedule_module(vmir_sel.sel_module(p4)) in
+  // Profile-guided block reordering: hot successors become fallthrough
+  let p5       = block_order.reorder_module(p4, block_hotness_map) in
+  let vmir_mod = sched.schedule_module(vmir_sel.sel_module(p5)) in
   let omir_mod = peep.peephole_module(igra.igra_module(tco.tco_module(vmir_lower.lower_module(vmir_mod)))) in
   omir_mod
 }
 
-fn emit_guided(src, hotness_map, out_path) {
-  let omir_mod = compile_guided(src, hotness_map) in
+fn emit_guided(src, hotness_map, block_hotness_map, out_path) {
+  let omir_mod = compile_guided(src, hotness_map, block_hotness_map) in
   let encoded  = fixups.encode_module_with_fixups(omir_mod) in
   let linked   = link.link_module(encoded) in
   let binary   = exe.emit_exe(linked, "fard_main") in
@@ -93,4 +96,4 @@ fn emit_guided(src, hotness_map, out_path) {
 }
 
 
-export { emit_instrumented, compile_instrumented, emit_guided, compile_guided }
+export { emit_instrumented, compile_instrumented, emit_guided, compile_guided, block_order }
