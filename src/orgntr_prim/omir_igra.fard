@@ -163,7 +163,7 @@ fn assign_colors(keys, adj, intervals, insts, unsafe) {
         }) in
         let chosen = if list.len(low_degree) > 0
           then list.get(low_degree, 0)
-          else list.get(acc.remaining, 0) // spill candidate
+          else list.get(acc.remaining, 0) // spill candidate (use assign_colors_with_costs for PGO)
         in
         { stack: list.append(acc.stack, chosen),
           remaining: list.filter(acc.remaining, fn(k){ k != chosen }) }
@@ -214,6 +214,90 @@ fn assign_colors(keys, adj, intervals, insts, unsafe) {
           if list.len(free_regs) > 0
             then rec.set(assignments, k, list.get(free_regs, 0))
             else assignments // spill: no register assigned
+    }
+  ) in
+  result
+}
+
+
+fn assign_colors_with_costs(keys, adj, intervals, insts, unsafe, spill_costs) {
+  let n_regs = list.len(all_regs()) in
+  let call_positions = list.filter(
+    list.build(list.len(insts), fn(i){i}),
+    fn(i){ list.get(insts, i).op == "CallReloc" }
+  ) in
+  let ret_slot_key = list.fold(
+    list.build(if list.len(insts) > 1 then list.len(insts)-1 else 0, fn(i){i}),
+    null, fn(acc, i) {
+      let a = list.get(insts, i) in
+      let b = list.get(insts, i+1) in
+      if a.op == "MovStackToReg" && rec.has(a,"dst") && a.dst.k == "reg" &&
+         a.dst.name == "rax" && (b.op == "Epilogue" || b.op == "Ret")
+        then if a.src.k == "stack" then slot_key(a.src.slot) else acc
+        else acc
+    }) in
+  // Simplify with profile-guided spill candidate selection
+  let simplify_order = list.fold(
+    list.build(list.len(keys) * 2, fn(_){0}),
+    { stack: [], remaining: keys },
+    fn(acc, _) {
+      if list.len(acc.remaining) == 0 then acc
+      else
+        let low_degree = list.filter(acc.remaining, fn(k) {
+          !rec.has(unsafe, k) && degree(adj, k) < n_regs
+        }) in
+        let chosen = if list.len(low_degree) > 0
+          then list.get(low_degree, 0)
+          else
+            // PGO: pick lowest spill cost candidate
+            list.fold(acc.remaining, list.get(acc.remaining, 0), fn(best, k) {
+              let cost_k = if rec.has(spill_costs, k) then rec.get(spill_costs, k) else 0 in
+              let cost_b = if rec.has(spill_costs, best) then rec.get(spill_costs, best) else 0 in
+              if cost_k < cost_b then k else best
+            })
+        in
+        { stack: list.append(acc.stack, chosen),
+          remaining: list.filter(acc.remaining, fn(k){ k != chosen }) }
+    }
+  ) in
+  // Select phase: same as assign_colors
+  let n_stack = list.len(simplify_order.stack) in
+  let result = list.fold(
+    list.build(n_stack, fn(i){ n_stack - 1 - i }),
+    {},
+    fn(assignments, i) {
+      let k = list.get(simplify_order.stack, i) in
+      if rec.has(unsafe, k) then assignments
+      else
+        if ret_slot_key != null && k == ret_slot_key then
+          let iv = if rec.has(intervals, k) then rec.get(intervals, k) else { def: 0, last_use: 0 } in
+          let crosses_call = list.len(list.filter(call_positions, fn(p){
+            p > iv.def && p < iv.last_use
+          })) > 0 in
+          if !crosses_call then rec.set(assignments, k, "rax")
+          else
+            let available_regs = callee_regs() in
+            let neighbors = if rec.has(adj, k) then rec.keys(rec.get(adj, k)) else [] in
+            let used_colors = list.fold(neighbors, {}, fn(acc, n) {
+              if rec.has(assignments, n) then rec.set(acc, rec.get(assignments, n), true) else acc
+            }) in
+            let free_regs = list.filter(available_regs, fn(r){ !rec.has(used_colors, r) }) in
+            if list.len(free_regs) > 0 then rec.set(assignments, k, list.get(free_regs, 0))
+            else assignments
+        else
+          let iv = if rec.has(intervals, k) then rec.get(intervals, k) else { def: 0, last_use: 0 } in
+          let crosses_call = list.len(list.filter(call_positions, fn(p){
+            p > iv.def && p < iv.last_use
+          })) > 0 in
+          let available_regs = if crosses_call then callee_regs() else all_regs() in
+          let neighbors = if rec.has(adj, k) then rec.keys(rec.get(adj, k)) else [] in
+          let used_colors = list.fold(neighbors, {}, fn(acc, n) {
+            if rec.has(assignments, n) then rec.set(acc, rec.get(assignments, n), true) else acc
+          }) in
+          let free_regs = list.filter(available_regs, fn(r){ !rec.has(used_colors, r) }) in
+          if list.len(free_regs) > 0
+            then rec.set(assignments, k, list.get(free_regs, 0))
+            else assignments
     }
   ) in
   result
@@ -338,8 +422,105 @@ fn igra_func(f) {
     used_callee_saved: used_callee }
 }
 
+
+// ── Profile-guided spill costs ────────────────────────────────────────────────
+// Uses actual block execution counts instead of loop-depth heuristic.
+// block_hotness: {block_label_str -> count} for this function.
+
+fn compute_profile_weights(insts, block_hotness) {
+  let n = list.len(insts) in
+  // Scan instructions: at each Label, update current block weight
+  // Instructions before the first label get weight 1
+  let result = list.fold(list.build(n, fn(i){i}),
+    { weights: [], cur_weight: 1 },
+    fn(acc, i) {
+      let inst = list.get(insts, i) in
+      let new_weight = if inst.op == "Label" && rec.has(inst, "target") && inst.target.k == "label"
+        then
+          let key = str.from(inst.target.id) in
+          if rec.has(block_hotness, key) then rec.get(block_hotness, key) + 1
+          else 1
+        else acc.cur_weight in
+      { weights: list.append(acc.weights, new_weight),
+        cur_weight: new_weight }
+    }
+  ) in
+  result.weights
+}
+
+fn compute_spill_costs_profile(insts, block_hotness) {
+  let n = list.len(insts) in
+  let weights = compute_profile_weights(insts, block_hotness) in
+  list.fold(list.build(n, fn(i){i}), {}, fn(acc, i) {
+    let inst = list.get(insts, i) in
+    let w = list.get(weights, i) in
+    let slots = linear.use_slots(inst) in
+    let d = linear.def_slot(inst) in
+    let acc2 = list.fold(slots, acc, fn(a, s) {
+      let k = slot_key(s) in
+      let prev = if rec.has(a, k) then rec.get(a, k) else 0 in
+      rec.set(a, k, prev + w)
+    }) in
+    if d != -999999 then
+      let k = slot_key(d) in
+      let prev = if rec.has(acc2, k) then rec.get(acc2, k) else 0 in
+      rec.set(acc2, k, prev + w)
+    else acc2
+  })
+}
+
+fn igra_func_with_profile(f, block_hotness) {
+  let insts = f.insts in
+  let intervals = linear.compute_intervals(insts) in
+  let unsafe = linear.unrewritable_slots(insts) in
+  let all_keys = rec.keys(intervals) in
+  let keys = list.filter(all_keys, fn(k){ !rec.has(unsafe, k) }) in
+  let adj = build_interference_graph(intervals) in
+  let coalesced = coalesce_copies(insts, intervals, adj) in
+  let intervals2 = coalesced.intervals in
+  let adj2 = coalesced.adj in
+  let aliases = coalesced.aliases in
+  let keys2 = list.filter(keys, fn(k){ !rec.has(aliases, k) }) in
+  // PGO: use profile-weighted spill costs
+  let spill_costs = compute_spill_costs_profile(insts, block_hotness) in
+  let assignments = assign_colors_with_costs(keys2, adj2, intervals2, insts, unsafe, spill_costs) in
+  let assignments2 = list.fold(rec.keys(aliases), assignments, fn(acc, sk) {
+    let dk = rec.get(aliases, sk) in
+    if rec.has(acc, dk) then rec.set(acc, sk, rec.get(acc, dk))
+    else acc
+  }) in
+  let used_callee = list.filter(callee_regs(), fn(r) {
+    list.len(list.filter(rec.keys(assignments2), fn(k) {
+      rec.get(assignments2, k) == r
+    })) > 0
+  }) in
+  let rewritten = list.map(insts, fn(inst) {
+    linear.rewrite_inst(inst, assignments2)
+  }) in
+  let final_insts = list.map(rewritten, fn(inst) {
+    if inst.op == "Prologue"
+      then rec.set(inst, "used_callee_saved", used_callee)
+    else if inst.op == "Epilogue"
+      then rec.set(inst, "used_callee_saved", used_callee)
+    else inst
+  }) in
+  { name: f.name, frame_size: f.frame_size,
+    insts: final_insts, reg_assignments: assignments2,
+    used_callee_saved: used_callee }
+}
+
 fn igra_module(m) {
   { entry: m.entry, funcs: list.map(m.funcs, igra_func) }
 }
 
-export { igra_module, igra_func }
+fn igra_module_with_profile(m, block_hotness_map) {
+  { entry: m.entry,
+    funcs: list.map(m.funcs, fn(f) {
+      let bh = if rec.has(block_hotness_map, f.name)
+        then rec.get(block_hotness_map, f.name) else {} in
+      igra_func_with_profile(f, bh)
+    })
+  }
+}
+
+export { igra_module, igra_func, igra_module_with_profile, igra_func_with_profile }

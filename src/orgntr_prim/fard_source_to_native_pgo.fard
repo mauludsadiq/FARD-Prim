@@ -83,7 +83,7 @@ fn compile_guided(src, hotness_map, block_hotness_map) {
   // Profile-guided block reordering: hot successors become fallthrough
   let p5       = block_order.reorder_module(p4, block_hotness_map) in
   let vmir_mod = sched.schedule_module(vmir_sel.sel_module(p5)) in
-  let omir_mod = peep.peephole_module(igra.igra_module(tco.tco_module(vmir_lower.lower_module(vmir_mod)))) in
+  let omir_mod = peep.peephole_module(igra.igra_module_with_profile(tco.tco_module(vmir_lower.lower_module(vmir_mod)), block_hotness_map)) in
   // Profile-guided function ordering: hot functions first in text segment
   block_order.reorder_funcs_module(omir_mod, block_hotness_map, "fard_main")
 }
