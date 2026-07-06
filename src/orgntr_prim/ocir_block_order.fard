@@ -112,4 +112,45 @@ fn reorder_module(m, hotness_map) {
     funcs: list.map(m.funcs, fn(f){ reorder_func(f, hotness_map) }) }
 }
 
-export { reorder_module, reorder_func, block_count }
+// ── Hot function ordering ─────────────────────────────────────────────────────
+// Sort functions so hottest appear first in text segment.
+// entry_func (fard_main) always goes last.
+// Hot functions benefit from proximity to entry and each other (I-cache).
+
+fn func_total_count(func_name, hotness_map) {
+  if !rec.has(hotness_map, func_name) then 0
+  else
+    let fmap = rec.get(hotness_map, func_name) in
+    list.fold(rec.keys(fmap), 0, fn(acc, k) { acc + rec.get(fmap, k) })
+}
+
+fn sort_funcs_hot_first(funcs, hotness_map, entry_func) {
+  // Separate entry function (must be last for linker)
+  let non_entry = list.filter(funcs, fn(f){ f.name != entry_func }) in
+  let entry = list.filter(funcs, fn(f){ f.name == entry_func }) in
+  // Sort non-entry by hotness descending (insertion sort -- n is small)
+  let sorted = list.fold(non_entry, [], fn(acc, f) {
+    let cnt = func_total_count(f.name, hotness_map) in
+    // Find insertion position (first element with count < cnt)
+    let pos = list.fold(list.build(list.len(acc), fn(i){i}), list.len(acc), fn(p, i) {
+      if p < list.len(acc) then p  // already found position
+      else
+        let other_cnt = func_total_count(list.get(acc, i).name, hotness_map) in
+        if cnt > other_cnt then i else list.len(acc)
+    }) in
+    // Insert f at pos
+    let before = list.build(pos, fn(i){ list.get(acc, i) }) in
+    let after = list.build(list.len(acc) - pos, fn(i){ list.get(acc, pos + i) }) in
+    list.concat([before, [f], after])
+  }) in
+  // entry func last
+  list.concat([sorted, entry])
+}
+
+fn reorder_funcs_module(m, hotness_map, entry_func) {
+  let sorted = sort_funcs_hot_first(m.funcs, hotness_map, entry_func) in
+  { entry: m.entry, funcs: sorted }
+}
+
+
+export { reorder_module, reorder_func, block_count, reorder_funcs_module, sort_funcs_hot_first, func_total_count }
