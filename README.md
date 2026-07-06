@@ -165,12 +165,14 @@ Achieved via:
     Binary validates via codesign --verify; blocked by AMFI/SIP ad-hoc signing
   - PGO Phase 3A: profile-guided block reordering; greedy trace scheduling
     puts hottest successor as fallthrough, return blocks always last
+  - PGO Phase 3B: hot function ordering; hottest functions emitted first
+    in __text segment for I-cache locality; entry always last
   - ARM64 parity: full VMIR pipeline, callee-saved reg handling,
     large literal encoding via bits.bshl (FARD truncates >2^31)
 
 ## Source
 
-12,975 lines of FARD across 56 files in src/orgntr_prim/.
+13,017 lines of FARD across 56 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (775 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -198,7 +200,6 @@ Achieved via:
 
 ## Next
 
-   PGO-3B: hot function ordering (emit hot functions first in text segment)
    PGO-3C: profile-guided RA spill cost weighting by block frequency
    induction variable strength reduction (requires structured loop IR)
    SIP-off or Developer ID signing for native ARM64 Mach-O execution
