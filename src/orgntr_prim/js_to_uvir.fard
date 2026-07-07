@@ -175,7 +175,7 @@ fn lower_stmts(stmts, env, bb, ctx) {
       })
     else if t == "ExpressionStatement" then
       let v = lower_expr(stmt.expression, acc.env, acc.bb, ctx) in
-      { bb: v.bb, extra: list.concat([acc.extra, v.extra]), env: acc.env, ret_reg: null }
+      { bb: v.bb, extra: list.concat([acc.extra, v.extra]), env: acc.env, ret_reg: v.reg }
     else if t == "IfStatement" then
       let cr = lower_expr(rec.get(stmt, "test"), acc.env, acc.bb, ctx) in
       let lt = alloc_label(ctx) in
