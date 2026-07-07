@@ -137,7 +137,7 @@ fard_eval interpreter. Bugs found so far:
    gcc -O2     0.030s   (2.6x slower than gcc -O2)
 
 Achieved via:
-  - LICM: loop invariant code motion at AST level
+  - LICM: loop invariant code motion at AST level (arithmetic + field access)
   - SCCP: sparse conditional constant propagation
   - Multi-block inliner: full CFG inlining <= 12 instructions
   - Dead function elimination: removes inlined-away functions post-inline
@@ -185,12 +185,14 @@ Achieved via:
   - MemorySSA Phase 3: version renaming via DFS over dominator tree;
     MemPhi incoming slots filled with correct live-out versions;
     build_full_memssa: complete 3-phase pipeline in one call
+  - LICM extended to record field accesses (t=get): r.a hoisted out
+    of while loop body; LoadHeapStaticIdx moves from closure to caller
   - ARM64 parity: full VMIR pipeline, callee-saved reg handling,
     large literal encoding via bits.bshl (FARD truncates >2^31)
 
 ## Source
 
-14,321 lines of FARD across 62 files in src/orgntr_prim/.
+14,328 lines of FARD across 62 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (775 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -218,7 +220,6 @@ Achieved via:
 
 ## Next
 
-   MemorySSA-driven LICM (hoist loop-invariant heap loads)
    Interprocedural alias analysis (alloc-based non-aliasing across calls)
    Cross-block redundant load elimination via full MemorySSA
    __debug_line section (PC -> source line mapping for breakpoints)
