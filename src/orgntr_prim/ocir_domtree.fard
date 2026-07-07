@@ -1,0 +1,191 @@
+/// ocir_domtree.fard -- CFG analysis: dominators and dominance frontiers
+///
+/// Used by MemorySSA for MemPhi insertion.
+///
+/// Algorithms:
+///   Successors/predecessors: scan block terminators
+///   Dominators: Cooper et al. iterative dataflow (simple, correct)
+///   Dominance frontiers: from idom tree (Cytron et al.)
+
+import("std/list") as list
+import("std/rec")  as rec
+import("std/str")  as str
+
+// ── CFG construction ──────────────────────────────────────────────
+
+fn block_succs(block) {
+  let op = block.term.op in
+  if op == "BrCond" then [block.term.then_blk, block.term.else_blk]
+  else if op == "Br" then [block.term.to]
+  else []
+}
+
+fn build_succ_map(blocks) {
+  list.fold(blocks, {}, fn(acc, b) {
+    rec.set(acc, str.from(b.label), block_succs(b))
+  })
+}
+
+fn build_pred_map(blocks) {
+  let succ_map = build_succ_map(blocks) in
+  // Initialize empty pred lists
+  let init = list.fold(blocks, {}, fn(acc, b) {
+    rec.set(acc, str.from(b.label), [])
+  }) in
+  list.fold(blocks, init, fn(acc, b) {
+    let key = str.from(b.label) in
+    let succs = if rec.has(succ_map, key) then rec.get(succ_map, key) else [] in
+    list.fold(succs, acc, fn(a2, s) {
+      let sk = str.from(s) in
+      let cur = if rec.has(a2, sk) then rec.get(a2, sk) else [] in
+      rec.set(a2, sk, list.append(cur, b.label))
+    })
+  })
+}
+
+// ── Dominator computation (Cooper et al.) ─────────────────────────
+// Returns idom map: label_str -> idom_label (or -1 for entry)
+// Uses RPO ordering for efficiency.
+
+fn block_labels(blocks) {
+  list.map(blocks, fn(b){ b.label })
+}
+
+fn rpo_visit(label, succ_map, visited, order) {
+  let key = str.from(label) in
+  if rec.has(visited, key) then { visited: visited, order: order }
+  else
+    let v2 = rec.set(visited, key, true) in
+    let succs = if rec.has(succ_map, key) then rec.get(succ_map, key) else [] in
+    let result = list.fold(succs, { visited: v2, order: order }, fn(acc, s) {
+      rpo_visit(s, succ_map, acc.visited, acc.order)
+    }) in
+    { visited: result.visited, order: list.concat([[label], result.order]) }
+}
+
+fn compute_rpo(blocks, entry_label) {
+  let succ_map = build_succ_map(blocks) in
+  let result = rpo_visit(entry_label, succ_map, {}, []) in
+  result.order
+}
+
+fn idom_intersect(b1, b2, idom, rpo_idx) {
+  // Walk up dominator tree until b1 == b2
+  let loop_result = list.fold(
+    list.build(100, fn(i){i}),  // max iterations
+    { b1: b1, b2: b2 },
+    fn(acc, _) {
+      if acc.b1 == acc.b2 then acc
+      else
+        let idx1 = if rec.has(rpo_idx, str.from(acc.b1)) then rec.get(rpo_idx, str.from(acc.b1)) else 999999 in
+        let idx2 = if rec.has(rpo_idx, str.from(acc.b2)) then rec.get(rpo_idx, str.from(acc.b2)) else 999999 in
+        if idx1 > idx2 then
+          let dom1 = if rec.has(idom, str.from(acc.b1)) then rec.get(idom, str.from(acc.b1)) else acc.b1 in
+          { b1: dom1, b2: acc.b2 }
+        else
+          let dom2 = if rec.has(idom, str.from(acc.b2)) then rec.get(idom, str.from(acc.b2)) else acc.b2 in
+          { b1: acc.b1, b2: dom2 }
+    }
+  ) in
+  loop_result.b1
+}
+
+fn compute_idom(blocks, entry_label) {
+  let rpo = compute_rpo(blocks, entry_label) in
+  let rpo_idx = list.fold(list.build(list.len(rpo), fn(i){i}), {},
+    fn(acc, i) { rec.set(acc, str.from(list.get(rpo, i)), i) }) in
+  let pred_map = build_pred_map(blocks) in
+
+  // Initialize: entry dominates itself
+  let init_idom = rec.set({}, str.from(entry_label), entry_label) in
+
+  // Iterate until fixed point
+  let result = list.fold(
+    list.build(20, fn(_){0}),  // max iterations
+    { idom: init_idom, changed: true },
+    fn(acc, _) {
+      if !acc.changed then acc
+      else
+        let iter = list.fold(rpo, { idom: acc.idom, changed: false }, fn(st, b) {
+          if b == entry_label then st
+          else
+            let bk = str.from(b) in
+            let preds = if rec.has(pred_map, bk) then rec.get(pred_map, bk) else [] in
+            // Find first processed predecessor
+            let processed_preds = list.filter(preds, fn(p) {
+              rec.has(st.idom, str.from(p))
+            }) in
+            if list.len(processed_preds) == 0 then st
+            else
+              let new_idom = list.fold(
+                list.filter(processed_preds, fn(p){ p != list.get(processed_preds, 0) }),
+                list.get(processed_preds, 0),
+                fn(idom_so_far, p) {
+                  idom_intersect(p, idom_so_far, st.idom, rpo_idx)
+                }
+              ) in
+              let old_idom = if rec.has(st.idom, bk) then rec.get(st.idom, bk) else -1 in
+              if old_idom == new_idom then st
+              else { idom: rec.set(st.idom, bk, new_idom), changed: true }
+        }) in
+        iter
+    }
+  ) in
+  result.idom
+}
+
+// ── Dominance frontiers ───────────────────────────────────────────
+// DF(b) = {y | exists x in preds(y) such that b dominates x but not y}
+// Standard algorithm from Cytron et al.
+
+fn compute_dom_frontiers(blocks, idom, entry_label) {
+  let pred_map = build_pred_map(blocks) in
+  // Initialize empty frontier sets
+  let init = list.fold(blocks, {}, fn(acc, b) {
+    rec.set(acc, str.from(b.label), [])
+  }) in
+  list.fold(blocks, init, fn(df, b) {
+    let bk = str.from(b.label) in
+    let preds = if rec.has(pred_map, bk) then rec.get(pred_map, bk) else [] in
+    // b is a join point if it has 2+ predecessors
+    if list.len(preds) >= 2 then
+      list.fold(preds, df, fn(df2, p) {
+        // Walk up from p to idom(b), adding b to each node's frontier
+        let runner_result = list.fold(
+          list.build(50, fn(_){0}),
+          { runner: p, df: df2 },
+          fn(acc, _) {
+            if acc.runner == b.label then acc
+            else if !rec.has(idom, str.from(acc.runner)) then acc
+            else if rec.get(idom, str.from(b.label)) == acc.runner then acc
+            else
+              let rk = str.from(acc.runner) in
+              let cur_df = if rec.has(acc.df, rk) then rec.get(acc.df, rk) else [] in
+              let new_df = if list.any(cur_df, fn(x){ x == b.label }) then cur_df
+                           else list.append(cur_df, b.label) in
+              let next_runner = if rec.has(idom, rk) then rec.get(idom, rk) else acc.runner in
+              { runner: next_runner,
+                df: rec.set(acc.df, rk, new_df) }
+          }
+        ) in
+        runner_result.df
+      })
+    else df
+  })
+}
+
+// ── Main entry point ──────────────────────────────────────────────
+
+fn analyze_cfg(blocks, entry_label) {
+  let succ_map  = build_succ_map(blocks) in
+  let pred_map  = build_pred_map(blocks) in
+  let idom      = compute_idom(blocks, entry_label) in
+  let df        = compute_dom_frontiers(blocks, idom, entry_label) in
+  let rpo       = compute_rpo(blocks, entry_label) in
+  { succ_map: succ_map, pred_map: pred_map,
+    idom: idom, dom_frontiers: df, rpo: rpo }
+}
+
+export { analyze_cfg, build_succ_map, build_pred_map,
+         compute_idom, compute_dom_frontiers, compute_rpo,
+         block_succs }

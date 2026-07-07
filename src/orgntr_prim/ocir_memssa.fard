@@ -208,6 +208,83 @@ fn elim_redundant_loads(m) {
   }
 }
 
-export { build_memssa_module, build_memssa_func, elim_redundant_loads,
+// ── MemPhi insertion ──────────────────────────────────────────────
+// Insert MemPhi nodes at dominance frontiers of blocks with MemDefs.
+// Uses iterated dominance frontier (IDF) algorithm.
+
+fn blocks_with_mem_defs(blocks) {
+  // Return labels of blocks that contain any MemDef-producing instruction
+  list.map(
+    list.filter(blocks, fn(b) {
+      list.any(b.insts, fn(i){ is_mem_def(i.op) || is_mem_barrier(i.op) })
+    }),
+    fn(b){ b.label }
+  )
+}
+
+fn insert_mem_phis(blocks, dom_frontiers, entry_label) {
+  let def_blocks = blocks_with_mem_defs(blocks) in
+
+  // Iterative IDF: keep inserting MemPhi until no new insertions
+  // phi_blocks: set of block labels that need a MemPhi
+  let phi_blocks_result = list.fold(
+    list.build(10, fn(_){0}),  // max iterations
+    { phi_set: list.fold(def_blocks, {}, fn(acc, l){ rec.set(acc, str.from(l), true) }),
+      worklist: def_blocks,
+      changed: true },
+    fn(acc, _) {
+      if !acc.changed then acc
+      else
+        let iter = list.fold(acc.worklist, { phi_set: acc.phi_set, new_work: [], changed: false },
+          fn(st, b) {
+            let bk = str.from(b) in
+            let frontier = if rec.has(dom_frontiers, bk) then rec.get(dom_frontiers, bk) else [] in
+            list.fold(frontier, st, fn(st2, y) {
+              let yk = str.from(y) in
+              if rec.has(st2.phi_set, yk) then st2
+              else
+                { phi_set: rec.set(st2.phi_set, yk, true),
+                  new_work: list.append(st2.new_work, y),
+                  changed: true }
+            })
+          }
+        ) in
+        { phi_set: iter.phi_set, worklist: iter.new_work, changed: iter.changed }
+    }
+  ) in
+  rec.keys(phi_blocks_result.phi_set)
+}
+
+// ── Full MemSSA with MemPhi ────────────────────────────────────────
+// Build MemSSA including MemPhi nodes at join points.
+
+fn build_memssa_with_phis_func(f, cfg) {
+  let phi_block_keys = insert_mem_phis(f.blocks, cfg.dom_frontiers, 0) in
+  let base_memssa = build_memssa_func(f) in
+  // Add MemPhi nodes for each block in phi_block_keys
+  // Initial version = 0, incoming versions filled by renaming pass
+  let phi_nodes = list.map(phi_block_keys, fn(bk) {
+    let preds = if rec.has(cfg.pred_map, bk) then rec.get(cfg.pred_map, bk) else [] in
+    mem_phi(0, bk, list.map(preds, fn(p){ { from_label: p, version: 0 } }))
+  }) in
+  { name: f.name,
+    mem_nodes: list.concat([phi_nodes, base_memssa.mem_nodes]),
+    phi_blocks: phi_block_keys,
+    final_version: base_memssa.final_version }
+}
+
+fn build_memssa_with_phis(m, cfg_map) {
+  { entry: m.entry,
+    funcs: list.map(m.funcs, fn(f) {
+      let cfg = if rec.has(cfg_map, f.name) then rec.get(cfg_map, f.name)
+        else { pred_map: {}, dom_frontiers: {}, idom: {}, rpo: [] } in
+      { func: f, memssa: build_memssa_with_phis_func(f, cfg) }
+    })
+  }
+}
+
+
+export { build_memssa_module, build_memssa_func, build_memssa_with_phis,
+         insert_mem_phis, blocks_with_mem_defs, elim_redundant_loads,
          is_mem_def, is_mem_use, is_mem_barrier,
          mem_def, mem_use, mem_phi, may_alias }
