@@ -177,12 +177,14 @@ Achieved via:
   - DWARF4 debug symbols: __DWARF segment with __debug_abbrev,
     __debug_info, __debug_str; DW_TAG_compile_unit + DW_TAG_subprogram
     per function with correct vmaddr ranges; verified with dwarfdump
+  - MemorySSA: memory version tracking (MemDef/MemUse/MemBarrier);
+    redundant load elimination; r.a+r.a -> 1 load (was 2)
   - ARM64 parity: full VMIR pipeline, callee-saved reg handling,
     large literal encoding via bits.bshl (FARD truncates >2^31)
 
 ## Source
 
-13,559 lines of FARD across 59 files in src/orgntr_prim/.
+13,772 lines of FARD across 60 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (775 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -210,9 +212,10 @@ Achieved via:
 
 ## Next
 
+   Interprocedural alias analysis (alloc-based non-aliasing across calls)
+   MemPhi insertion at CFG join points (full MemorySSA for loops)
    __debug_line section (PC -> source line mapping for breakpoints)
-   induction variable strength reduction (requires structured loop IR)
-   SIP-off or Developer ID signing for native ARM64 Mach-O execution
+   Structured loop IR for IV reasoning and vectorization
    PE/COFF target (Windows x86-64)
 
 ## Repos
