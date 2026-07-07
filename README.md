@@ -177,14 +177,17 @@ Achieved via:
   - DWARF4 debug symbols: __DWARF segment with __debug_abbrev,
     __debug_info, __debug_str; DW_TAG_compile_unit + DW_TAG_subprogram
     per function with correct vmaddr ranges; verified with dwarfdump
-  - MemorySSA: memory version tracking (MemDef/MemUse/MemBarrier);
+  - MemorySSA Phase 1: memory version tracking (MemDef/MemUse/MemBarrier);
     redundant load elimination; r.a+r.a -> 1 load (was 2)
+  - MemorySSA Phase 2: dominance frontier computation (Cooper et al.)
+    + MemPhi insertion via iterated dominance frontier (Cytron et al.);
+    ocir_domtree.fard: RPO, idom tree, dominance frontiers
   - ARM64 parity: full VMIR pipeline, callee-saved reg handling,
     large literal encoding via bits.bshl (FARD truncates >2^31)
 
 ## Source
 
-13,772 lines of FARD across 60 files in src/orgntr_prim/.
+14,040 lines of FARD across 62 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (775 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -212,8 +215,9 @@ Achieved via:
 
 ## Next
 
+   MemorySSA renaming pass (version assignment via DFS over dominator tree)
    Interprocedural alias analysis (alloc-based non-aliasing across calls)
-   MemPhi insertion at CFG join points (full MemorySSA for loops)
+   MemorySSA-driven LICM (hoist loop-invariant heap loads)
    __debug_line section (PC -> source line mapping for breakpoints)
    Structured loop IR for IV reasoning and vectorization
    PE/COFF target (Windows x86-64)
