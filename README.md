@@ -174,12 +174,15 @@ Achieved via:
     functions, DFE entry root, If early-return, Expr ret_reg tracking
   - JavaScript frontend: end-to-end JS->native via compile_js.py + Acorn
     same fixes applied; add/fact/fib verified correct
+  - DWARF4 debug symbols: __DWARF segment with __debug_abbrev,
+    __debug_info, __debug_str; DW_TAG_compile_unit + DW_TAG_subprogram
+    per function with correct vmaddr ranges; verified with dwarfdump
   - ARM64 parity: full VMIR pipeline, callee-saved reg handling,
     large literal encoding via bits.bshl (FARD truncates >2^31)
 
 ## Source
 
-13,290 lines of FARD across 58 files in src/orgntr_prim/.
+13,559 lines of FARD across 59 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (775 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -207,6 +210,7 @@ Achieved via:
 
 ## Next
 
+   __debug_line section (PC -> source line mapping for breakpoints)
    induction variable strength reduction (requires structured loop IR)
    SIP-off or Developer ID signing for native ARM64 Mach-O execution
    PE/COFF target (Windows x86-64)
