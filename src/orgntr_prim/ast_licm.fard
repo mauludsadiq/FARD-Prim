@@ -41,6 +41,8 @@ fn free_vars(node, bound) {
       rec.set(acc, p, true)
     }) in
     free_vars(node.body, new_bound)
+  else if t == "get" then
+    free_vars(node.obj, bound)
   else if t == "let" then
     let rhs_fv = free_vars(node.val, bound) in
     let new_bound = rec.set(bound, node.name, true) in
@@ -68,7 +70,7 @@ fn find_invariants(node, state_vars, counter) {
   let fvs = free_vars(node, {}) in
   if t == "int" || t == "bool" || t == "var" || t == "str_lit" then
     { found: [], counter: counter }
-  else if !has_any(fvs, state_vars) && (t == "bin" || t == "call") then
+  else if !has_any(fvs, state_vars) && (t == "bin" || t == "call" || t == "get") then
     // This whole expression is invariant -- hoist it
     { found: [{ expr: node, id: counter }], counter: counter + 1 }
   else if t == "bin" then
@@ -86,6 +88,8 @@ fn find_invariants(node, state_vars, counter) {
       let r = find_invariants(a, state_vars, acc.counter) in
       { found: list.concat([acc.found, r.found]), counter: r.counter }
     })
+  else if t == "get" then
+    find_invariants(node.obj, state_vars, counter)
   else { found: [], counter: counter }
 }
 
@@ -97,6 +101,7 @@ fn expr_eq(a, b) {
   else if a.t == "int" then a.v == b.v
   else if a.t == "var" then a.v == b.v
   else if a.t == "bin" then a.op == b.op && expr_eq(a.left, b.left) && expr_eq(a.right, b.right)
+  else if a.t == "get" then a.field == b.field && expr_eq(a.obj, b.obj)
   else false
 }
 
@@ -123,6 +128,8 @@ fn subst_expr(node, invariants) {
     else if t == "call" then
       { t: t, fn_n: subst_expr(node.fn_n, invariants),
         args: list.map(node.args, fn(a){ subst_expr(a, invariants) }) }
+    else if t == "get" then
+      { t: t, obj: subst_expr(node.obj, invariants), field: node.field }
     else if t == "fn" then
       { t: t, params: node.params, body: subst_expr(node.body, invariants),
         line: node.line }
