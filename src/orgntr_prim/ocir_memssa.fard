@@ -284,7 +284,288 @@ fn build_memssa_with_phis(m, cfg_map) {
 }
 
 
+// ── MemorySSA Renaming Pass ───────────────────────────────────────
+// Assigns correct memory versions to all MemDef/MemUse/MemPhi nodes
+// via DFS over the dominator tree.
+//
+// State: version_stack -- current memory version at each point
+// Algorithm:
+//   visit(block, cur_version, next_ver_counter):
+//     1. If block has MemPhi: assign fresh version, push to stack
+//     2. Scan instructions: MemUse gets cur_version, MemDef gets fresh version
+//     3. Fill successor MemPhi incoming slots with cur_version
+//     4. Recurse on dominator tree children
+//     (stack discipline handled via functional state threading)
+
+fn get_block_insts(blocks, label_str) {
+  let found = list.find(blocks, fn(b){ str.from(b.label) == label_str }) in
+  if rec.has(found, "some") then found.some.insts else []
+}
+
+fn has_mem_phi_at(mem_nodes, label_str) {
+  list.any(mem_nodes, fn(n){ n.op == "MemPhi" && str.from(n.label) == label_str })
+}
+
+fn domtree_children(idom, all_labels, parent_label) {
+  // Find all blocks whose idom is parent_label
+  list.filter(all_labels, fn(l) {
+    let lk = str.from(l) in
+    rec.has(idom, lk) && rec.get(idom, lk) == parent_label && l != parent_label
+  })
+}
+
+// Rename a single block and its dominator-tree subtree
+// Returns updated mem_nodes list with correct versions
+fn rename_block(label, blocks, mem_nodes, idom, pred_map, succ_map,
+                cur_version, next_ver) {
+  let lk = str.from(label) in
+  let insts = get_block_insts(blocks, lk) in
+  let n_insts = list.len(insts) in
+
+  // Step 1: If this block has a MemPhi, assign it a fresh version
+  let phi_result = if has_mem_phi_at(mem_nodes, lk) then
+    let phi_ver = next_ver in
+    let new_nodes = list.map(mem_nodes, fn(n) {
+      if n.op == "MemPhi" && str.from(n.label) == lk
+        then rec.set(n, "version", phi_ver)
+        else n
+    }) in
+    { nodes: new_nodes, cur_ver: phi_ver, next_ver: next_ver + 1 }
+  else
+    { nodes: mem_nodes, cur_ver: cur_version, next_ver: next_ver } in
+
+  // Step 2: Scan instructions, assign versions to MemUse/MemDef
+  let inst_result = list.fold(list.build(n_insts, fn(i){i}),
+    { nodes: phi_result.nodes, cur_ver: phi_result.cur_ver,
+      next_ver: phi_result.next_ver },
+    fn(acc, i) {
+      let inst = list.get(insts, i) in
+      let op = inst.op in
+      if is_mem_use(op) then
+        // MemUse: record current version
+        let new_nodes = list.map(acc.nodes, fn(n) {
+          if n.op == "MemUse" && n.inst_idx == i &&
+             str.from(n.ptr) == str.from(if rec.has(inst,"ptr") then inst.ptr else -1)
+            then rec.set(n, "version", acc.cur_ver)
+            else n
+        }) in
+        { nodes: new_nodes, cur_ver: acc.cur_ver, next_ver: acc.next_ver }
+      else if is_mem_def(op) then
+        // MemDef: assign fresh version, becomes current
+        let def_ver = acc.next_ver in
+        let new_nodes = list.map(acc.nodes, fn(n) {
+          if n.op == "MemDef" && n.inst_idx == i
+            then rec.set(n, "version", def_ver)
+            else n
+        }) in
+        { nodes: new_nodes, cur_ver: def_ver, next_ver: acc.next_ver + 1 }
+      else if is_mem_barrier(op) then
+        let bar_ver = acc.next_ver in
+        let new_nodes = list.map(acc.nodes, fn(n) {
+          if n.op == "MemBarrier" && n.inst_idx == i
+            then rec.set(n, "version", bar_ver)
+            else n
+        }) in
+        { nodes: new_nodes, cur_ver: bar_ver, next_ver: acc.next_ver + 1 }
+      else acc
+    }
+  ) in
+
+  // Step 3: Fill successor MemPhi incoming slots with current version
+  let succs = if rec.has(succ_map, lk) then rec.get(succ_map, lk) else [] in
+  let after_succs = list.fold(succs, inst_result.nodes, fn(nodes, succ) {
+    let sk = str.from(succ) in
+    list.map(nodes, fn(n) {
+      if n.op == "MemPhi" && str.from(n.label) == sk then
+        let new_incoming = list.map(n.incoming, fn(inc) {
+          if inc.from_label == label
+            then rec.set(inc, "version", inst_result.cur_ver)
+            else inc
+        }) in
+        rec.set(n, "incoming", new_incoming)
+      else n
+    })
+  }) in
+
+  // Step 4: Recurse on dominator tree children
+  let all_labels = list.map(blocks, fn(b){ b.label }) in
+  let children = domtree_children(idom, all_labels, label) in
+  list.fold(children,
+    { nodes: after_succs, next_ver: inst_result.next_ver },
+    fn(acc, child) {
+      let child_result = rename_block(child, blocks, acc.nodes, idom,
+        pred_map, succ_map, inst_result.cur_ver, acc.next_ver) in
+      { nodes: child_result.nodes, next_ver: child_result.next_ver }
+    }
+  )
+}
+
+fn rename_memssa_func(f, memssa_result, cfg) {
+  let result = rename_block(0, f.blocks, memssa_result.mem_nodes,
+    cfg.idom, cfg.pred_map, cfg.succ_map, 0, 1) in
+  { name: f.name,
+    mem_nodes: result.nodes,
+    phi_blocks: memssa_result.phi_blocks,
+    final_version: result.next_ver - 1 }
+}
+
+fn build_full_memssa(m, cfg_map) {
+  // Phase 1: insert MemPhis
+  let with_phis = build_memssa_with_phis(m, cfg_map) in
+  // Phase 2: rename versions
+  { entry: m.entry,
+    funcs: list.map(with_phis.funcs, fn(entry) {
+      let f = entry.func in
+      let cfg = if rec.has(cfg_map, f.name) then rec.get(cfg_map, f.name)
+        else { pred_map: {}, succ_map: {}, dom_frontiers: {}, idom: {}, rpo: [] } in
+      { func: f, memssa: rename_memssa_func(f, entry.memssa, cfg) }
+    })
+  }
+}
+
+
+// ── MemorySSA Renaming Pass ───────────────────────────────────────
+// Assigns correct memory versions to all MemDef/MemUse/MemPhi nodes
+// via DFS over the dominator tree.
+//
+// State: version_stack -- current memory version at each point
+// Algorithm:
+//   visit(block, cur_version, next_ver_counter):
+//     1. If block has MemPhi: assign fresh version, push to stack
+//     2. Scan instructions: MemUse gets cur_version, MemDef gets fresh version
+//     3. Fill successor MemPhi incoming slots with cur_version
+//     4. Recurse on dominator tree children
+//     (stack discipline handled via functional state threading)
+
+fn get_block_insts(blocks, label_str) {
+  let found = list.find(blocks, fn(b){ str.from(b.label) == label_str }) in
+  if rec.has(found, "some") then found.some.insts else []
+}
+
+fn has_mem_phi_at(mem_nodes, label_str) {
+  list.any(mem_nodes, fn(n){ n.op == "MemPhi" && str.from(n.label) == label_str })
+}
+
+fn domtree_children(idom, all_labels, parent_label) {
+  // Find all blocks whose idom is parent_label
+  list.filter(all_labels, fn(l) {
+    let lk = str.from(l) in
+    rec.has(idom, lk) && rec.get(idom, lk) == parent_label && l != parent_label
+  })
+}
+
+// Rename a single block and its dominator-tree subtree
+// Returns updated mem_nodes list with correct versions
+fn rename_block(label, blocks, mem_nodes, idom, pred_map, succ_map,
+                cur_version, next_ver) {
+  let lk = str.from(label) in
+  let insts = get_block_insts(blocks, lk) in
+  let n_insts = list.len(insts) in
+
+  // Step 1: If this block has a MemPhi, assign it a fresh version
+  let phi_result = if has_mem_phi_at(mem_nodes, lk) then
+    let phi_ver = next_ver in
+    let new_nodes = list.map(mem_nodes, fn(n) {
+      if n.op == "MemPhi" && str.from(n.label) == lk
+        then rec.set(n, "version", phi_ver)
+        else n
+    }) in
+    { nodes: new_nodes, cur_ver: phi_ver, next_ver: next_ver + 1 }
+  else
+    { nodes: mem_nodes, cur_ver: cur_version, next_ver: next_ver } in
+
+  // Step 2: Scan instructions, assign versions to MemUse/MemDef
+  let inst_result = list.fold(list.build(n_insts, fn(i){i}),
+    { nodes: phi_result.nodes, cur_ver: phi_result.cur_ver,
+      next_ver: phi_result.next_ver },
+    fn(acc, i) {
+      let inst = list.get(insts, i) in
+      let op = inst.op in
+      if is_mem_use(op) then
+        // MemUse: record current version
+        let new_nodes = list.map(acc.nodes, fn(n) {
+          if n.op == "MemUse" && n.inst_idx == i &&
+             str.from(n.ptr) == str.from(if rec.has(inst,"ptr") then inst.ptr else -1)
+            then rec.set(n, "version", acc.cur_ver)
+            else n
+        }) in
+        { nodes: new_nodes, cur_ver: acc.cur_ver, next_ver: acc.next_ver }
+      else if is_mem_def(op) then
+        // MemDef: assign fresh version, becomes current
+        let def_ver = acc.next_ver in
+        let new_nodes = list.map(acc.nodes, fn(n) {
+          if n.op == "MemDef" && n.inst_idx == i
+            then rec.set(n, "version", def_ver)
+            else n
+        }) in
+        { nodes: new_nodes, cur_ver: def_ver, next_ver: acc.next_ver + 1 }
+      else if is_mem_barrier(op) then
+        let bar_ver = acc.next_ver in
+        let new_nodes = list.map(acc.nodes, fn(n) {
+          if n.op == "MemBarrier" && n.inst_idx == i
+            then rec.set(n, "version", bar_ver)
+            else n
+        }) in
+        { nodes: new_nodes, cur_ver: bar_ver, next_ver: acc.next_ver + 1 }
+      else acc
+    }
+  ) in
+
+  // Step 3: Fill successor MemPhi incoming slots with current version
+  let succs = if rec.has(succ_map, lk) then rec.get(succ_map, lk) else [] in
+  let after_succs = list.fold(succs, inst_result.nodes, fn(nodes, succ) {
+    let sk = str.from(succ) in
+    list.map(nodes, fn(n) {
+      if n.op == "MemPhi" && str.from(n.label) == sk then
+        let new_incoming = list.map(n.incoming, fn(inc) {
+          if inc.from_label == label
+            then rec.set(inc, "version", inst_result.cur_ver)
+            else inc
+        }) in
+        rec.set(n, "incoming", new_incoming)
+      else n
+    })
+  }) in
+
+  // Step 4: Recurse on dominator tree children
+  let all_labels = list.map(blocks, fn(b){ b.label }) in
+  let children = domtree_children(idom, all_labels, label) in
+  list.fold(children,
+    { nodes: after_succs, next_ver: inst_result.next_ver },
+    fn(acc, child) {
+      let child_result = rename_block(child, blocks, acc.nodes, idom,
+        pred_map, succ_map, inst_result.cur_ver, acc.next_ver) in
+      { nodes: child_result.nodes, next_ver: child_result.next_ver }
+    }
+  )
+}
+
+fn rename_memssa_func(f, memssa_result, cfg) {
+  let result = rename_block(0, f.blocks, memssa_result.mem_nodes,
+    cfg.idom, cfg.pred_map, cfg.succ_map, 0, 1) in
+  { name: f.name,
+    mem_nodes: result.nodes,
+    phi_blocks: memssa_result.phi_blocks,
+    final_version: result.next_ver - 1 }
+}
+
+fn build_full_memssa(m, cfg_map) {
+  // Phase 1: insert MemPhis
+  let with_phis = build_memssa_with_phis(m, cfg_map) in
+  // Phase 2: rename versions
+  { entry: m.entry,
+    funcs: list.map(with_phis.funcs, fn(entry) {
+      let f = entry.func in
+      let cfg = if rec.has(cfg_map, f.name) then rec.get(cfg_map, f.name)
+        else { pred_map: {}, succ_map: {}, dom_frontiers: {}, idom: {}, rpo: [] } in
+      { func: f, memssa: rename_memssa_func(f, entry.memssa, cfg) }
+    })
+  }
+}
+
+
 export { build_memssa_module, build_memssa_func, build_memssa_with_phis,
+         build_full_memssa, rename_memssa_func,
          insert_mem_phis, blocks_with_mem_defs, elim_redundant_loads,
          is_mem_def, is_mem_use, is_mem_barrier,
          mem_def, mem_use, mem_phi, may_alias }
