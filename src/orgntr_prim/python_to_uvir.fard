@@ -194,24 +194,27 @@ fn lower_stmts(stmts, env, bb, ctx) {
       // Then branch
       let tb = make_bb(lt) in
       let tr = lower_stmts(stmt.body, acc.env, tb, ctx) in
-      let tblk = bb_finish(tr.bb, uvir.term_br(lj)) in
+      // If then-branch returns, emit Ret; else branch to join
+      let tblk = if tr.ret_reg != null
+        then bb_finish(tr.bb, uvir.term_ret(tr.ret_reg))
+        else bb_finish(tr.bb, uvir.term_br(lj)) in
       // Else branch
       let fb = make_bb(lf) in
       let or_stmts = if rec.has(stmt, "orelse") then stmt.orelse else [] in
       let fr = lower_stmts(or_stmts, acc.env, fb, ctx) in
-      let fblk = bb_finish(fr.bb, uvir.term_br(lj)) in
+      // If else-branch returns, emit Ret; else branch to join
+      let fblk = if fr.ret_reg != null
+        then bb_finish(fr.bb, uvir.term_ret(fr.ret_reg))
+        else bb_finish(fr.bb, uvir.term_br(lj)) in
       let jb = make_bb(lj) in
       let extra = list.concat([acc.extra, cr.extra, [cb, tblk], tr.extra, [fblk], fr.extra]) in
-      // If both branches return, propagate
-      // If both branches return, add phi at join
-      let phi_ret = if tr.ret_reg != null && fr.ret_reg != null
-        then
-          let jd = alloc_reg(ctx) in
-          let phi = uvir.inst_phi(jd, [{ from_label: lt, reg: tr.ret_reg }, { from_label: lf, reg: fr.ret_reg }]) in
-          let jb2 = bb_emit(jb, phi) in
-          { jb: jb2, reg: jd }
+      // Phi only if NEITHER branch returned (both flow to join)
+      let phi_ret = if tr.ret_reg == null && fr.ret_reg != null
+        then { jb: jb, reg: fr.ret_reg }  // only else returned -- unusual
+        else if tr.ret_reg != null && fr.ret_reg == null
+        then { jb: jb, reg: null }  // only then returned
         else { jb: jb, reg: null } in
-      let ret = if tr.ret_reg != null && fr.ret_reg != null then phi_ret.reg else null in
+      let ret = null in
       let final_jb = phi_ret.jb in
       { bb: final_jb, extra: extra, env: acc.env, ret_reg: ret }
     else if t == "While" then
@@ -229,9 +232,9 @@ fn lower_stmts(stmts, env, bb, ctx) {
       let extra = list.concat([acc.extra, [entry_block, cond_block, body_block], br.extra, cr.extra]) in
       { bb: exit_bb, extra: extra, env: acc.env, ret_reg: null }
     else if t == "Expr" then
-      // Expression statement (side effects)
+      // Expression statement -- track result in case it is the last statement
       let v = lower_expr(stmt.value, acc.env, acc.bb, ctx) in
-      { bb: v.bb, extra: list.concat([acc.extra, v.extra]), env: acc.env, ret_reg: null }
+      { bb: v.bb, extra: list.concat([acc.extra, v.extra]), env: acc.env, ret_reg: v.reg }
     else
       acc
   })

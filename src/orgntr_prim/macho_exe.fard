@@ -251,7 +251,8 @@ fn find_func_offset(funcs, name) {
 fn alloc_stub_size() { 34 }  // bytes in fard_alloc_stub
 
 fn build_text(linked, entry_func) {
-  let entry_stub = entry_stub_text(24 + alloc_stub_size() + find_func_offset(linked.funcs, entry_func)) in
+  let real_entry = linked.entry in
+  let entry_stub = entry_stub_text(24 + alloc_stub_size() + find_func_offset(linked.funcs, real_entry)) in
   let alloc_stub = enc.fard_alloc_stub(heap_bump_ptr_vmaddr()) in
   list.concat([entry_stub, alloc_stub, linked.text])
 }
@@ -448,3 +449,4 @@ export {
   data_file_offset,
   data_size
 }
+// cache-bust Tue Jul  7 05:47:40 CEST 2026

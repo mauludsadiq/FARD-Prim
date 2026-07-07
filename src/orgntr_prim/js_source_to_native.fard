@@ -1,0 +1,41 @@
+/// js_source_to_native -- JavaScript AST (JSON) -> x86-64 Mach-O
+/// Input: JS AST as a FARD record (from Acorn via js_to_json.py)
+/// Pipeline: js_to_uvir -> uvir_to_ocir -> ... -> binary
+
+import("../orgntr_prim/js_to_uvir")      as js
+import("../orgntr_prim/uvir_to_ocir")    as bridge
+import("../orgntr_prim/ocir_opt")        as opt
+import("../orgntr_prim/ocir_inline")     as inl
+import("../orgntr_prim/ocir_dfe")        as dfe
+import("../orgntr_prim/ocir_sr")         as sr
+import("../orgntr_prim/ocir_gvn")        as gvn
+import("../orgntr_prim/ocir_sccp")       as sccp
+import("../orgntr_prim/ocir_to_vmir")    as vmir_sel
+import("../orgntr_prim/vmir_sched")      as sched
+import("../orgntr_prim/vmir_to_omir")    as vmir_lower
+import("../orgntr_prim/omir_tco")        as tco
+import("../orgntr_prim/omir_igra")       as igra
+import("../orgntr_prim/omir_peephole")   as peep
+import("../orgntr_prim/x86_64_fixups")   as fixups
+import("../orgntr_prim/x86_64_link")     as link
+import("../orgntr_prim/macho_exe")       as exe
+import("std/fs")    as fs
+import("std/bytes") as bytes
+import("std/list")  as list
+
+fn compile_ast_and_emit(js_ast, out_path) {
+  let uvir_mod  = js.lower_module(js_ast) in
+  let ocir_mod  = bridge.lower_module(uvir_mod) in
+  let p1        = opt.opt_module(sccp.sccp_module(opt.opt_module(ocir_mod))) in
+  let p2        = sr.sr_module(p1) in
+  let p3        = inl.inline_module(p2) in
+  let p4        = dfe.dfe_module(opt.opt_module(gvn.gvn_module(sccp.sccp_module(opt.opt_module(p3))))) in
+  let vmir_mod  = sched.schedule_module(vmir_sel.sel_module(p4)) in
+  let omir_mod  = peep.peephole_module(igra.igra_module(tco.tco_module(vmir_lower.lower_module(vmir_mod)))) in
+  let encoded   = fixups.encode_module_with_fixups(omir_mod) in
+  let linked    = link.link_module(encoded) in
+  let binary    = exe.emit_exe(linked, linked.entry) in
+  fs.write_bytes(out_path, bytes.of_list(binary))
+}
+
+export { compile_ast_and_emit }

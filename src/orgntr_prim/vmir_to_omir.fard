@@ -174,7 +174,7 @@ fn lower_vmir_inst(inst, slots) {
 
   else if op == "Ret" then
     let src = slot_for(slots, inst.src) in
-    [mov_s2r(rax(), src)]
+    [mov_s2r(rax(), src), { op: "EpilogueRet" }]
   else if op == "Br" then
     [{ op: "Jmp", target: { k: "label", id: inst.to } }]
   else if op == "BrCond" then
@@ -232,10 +232,15 @@ fn lower_vmir_func(f) {
     else [inst]
   })) in
 
+  let expanded = list.flatten(list.map(body, fn(inst) {
+    if inst.op == "EpilogueRet"
+      then [epilogue, ret_inst]
+      else [inst]
+  })) in
   { name: f.name,
     params: f.params,
     frame_size: frame_size,
-    insts: list.concat([[prologue], param_insts, body, [epilogue, ret_inst]]),
+    insts: list.concat([[prologue], param_insts, expanded]),
     reg_assignments: {} }
 }
 

@@ -45,7 +45,7 @@ fn reachable(graph, worklist, visited) {
 
 fn dfe_module(m) {
   let graph = build_call_graph(m.funcs) in
-  let live = reachable(graph, ["fard_main"], {}) in
+  let live = reachable(graph, [m.entry], {}) in
   let kept = list.filter(m.funcs, fn(f){ rec.has(live, f.name) }) in
   { entry: m.entry, funcs: kept }
 }
