@@ -1,0 +1,213 @@
+/// ocir_memssa.fard -- Memory SSA construction for OCIR
+///
+/// Adds virtual MemDef/MemUse/MemPhi instructions that track memory
+/// versions through the CFG alongside the existing value instructions.
+///
+/// Every store (StoreHeap, AllocHeap) produces a new MemDef.
+/// Every load (LoadHeapStaticIdx, LoadHeapDyn, LoadHeap) consumes a MemUse.
+/// Join points get MemPhi nodes merging incoming memory versions.
+///
+/// The memory version chain enables:
+///   - GVN: loads with same ptr/field and same reaching MemDef are redundant
+///   - LICM: loads whose reaching MemDef is outside the loop are invariant
+///   - DSE: stores whose MemDef is never used by any MemUse are dead
+///
+/// Memory version numbering: global counter, 0 = initial (no stores yet)
+
+import("std/list") as list
+import("std/rec")  as rec
+import("std/str")  as str
+
+// ── Memory operation classification ───────────────────────────────
+
+fn is_mem_def(op) {
+  op == "StoreHeap" || op == "AllocHeap" || op == "MakeClosure" ||
+  op == "StoreFnPtr"
+}
+
+fn is_mem_use(op) {
+  op == "LoadHeapStaticIdx" || op == "LoadHeapDyn" ||
+  op == "LoadHeap" || op == "ListLen"
+}
+
+fn is_mem_barrier(op) {
+  // Calls may read/write arbitrary memory
+  op == "CallI64" || op == "CallIndirect"
+}
+
+// ── MemSSA node constructors ───────────────────────────────────────
+
+fn mem_def(version, inst_idx, ptr) {
+  { op: "MemDef", version: version, inst_idx: inst_idx, ptr: ptr }
+}
+
+fn mem_use(version, inst_idx, ptr, field) {
+  { op: "MemUse", version: version, inst_idx: inst_idx, ptr: ptr, field: field }
+}
+
+fn mem_phi(version, label, incoming) {
+  // incoming: list of {from_label, version}
+  { op: "MemPhi", version: version, label: label, incoming: incoming }
+}
+
+fn mem_barrier(version, inst_idx) {
+  // Calls produce a new MemDef (unknown writes) and consume current version
+  { op: "MemBarrier", version: version, inst_idx: inst_idx }
+}
+
+// ── Version counter ────────────────────────────────────────────────
+
+fn next_version(state) { state.next_ver }
+fn bump_version(state) {
+  { next_ver: state.next_ver + 1,
+    cur_ver: state.next_ver,
+    mem_nodes: state.mem_nodes }
+}
+fn init_state() { { next_ver: 1, cur_ver: 0, mem_nodes: [] } }
+fn emit_mem_node(state, node) {
+  { next_ver: state.next_ver,
+    cur_ver: state.cur_ver,
+    mem_nodes: list.append(state.mem_nodes, node) }
+}
+
+// ── Block-level MemSSA construction ───────────────────────────────
+// Process instructions in a block, threading memory version state.
+// Returns updated state with mem_nodes appended.
+
+fn process_block_insts(insts, state) {
+  let n = list.len(insts) in
+  list.fold(list.build(n, fn(i){i}), state, fn(acc, i) {
+    let inst = list.get(insts, i) in
+    let op = inst.op in
+    if is_mem_def(op) then
+      let s2 = bump_version(acc) in
+      let ptr = if rec.has(inst, "ptr") then inst.ptr else -1 in
+      emit_mem_node(s2, mem_def(s2.cur_ver, i, ptr))
+    else if is_mem_use(op) then
+      let ptr   = if rec.has(inst, "ptr") then inst.ptr else -1 in
+      let field = if rec.has(inst, "field_idx") then inst.field_idx else -1 in
+      emit_mem_node(acc, mem_use(acc.cur_ver, i, ptr, field))
+    else if is_mem_barrier(op) then
+      let s2 = bump_version(acc) in
+      emit_mem_node(s2, mem_barrier(s2.cur_ver, i))
+    else acc
+  })
+}
+
+// ── Function-level MemSSA construction ────────────────────────────
+// Simple single-pass (no phi insertion yet -- handles acyclic CFG).
+// For full MemSSA with loops, phi insertion requires dominance frontier.
+
+fn build_memssa_func(f) {
+  let state = init_state() in
+  let result = list.fold(f.blocks, state, fn(acc, block) {
+    process_block_insts(block.insts, acc)
+  }) in
+  { name: f.name,
+    mem_nodes: result.mem_nodes,
+    final_version: result.cur_ver }
+}
+
+fn build_memssa_module(m) {
+  { entry: m.entry,
+    funcs: list.map(m.funcs, fn(f) {
+      { func: f, memssa: build_memssa_func(f) }
+    })
+  }
+}
+
+// ── Alias analysis ────────────────────────────────────────────────
+// Two memory accesses alias if their base pointers MIGHT be equal.
+// Conservative: different SSA values may still alias (e.g. args).
+// Definite non-alias: one pointer comes from AllocHeap in this function.
+
+fn must_not_alias(ptr_a, ptr_b) {
+  // If both are different SSA register numbers and both come from
+  // AllocHeap in the same function, they cannot alias.
+  // Conservative for now: only identical ptr values are known non-aliasing
+  ptr_a != ptr_b && ptr_a != -1 && ptr_b != -1
+}
+
+fn may_alias(ptr_a, ptr_b) {
+  !must_not_alias(ptr_a, ptr_b)
+}
+
+// ── Redundant load elimination using MemSSA ───────────────────────
+// Within a basic block: if two LoadHeapStaticIdx have the same
+// ptr, field_idx, and the same reaching memory version (no intervening
+// stores), the second is redundant.
+
+fn find_redundant_loads_in_block(block, mem_nodes) {
+  // Build map: (ptr, field, version) -> first dst register
+  let n = list.len(block.insts) in
+  let result = list.fold(list.build(n, fn(i){i}),
+    { seen: {}, redundant: {} },
+    fn(acc, i) {
+      let inst = list.get(block.insts, i) in
+      if inst.op == "LoadHeapStaticIdx" then
+        // Find MemUse for this instruction
+        let use_node = list.find(mem_nodes, fn(mn) {
+          mn.op == "MemUse" && mn.inst_idx == i
+        }) in
+        if use_node == null then acc
+        else
+          let ver = use_node.some.version in
+          let ptr = inst.ptr in
+          let fld = if rec.has(inst, "field_idx") then inst.field_idx else 0 in
+          let key = str.concat([str.from(ptr), ":", str.from(fld), ":", str.from(ver)]) in
+          if rec.has(acc.seen, key) then
+            // Redundant! Map inst.dst -> first occurrence's dst
+            { seen: acc.seen,
+              redundant: rec.set(acc.redundant, str.from(inst.dst),
+                rec.get(acc.seen, key)) }
+          else
+            { seen: rec.set(acc.seen, key, inst.dst),
+              redundant: acc.redundant }
+      else acc
+    }
+  ) in
+  result.redundant  // map: redundant_dst -> canonical_dst
+}
+
+// Apply redundant load elimination to a function
+fn elim_redundant_loads_func(f, memssa) {
+  let new_blocks = list.map(f.blocks, fn(block) {
+    let redundant = find_redundant_loads_in_block(block, memssa.mem_nodes) in
+    // Remove redundant loads and replace uses with canonical dst
+    let new_insts = list.filter(block.insts, fn(inst) {
+      if inst.op == "LoadHeapStaticIdx" then
+        !rec.has(redundant, str.from(inst.dst))
+      else true
+    }) in
+    // Substitute uses of redundant dsts
+    let subst_insts = list.map(new_insts, fn(inst) {
+      let sub = fn(v) {
+        let k = str.from(v) in
+        if rec.has(redundant, k) then rec.get(redundant, k) else v
+      } in
+      if inst.op == "AddI64" || inst.op == "SubI64" || inst.op == "MulI64" then
+        { op: inst.op, dst: inst.dst, lhs: sub(inst.lhs), rhs: sub(inst.rhs) }
+      else if inst.op == "CopyI64" then
+        { op: inst.op, dst: inst.dst, src: sub(inst.src) }
+      else if inst.op == "CmpI64" then
+        { op: inst.op, dst: inst.dst, lhs: sub(inst.lhs), rhs: sub(inst.rhs),
+          cmp: inst.cmp }
+      else inst
+    }) in
+    { label: block.label, insts: subst_insts, term: block.term }
+  }) in
+  { name: f.name, params: f.params, blocks: new_blocks }
+}
+
+fn elim_redundant_loads(m) {
+  let with_memssa = build_memssa_module(m) in
+  { entry: m.entry,
+    funcs: list.map(with_memssa.funcs, fn(entry) {
+      elim_redundant_loads_func(entry.func, entry.memssa)
+    })
+  }
+}
+
+export { build_memssa_module, build_memssa_func, elim_redundant_loads,
+         is_mem_def, is_mem_use, is_mem_barrier,
+         mem_def, mem_use, mem_phi, may_alias }
