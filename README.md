@@ -182,12 +182,15 @@ Achieved via:
   - MemorySSA Phase 2: dominance frontier computation (Cooper et al.)
     + MemPhi insertion via iterated dominance frontier (Cytron et al.);
     ocir_domtree.fard: RPO, idom tree, dominance frontiers
+  - MemorySSA Phase 3: version renaming via DFS over dominator tree;
+    MemPhi incoming slots filled with correct live-out versions;
+    build_full_memssa: complete 3-phase pipeline in one call
   - ARM64 parity: full VMIR pipeline, callee-saved reg handling,
     large literal encoding via bits.bshl (FARD truncates >2^31)
 
 ## Source
 
-14,040 lines of FARD across 62 files in src/orgntr_prim/.
+14,321 lines of FARD across 62 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (775 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -215,9 +218,9 @@ Achieved via:
 
 ## Next
 
-   MemorySSA renaming pass (version assignment via DFS over dominator tree)
-   Interprocedural alias analysis (alloc-based non-aliasing across calls)
    MemorySSA-driven LICM (hoist loop-invariant heap loads)
+   Interprocedural alias analysis (alloc-based non-aliasing across calls)
+   Cross-block redundant load elimination via full MemorySSA
    __debug_line section (PC -> source line mapping for breakpoints)
    Structured loop IR for IV reasoning and vectorization
    PE/COFF target (Windows x86-64)
