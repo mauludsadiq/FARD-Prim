@@ -1,0 +1,173 @@
+/// ocir_alias.fard -- Alloc-based interprocedural alias analysis
+///
+/// Core insight: every heap pointer in FARD originates from an AllocHeap
+/// instruction. Two pointers cannot alias if they originate from different
+/// AllocHeap instructions (fresh allocation = unique object identity).
+///
+/// Algorithm:
+///   1. Build alloc_origin map: reg -> AllocHeap_dst that produced it
+///      - AllocHeap(dst): origin[dst] = dst (self)
+///      - MoveI64(dst, src) / CopyI64(dst, src): origin[dst] = origin[src]
+///      - MakeClosure(dst, ...): origin[dst] = dst (closure is a fresh alloc)
+///   2. must_not_alias(ptr_a, ptr_b, origin):
+///      true iff origin[ptr_a] != origin[ptr_b] and both are known allocs
+///
+/// Interprocedural extension:
+///   - Function parameters are tagged as "external" origin (may alias anything)
+///   - Return values from calls are tagged as fresh if callee always allocs
+///   - Conservative: unknown origins may alias
+
+import("std/list") as list
+import("std/rec")  as rec
+import("std/str")  as str
+
+// ── Origin tracking ───────────────────────────────────────────────
+
+fn UNKNOWN_ORIGIN() { -1 }   // parameter or unknown
+fn EXTERNAL_ORIGIN() { -2 }  // comes from outside this function
+
+fn build_alloc_origin_block(insts, origin) {
+  list.fold(insts, origin, fn(acc, inst) {
+    let op = inst.op in
+    if op == "AllocHeap" then
+      // Fresh allocation: origin is itself
+      rec.set(acc, str.from(inst.dst), inst.dst)
+    else if op == "MakeClosure" then
+      // Closure allocation: fresh object
+      rec.set(acc, str.from(inst.dst), inst.dst)
+    else if op == "MoveI64" || op == "CopyI64" then
+      // Propagate origin through copies
+      if rec.has(inst, "src") then
+        let src_key = str.from(inst.src) in
+        let src_origin = if rec.has(acc, src_key) then rec.get(acc, src_key)
+          else UNKNOWN_ORIGIN() in
+        rec.set(acc, str.from(inst.dst), src_origin)
+      else acc
+    else if op == "LoadHeap" || op == "LoadHeapStaticIdx" || op == "LoadHeapDyn" then
+      // Loaded pointers may come from anywhere -- external
+      rec.set(acc, str.from(inst.dst), EXTERNAL_ORIGIN())
+    else if op == "CallI64" || op == "CallIndirect" then
+      // Return value from call: treat as external (conservative)
+      rec.set(acc, str.from(inst.dst), EXTERNAL_ORIGIN())
+    else acc
+  })
+}
+
+fn build_alloc_origin_func(f) {
+  // Parameters: external origin (may alias anything passed in)
+  let init = list.fold(f.params, {},  fn(acc, p) {
+    rec.set(acc, str.from(p.reg), EXTERNAL_ORIGIN())
+  }) in
+  // Process all blocks
+  list.fold(f.blocks, init, fn(acc, block) {
+    build_alloc_origin_block(block.insts, acc)
+  })
+}
+
+// ── Alias query ───────────────────────────────────────────────────
+
+fn origin_of(reg, origin_map) {
+  let key = str.from(reg) in
+  if rec.has(origin_map, key) then rec.get(origin_map, key)
+  else UNKNOWN_ORIGIN()
+}
+
+fn is_known_alloc(origin) {
+  origin >= 0  // non-negative: traced to a specific AllocHeap dst
+}
+
+fn must_not_alias(ptr_a, ptr_b, origin_map) {
+  let oa = origin_of(ptr_a, origin_map) in
+  let ob = origin_of(ptr_b, origin_map) in
+  // Must not alias iff both have known alloc origins and they differ
+  is_known_alloc(oa) && is_known_alloc(ob) && oa != ob
+}
+
+fn may_alias(ptr_a, ptr_b, origin_map) {
+  !must_not_alias(ptr_a, ptr_b, origin_map)
+}
+
+// ── Alias-aware redundant load elimination ────────────────────────
+// Extends ocir_memssa's intra-block load elimination to handle stores
+// to non-aliasing pointers: a store to ptr_b does NOT invalidate a
+// cached load from ptr_a if must_not_alias(ptr_a, ptr_b, origin_map).
+
+fn elim_loads_with_alias(blocks, origin_map) {
+  list.map(blocks, fn(block) {
+    // Cache: (ptr, field) -> dst of last load, invalidated by aliasing stores
+    let result = list.fold(block.insts, { cache: {}, new_insts: [] }, fn(acc, inst) {
+      let op = inst.op in
+      if op == "LoadHeapStaticIdx" then
+        let ptr   = inst.ptr in
+        let field = if rec.has(inst, "field_idx") then inst.field_idx else 0 in
+        let key   = str.concat([str.from(ptr), ":", str.from(field)]) in
+        if rec.has(acc.cache, key) then
+          // Redundant load -- replace with CopyI64 from cached dst
+          let cached_dst = rec.get(acc.cache, key) in
+          let copy = { op: "CopyI64", dst: inst.dst, src: cached_dst } in
+          { cache: acc.cache, new_insts: list.append(acc.new_insts, copy) }
+        else
+          // New load -- cache it
+          { cache: rec.set(acc.cache, key, inst.dst),
+            new_insts: list.append(acc.new_insts, inst) }
+      else if op == "StoreHeap" then
+        // Invalidate cache entries that may alias this store's ptr
+        let store_ptr = inst.ptr in
+        let new_cache = list.fold(rec.keys(acc.cache), acc.cache, fn(c, k) {
+          // Parse key "ptr:field"
+          let parts = str.chars(k) in
+          let colon_idx = list.fold(list.build(list.len(parts), fn(i){i}),
+            -1, fn(found, i) {
+              if found >= 0 then found
+              else if list.get(parts, i) == ":" then i
+              else -1
+            }) in
+          if colon_idx < 0 then c  // malformed key, keep
+          else
+            let cached_ptr_str = str.concat(list.build(colon_idx, fn(i){ list.get(parts, i) })) in
+            let cached_ptr_num = if str.len(cached_ptr_str) > 0
+              then list.fold(str.chars(cached_ptr_str), 0, fn(n, ch) {
+                n * 10 + (str.char_code(cached_ptr_str, 0) - 48)
+              })
+              else -999 in
+            // If must_not_alias, keep cache; otherwise invalidate
+            if must_not_alias(cached_ptr_num, store_ptr, origin_map) then c
+            else rec.set(c, k, -1)  // mark invalid
+        }) in
+        // Remove invalid entries
+        let clean_cache = list.fold(rec.keys(new_cache), {}, fn(c, k) {
+          if rec.get(new_cache, k) >= 0 then rec.set(c, k, rec.get(new_cache, k))
+          else c
+        }) in
+        { cache: clean_cache, new_insts: list.append(acc.new_insts, inst) }
+      else
+        { cache: acc.cache, new_insts: list.append(acc.new_insts, inst) }
+    }) in
+    { label: block.label, insts: result.new_insts, term: block.term }
+  })
+}
+
+fn alias_aware_load_elim_func(f) {
+  let origin_map = build_alloc_origin_func(f) in
+  let new_blocks = elim_loads_with_alias(f.blocks, origin_map) in
+  { name: f.name, params: f.params, blocks: new_blocks }
+}
+
+fn alias_aware_load_elim(m) {
+  { entry: m.entry,
+    funcs: list.map(m.funcs, alias_aware_load_elim_func) }
+}
+
+// ── Module-level alias query ──────────────────────────────────────
+// Build origin maps for all functions, enabling cross-function queries.
+
+fn build_module_origins(m) {
+  list.fold(m.funcs, {}, fn(acc, f) {
+    rec.set(acc, f.name, build_alloc_origin_func(f))
+  })
+}
+
+export { build_alloc_origin_func, build_alloc_origin_block,
+         build_module_origins, must_not_alias, may_alias,
+         origin_of, is_known_alloc, alias_aware_load_elim,
+         UNKNOWN_ORIGIN, EXTERNAL_ORIGIN }
