@@ -169,12 +169,17 @@ Achieved via:
     in __text segment for I-cache locality; entry always last
   - PGO Phase 3C: profile-guided RA spill cost weighting; blocks weighted
     by execution count, cheapest slots chosen as spill candidates
+  - Python frontend: end-to-end Python->native via compile_python.py
+    add/fact/fib verified correct; fixes: EpilogueRet for multi-return
+    functions, DFE entry root, If early-return, Expr ret_reg tracking
+  - JavaScript frontend: end-to-end JS->native via compile_js.py + Acorn
+    same fixes applied; add/fact/fib verified correct
   - ARM64 parity: full VMIR pipeline, callee-saved reg handling,
     large literal encoding via bits.bshl (FARD truncates >2^31)
 
 ## Source
 
-13,198 lines of FARD across 56 files in src/orgntr_prim/.
+13,290 lines of FARD across 58 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (775 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
