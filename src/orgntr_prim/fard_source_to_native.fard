@@ -55,7 +55,7 @@ fn compile_and_emit(src, out_path) {
 
   let fixed = fixups.encode_module_with_fixups(omir_mod) in
   let linked = link.link_module(fixed) in
-  let binary = exe.emit_exe(linked, "fard_main") in
+  let binary = exe.emit_exe_with_debug(linked, "fard_main") in
   let binary_bytes = bytes.of_list(binary) in
   let _ = fs.write_bytes(out_path, binary_bytes) in
 

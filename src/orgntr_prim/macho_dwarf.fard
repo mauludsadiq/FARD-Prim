@@ -1,0 +1,208 @@
+/// macho_dwarf.fard -- Minimal DWARF4 debug info emitter
+///
+/// Produces __debug_abbrev, __debug_info, __debug_str sections
+/// sufficient for function-level debugging with lldb/dwarfdump.
+///
+/// DWARF4 compile unit covers all functions.
+/// Each function gets a DW_TAG_subprogram with name, low_pc, high_pc.
+/// Parameters are not yet described (future work).
+///
+/// Encoding: DWARF32, little-endian, addr_size=8
+
+import("std/list") as list
+import("std/bits") as bits
+import("std/str")  as str
+
+// ── Primitives ────────────────────────────────────────────────────
+
+fn le16(n) {
+  [bits.band(n, 255), bits.band(bits.bshr(n, 8), 255)]
+}
+
+fn le32(n) {
+  [bits.band(n, 255),
+   bits.band(bits.bshr(n, 8), 255),
+   bits.band(bits.bshr(n, 16), 255),
+   bits.band(bits.bshr(n, 24), 255)]
+}
+
+fn le64(n) {
+  list.concat([le32(n), le32(bits.bshr(n, 32))])
+}
+
+fn strz(s) {
+  list.append(list.map(list.build(str.len(s), fn(i){ str.char_code(s, i) }), fn(c){c}), 0)
+}
+
+fn zeros(n) { list.build(n, fn(_){0}) }
+
+// ── ULEB128 encoding ──────────────────────────────────────────────
+
+fn uleb128_1(v) { [bits.band(v, 127)] }
+fn uleb128_2(v) { [bits.bor(bits.band(v, 127), 128), bits.band(bits.bshr(v, 7), 127)] }
+fn uleb128(v) {
+  if v < 128 then uleb128_1(v)
+  else uleb128_2(v)
+}
+
+// ── DWARF constants ───────────────────────────────────────────────
+
+fn DW_TAG_compile_unit()     { 17 }   // 0x11
+fn DW_TAG_subprogram()       { 46 }   // 0x2e
+fn DW_AT_producer()          { 37 }   // 0x25
+fn DW_AT_language()          { 19 }   // 0x13
+fn DW_AT_name()              { 3 }    // 0x03
+fn DW_AT_comp_dir()          { 27 }   // 0x1b
+fn DW_AT_low_pc()            { 17 }   // 0x11
+fn DW_AT_high_pc()           { 18 }   // 0x12
+fn DW_AT_stmt_list()         { 16 }   // 0x10
+fn DW_AT_external()          { 63 }   // 0x3f
+fn DW_FORM_strp()            { 14 }   // 0x0e  -- 4-byte offset into .debug_str
+fn DW_FORM_data2()           { 5 }    // 0x05
+fn DW_FORM_data4()           { 6 }    // 0x06
+fn DW_FORM_addr()            { 1 }    // 0x01  -- 8 bytes for addr_size=8
+fn DW_FORM_data8()           { 7 }    // 0x07  -- high_pc as offset from low_pc
+fn DW_FORM_flag_present()    { 25 }   // 0x19  -- zero bytes (implicit true)
+fn DW_LANG_C()               { 1 }    // generic C
+fn HAS_CHILDREN()            { 1 }
+fn NO_CHILDREN()             { 0 }
+
+// ── __debug_abbrev ────────────────────────────────────────────────
+// Abbreviation table: defines shape of DIEs in __debug_info.
+// Abbrev 1: DW_TAG_compile_unit (has children)
+//   producer(strp) language(data2) name(strp) comp_dir(strp)
+//   low_pc(addr) high_pc(data8) stmt_list(data4)
+// Abbrev 2: DW_TAG_subprogram (no children)
+//   name(strp) low_pc(addr) high_pc(data8) external(flag_present)
+
+fn abbrev_attr(at, form) {
+  list.concat([uleb128(at), uleb128(form)])
+}
+
+fn build_debug_abbrev() {
+  list.concat([
+    // Abbrev 1: compile_unit
+    uleb128(1), uleb128(DW_TAG_compile_unit()), [HAS_CHILDREN()],
+    abbrev_attr(DW_AT_producer(),  DW_FORM_strp()),
+    abbrev_attr(DW_AT_language(),  DW_FORM_data2()),
+    abbrev_attr(DW_AT_name(),      DW_FORM_strp()),
+    abbrev_attr(DW_AT_comp_dir(),  DW_FORM_strp()),
+    abbrev_attr(DW_AT_low_pc(),    DW_FORM_addr()),
+    abbrev_attr(DW_AT_high_pc(),   DW_FORM_data8()),
+    abbrev_attr(DW_AT_stmt_list(), DW_FORM_data4()),
+    [0, 0],  // end of abbrev 1 attrs
+    // Abbrev 2: subprogram
+    uleb128(2), uleb128(DW_TAG_subprogram()), [NO_CHILDREN()],
+    abbrev_attr(DW_AT_name(),     DW_FORM_strp()),
+    abbrev_attr(DW_AT_low_pc(),   DW_FORM_addr()),
+    abbrev_attr(DW_AT_high_pc(),  DW_FORM_data8()),
+    abbrev_attr(DW_AT_external(), DW_FORM_flag_present()),
+    [0, 0],  // end of abbrev 2 attrs
+    [0]      // end of abbreviation table
+  ])
+}
+
+// ── __debug_str ───────────────────────────────────────────────────
+// String pool. Offsets are used in DW_FORM_strp fields.
+
+fn build_debug_str(func_names) {
+  let producer = strz("FARD Prim") in
+  let filename  = strz("program.fard") in
+  let comp_dir  = strz("/tmp") in
+  let name_strs = list.flatten(list.map(func_names, strz)) in
+  list.concat([producer, filename, comp_dir, name_strs])
+}
+
+fn str_offset_producer() { 0 }
+fn str_offset_filename(producer) { list.len(strz(producer)) }
+fn str_offset_comp_dir(producer, filename) {
+  str_offset_filename(producer) + list.len(strz(filename))
+}
+fn str_offset_func(producer, filename, comp_dir, func_names, idx) {
+  let base = str_offset_comp_dir(producer, filename) + list.len(strz(comp_dir)) in
+  list.fold(list.build(idx, fn(i){i}), base, fn(acc, i) {
+    acc + list.len(strz(list.get(func_names, i)))
+  })
+}
+
+// ── __debug_info ──────────────────────────────────────────────────
+// DWARF4 compile unit with one subprogram DIE per function.
+// linked_funcs: list of {name, base, text_size} records
+// text_vmaddr: base vmaddr of text section (after entry+alloc stubs)
+// stub_size: bytes before first function (entry_stub + alloc_stub)
+
+fn subprogram_die(name_stroff, low_pc, size) {
+  list.concat([
+    uleb128(2),           // abbrev 2
+    le32(name_stroff),    // DW_AT_name
+    le64(low_pc),         // DW_AT_low_pc
+    le64(size)            // DW_AT_high_pc (offset)
+    // DW_AT_external: flag_present = 0 bytes
+  ])
+}
+
+fn build_debug_info(linked_funcs, text_vmaddr, stub_size) {
+  let producer = "FARD Prim" in
+  let filename  = "program.fard" in
+  let comp_dir  = "/tmp" in
+  let func_names = list.map(linked_funcs, fn(f){ f.name }) in
+
+  // Compute total text size
+  let total_size = list.fold(linked_funcs, 0, fn(acc, f){ acc + list.len(f.text) }) in
+  let low_pc = text_vmaddr + stub_size in
+
+  // String offsets
+  let off_prod = str_offset_producer() in
+  let off_file = str_offset_filename(producer) in
+  let off_dir  = str_offset_comp_dir(producer, filename) in
+
+  // Build compile_unit DIE body
+  let cu_attrs = list.concat([
+    uleb128(1),            // abbrev 1
+    le32(off_prod),        // DW_AT_producer
+    le16(DW_LANG_C()),     // DW_AT_language
+    le32(off_file),        // DW_AT_name
+    le32(off_dir),         // DW_AT_comp_dir
+    le64(low_pc),          // DW_AT_low_pc
+    le64(total_size),      // DW_AT_high_pc (offset from low_pc)
+    le32(0)                // DW_AT_stmt_list (no line table yet)
+  ]) in
+
+  // Build subprogram DIEs
+  let sp_dies = list.flatten(list.map(
+    list.build(list.len(linked_funcs), fn(i){i}),
+    fn(i) {
+      let f = list.get(linked_funcs, i) in
+      let name_off = str_offset_func(producer, filename, comp_dir, func_names, i) in
+      let func_low_pc = text_vmaddr + stub_size + f.base in
+      let func_size = list.len(f.text) in
+      subprogram_die(name_off, func_low_pc, func_size)
+    }
+  )) in
+
+  // End of compile_unit children
+  let end_cu = [0] in
+
+  let body = list.concat([cu_attrs, sp_dies, end_cu]) in
+
+  // DWARF4 CU header: unit_length(4) version(2) abbrev_offset(4) addr_size(1)
+  // unit_length = total CU size - 4 (excludes length field itself)
+  // CU header is 11 bytes, so unit_length = 7 + len(body)
+  let cu_len = 7 + list.len(body) in
+  list.concat([le32(cu_len), le16(4), le32(0), [8], body])
+}
+
+// ── Main entry point ──────────────────────────────────────────────
+// Returns {abbrev, info, str} byte lists for embedding in Mach-O
+
+fn build_dwarf(linked_funcs, text_vmaddr, stub_size) {
+  let func_names = list.map(linked_funcs, fn(f){ f.name }) in
+  {
+    abbrev: build_debug_abbrev(),
+    info:   build_debug_info(linked_funcs, text_vmaddr, stub_size),
+    str:    build_debug_str(func_names)
+  }
+}
+
+export { build_dwarf, build_debug_abbrev, build_debug_info, build_debug_str,
+         le16, le32, le64, strz, uleb128 }
