@@ -187,12 +187,15 @@ Achieved via:
     build_full_memssa: complete 3-phase pipeline in one call
   - LICM extended to record field accesses (t=get): r.a hoisted out
     of while loop body; LoadHeapStaticIdx moves from closure to caller
+  - Interprocedural alias analysis: alloc-based origin tracking;
+    must_not_alias when ptrs trace to different AllocHeap instructions;
+    alias-aware load elimination preserves cache across non-aliasing stores
   - ARM64 parity: full VMIR pipeline, callee-saved reg handling,
     large literal encoding via bits.bshl (FARD truncates >2^31)
 
 ## Source
 
-14,328 lines of FARD across 62 files in src/orgntr_prim/.
+14,501 lines of FARD across 63 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (775 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -220,7 +223,6 @@ Achieved via:
 
 ## Next
 
-   Interprocedural alias analysis (alloc-based non-aliasing across calls)
    Cross-block redundant load elimination via full MemorySSA
    __debug_line section (PC -> source line mapping for breakpoints)
    Structured loop IR for IV reasoning and vectorization
