@@ -1,0 +1,160 @@
+/// ocir_gvn_mem.fard -- Memory-aware GVN using full MemorySSA
+///
+/// Eliminates redundant heap loads across basic block boundaries.
+/// Uses MemorySSA reaching versions to prove two loads see the same memory.
+///
+/// Algorithm: dominator-tree walk with available load table
+///   For each block in dominator order:
+///     For each LoadHeapStaticIdx(dst, ptr, field):
+///       key = (origin(ptr), field, reaching_mem_version)
+///       if key in available: replace load with CopyI64(dst, available[key])
+///       else: add to available[key] = dst
+///     For each MemDef/MemBarrier: invalidate loads with that mem version
+///     Recurse into dominator tree children with updated available table
+
+import("std/list") as list
+import("std/rec")  as rec
+import("std/str")  as str
+
+// ── Helpers ───────────────────────────────────────────────────────
+
+fn load_key(ptr_origin, field, mem_version) {
+  str.concat([str.from(ptr_origin), ":", str.from(field), "@", str.from(mem_version)])
+}
+
+fn get_mem_version_at(mem_nodes, block_label, inst_idx) {
+  // Find the MemUse node for this instruction
+  let found = list.find(mem_nodes, fn(n) {
+    n.op == "MemUse" && n.inst_idx == inst_idx &&
+    str.from(n.ptr) == str.from(-1)  // placeholder -- match by inst_idx only
+  }) in
+  if rec.has(found, "some") then found.some.version else 0
+}
+
+fn get_mem_use_version(mem_nodes, inst_idx) {
+  // Find MemUse node at this instruction index
+  let uses = list.filter(mem_nodes, fn(n){
+    n.op == "MemUse" && n.inst_idx == inst_idx
+  }) in
+  if list.len(uses) > 0 then list.get(uses, 0).version else 0
+}
+
+fn get_mem_phi_version(mem_nodes, block_label_str) {
+  // Get the MemPhi version for a block (used as incoming memory version)
+  let phis = list.filter(mem_nodes, fn(n){
+    n.op == "MemPhi" && str.from(n.label) == block_label_str
+  }) in
+  if list.len(phis) > 0 then list.get(phis, 0).version else 0
+}
+
+// ── Block-level available load tracking ───────────────────────────
+
+fn process_block_for_gvn(block, mem_nodes, origin_map, avail) {
+  let n = list.len(block.insts) in
+  let result = list.fold(list.build(n, fn(i){i}),
+    { avail: avail, new_insts: [] },
+    fn(acc, i) {
+      let inst = list.get(block.insts, i) in
+      let op = inst.op in
+      if op == "LoadHeapStaticIdx" then
+        let ptr = inst.ptr in
+        let field = if rec.has(inst, "field_idx") then inst.field_idx else 0 in
+        let mem_ver = get_mem_use_version(mem_nodes, i) in
+        // Get origin of ptr for alias-safe keying
+        let ptr_key = str.from(ptr) in
+        let ptr_origin = if rec.has(origin_map, ptr_key) then rec.get(origin_map, ptr_key)
+          else ptr in
+        let key = load_key(ptr_origin, field, mem_ver) in
+        if rec.has(acc.avail, key) then
+          // Redundant cross-block load -- replace with copy
+          let cached = rec.get(acc.avail, key) in
+          let copy = { op: "CopyI64", dst: inst.dst, src: cached } in
+          { avail: acc.avail, new_insts: list.append(acc.new_insts, copy) }
+        else
+          // New load -- make available
+          { avail: rec.set(acc.avail, key, inst.dst),
+            new_insts: list.append(acc.new_insts, inst) }
+      else if inst.op == "StoreHeap" || inst.op == "AllocHeap" ||
+              inst.op == "CallI64" || inst.op == "CallIndirect" then
+        // Memory-modifying op: invalidate all available loads
+        // (conservative -- alias analysis could refine this)
+        { avail: {}, new_insts: list.append(acc.new_insts, inst) }
+      else
+        { avail: acc.avail, new_insts: list.append(acc.new_insts, inst) }
+    }
+  ) in
+  { block: { label: block.label, insts: result.new_insts, term: block.term },
+    avail: result.avail }
+}
+
+// ── Dominator-tree walk ───────────────────────────────────────────
+
+fn domtree_children_labels(idom, all_labels, parent) {
+  list.filter(all_labels, fn(l) {
+    let lk = str.from(l) in
+    l != parent && rec.has(idom, lk) && rec.get(idom, lk) == parent
+  })
+}
+
+fn gvn_mem_visit(label, blocks, mem_nodes, origin_map, idom, avail, block_map) {
+  let lk = str.from(label) in
+  let block = if rec.has(block_map, lk) then rec.get(block_map, lk)
+    else { label: label, insts: [], term: { op: "RetI64", src: 0 } } in
+
+  // Process this block
+  let result = process_block_for_gvn(block, mem_nodes, origin_map, avail) in
+
+  // Recurse on dominator tree children with updated avail
+  let all_labels = rec.keys(block_map) in
+  let all_label_ints = list.map(all_labels, fn(k){
+    list.fold(str.chars(k), 0, fn(n, c){
+      n * 10 + (str.char_code(c, 0) - 48)
+    })
+  }) in
+  let children = domtree_children_labels(idom, all_label_ints, label) in
+
+  let child_blocks = list.flatten(list.map(children, fn(child) {
+    gvn_mem_visit(child, blocks, mem_nodes, origin_map, idom,
+      result.avail, block_map)
+  })) in
+
+  list.concat([[result.block], child_blocks])
+}
+
+fn build_block_map(blocks) {
+  list.fold(blocks, {}, fn(acc, b) {
+    rec.set(acc, str.from(b.label), b)
+  })
+}
+
+// ── Main entry point ──────────────────────────────────────────────
+
+fn gvn_mem_func(f, memssa, cfg, origin_map) {
+  let block_map = build_block_map(f.blocks) in
+  let new_blocks = gvn_mem_visit(0, f.blocks, memssa.mem_nodes,
+    origin_map, cfg.idom, {}, block_map) in
+  // Re-sort blocks by label to restore original order
+  let sorted = list.map(
+    list.sort_int(list.map(new_blocks, fn(b){ b.label })),
+    fn(lbl) {
+      list.get(list.filter(new_blocks, fn(b){ b.label == lbl }), 0)
+    }
+  ) in
+  { name: f.name, params: f.params, blocks: sorted }
+}
+
+fn gvn_mem_module(m, memssa_map, cfg_map, origin_map_map) {
+  { entry: m.entry,
+    funcs: list.map(m.funcs, fn(f) {
+      let memssa = if rec.has(memssa_map, f.name) then rec.get(memssa_map, f.name)
+        else { mem_nodes: [], phi_blocks: [], final_version: 0 } in
+      let cfg = if rec.has(cfg_map, f.name) then rec.get(cfg_map, f.name)
+        else { idom: {}, succ_map: {}, pred_map: {}, dom_frontiers: {}, rpo: [] } in
+      let origins = if rec.has(origin_map_map, f.name) then rec.get(origin_map_map, f.name)
+        else {} in
+      gvn_mem_func(f, memssa, cfg, origins)
+    })
+  }
+}
+
+export { gvn_mem_module, gvn_mem_func, process_block_for_gvn }
