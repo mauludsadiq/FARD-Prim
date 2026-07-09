@@ -57,8 +57,11 @@ Instrumented pipeline (fard_source_to_native_pgo.fard):
      -> SCCP (sparse conditional constant propagation)
      -> inliner (multi-block CFG inlining, threshold 12 instructions)
      -> GVN (global value numbering)
+     -> MemorySSA (MemDef/MemUse/MemPhi, intra+cross-block load elimination)
+     -> alias analysis (alloc-based must_not_alias, alias-aware load elim)
      -> SSA opts (copy prop, const fold, DCE, empty block elimination)
      -> dead function elimination (post-inline)
+     -> loop IR (natural loop detection, IV analysis, loop SR)
      -> shared analysis (dominance, liveness, def/use, CFG, loop detection)
      -> VMIR (instruction selection, virtual registers)
      -> pre-RA scheduling (list scheduling, latency hiding)
@@ -132,9 +135,9 @@ fard_eval interpreter. Bugs found so far:
 
    fib(35), macOS x86-64, user time:
 
-   FARD Prim   0.078s
-   gcc -O0     0.120s   (1.5x faster)
-   gcc -O2     0.030s   (2.6x slower than gcc -O2)
+   FARD Prim   0.087s
+   gcc -O0     0.056s   (1.6x slower than gcc -O0)
+   gcc -O2     0.033s   (2.6x slower than gcc -O2)
 
 Achieved via:
   - LICM: loop invariant code motion at AST level (arithmetic + field access)
@@ -223,14 +226,20 @@ Achieved via:
    ocir_sccp.fard          sparse conditional constant propagation (210 lines)
    ocir_opt.fard           copy prop, const fold, DCE, empty block elim (306 lines)
    ocir_gvn.fard           global value numbering (110 lines)
+   ocir_gvn_mem.fard       cross-block GVN via MemorySSA (160 lines)
    ocir_to_vmir.fard       OCIR -> VMIR instruction selection (124 lines)
    vmir_sched.fard         pre-RA list scheduling, latency hiding (229 lines)
    vmir_to_omir.fard       VMIR -> OMIR register allocation (237 lines)
+   ocir_memssa.fard        MemorySSA: MemDef/MemUse/MemPhi + renaming (571 lines)
+   ocir_domtree.fard       RPO, idom, dominance frontiers (191 lines)
+   ocir_alias.fard         alloc-based alias analysis (173 lines)
+   ocir_loop_ir.fard       structured loop IR + IV analysis (250 lines)
+   macho_dwarf.fard        DWARF4 debug info emitter (290 lines)
    ast_licm.fard           loop invariant code motion, AST level (216 lines)
    ocir_dfe.fard           dead function elimination post-inline (53 lines)
    fard_source_to_native_arm64.fard ARM64 ELF64 pipeline (47 lines)
    ast_unroll.fard         loop unrolling, constant-bound while (193 lines)
-   ocir_sr.fard            strength reduction, mul->add doubling (95 lines)
+   ocir_sr.fard            strength reduction, mul->add + small-k chains (195 lines)
    lower_ocir_to_omir.fard OCIR -> OMIR (ARM64/ELF legacy path) (391 lines)
    python_to_uvir.fard     Python subset frontend (289 lines)
    js_to_uvir.fard         JavaScript subset frontend (270 lines)
