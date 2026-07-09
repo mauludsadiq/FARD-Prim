@@ -197,12 +197,15 @@ Achieved via:
     function, DW_LNS_copy rows, DW_LNE_end_sequence; 111 bytes;
     verified with dwarfdump; sidecar .dwarf file due to macOS
     __LINKEDIT-must-be-last constraint on embedded DWARF
+  - Structured loop IR: natural loop detection via back edges + idom;
+    loop body/header/latch/preheader/exits; IV analysis via step closure;
+    while 0 fn(s){s<n} fn(s){s+1} -> {init=0, step=1, op=AddI64}
   - ARM64 parity: full VMIR pipeline, callee-saved reg handling,
     large literal encoding via bits.bshl (FARD truncates >2^31)
 
 ## Source
 
-14,683 lines of FARD across 64 files in src/orgntr_prim/.
+14,907 lines of FARD across 65 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (775 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -230,10 +233,10 @@ Achieved via:
 
 ## Next
 
-   Structured loop IR for IV reasoning and vectorization
+   Loop strength reduction using IV analysis
+   Vectorization (SIMD instruction emission for counted loops)
    PE/COFF target (Windows x86-64)
    Dead store elimination via MemorySSA
-   __LINKEDIT ordering fix for embedded DWARF in executables
 
 ## Repos
 
