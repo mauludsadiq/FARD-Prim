@@ -21,6 +21,78 @@ fn is_power_of_2(n) {
   (n == 1 || n == 2 || n == 4 || n == 8 || n == 16)
 }
 
+// Addition chain for small multipliers (non-power-of-2)
+// Returns list of instructions that compute x*n using only adds
+// Works for n in {3,5,6,7,9,10,12,15}
+fn is_small_mul(n) {
+  n == 3 || n == 5 || n == 6 || n == 7 ||
+  n == 9 || n == 10 || n == 12 || n == 15
+}
+
+fn add_chain_for(x, n, next_reg) {
+  // x*3 = x*2 + x = (x+x) + x
+  if n == 3 then
+    let t1 = next_reg in
+    let t2 = next_reg + 1 in
+    { insts: [{ op: "AddI64", dst: t1, lhs: x, rhs: x },
+              { op: "AddI64", dst: t2, lhs: t1, rhs: x }],
+      result: t2, next_reg: next_reg + 2 }
+  // x*5 = x*4 + x = ((x+x)+(x+x)) + x
+  else if n == 5 then
+    let t1 = next_reg in
+    let t2 = next_reg + 1 in
+    let t3 = next_reg + 2 in
+    { insts: [{ op: "AddI64", dst: t1, lhs: x, rhs: x },
+              { op: "AddI64", dst: t2, lhs: t1, rhs: t1 },
+              { op: "AddI64", dst: t3, lhs: t2, rhs: x }],
+      result: t3, next_reg: next_reg + 3 }
+  // x*6 = x*3*2
+  else if n == 6 then
+    let r3 = add_chain_for(x, 3, next_reg) in
+    let t = r3.next_reg in
+    { insts: list.concat([r3.insts, [{ op: "AddI64", dst: t, lhs: r3.result, rhs: r3.result }]]),
+      result: t, next_reg: t + 1 }
+  // x*7 = x*8 - x = (x+x+x+x+x+x+x+x) - x -> use x*6+x
+  else if n == 7 then
+    let r6 = add_chain_for(x, 6, next_reg) in
+    let t = r6.next_reg in
+    { insts: list.concat([r6.insts, [{ op: "AddI64", dst: t, lhs: r6.result, rhs: x }]]),
+      result: t, next_reg: t + 1 }
+  // x*9 = x*8 + x
+  else if n == 9 then
+    let t1 = next_reg in
+    let t2 = next_reg + 1 in
+    let t3 = next_reg + 2 in
+    let t4 = next_reg + 3 in
+    { insts: [{ op: "AddI64", dst: t1, lhs: x, rhs: x },
+              { op: "AddI64", dst: t2, lhs: t1, rhs: t1 },
+              { op: "AddI64", dst: t3, lhs: t2, rhs: t2 },
+              { op: "AddI64", dst: t4, lhs: t3, rhs: x }],
+      result: t4, next_reg: next_reg + 4 }
+  // x*10 = x*5*2
+  else if n == 10 then
+    let r5 = add_chain_for(x, 5, next_reg) in
+    let t = r5.next_reg in
+    { insts: list.concat([r5.insts, [{ op: "AddI64", dst: t, lhs: r5.result, rhs: r5.result }]]),
+      result: t, next_reg: t + 1 }
+  // x*12 = x*6*2
+  else if n == 12 then
+    let r6 = add_chain_for(x, 6, next_reg) in
+    let t = r6.next_reg in
+    { insts: list.concat([r6.insts, [{ op: "AddI64", dst: t, lhs: r6.result, rhs: r6.result }]]),
+      result: t, next_reg: t + 1 }
+  // x*15 = x*12 + x*3
+  else if n == 15 then
+    let r12 = add_chain_for(x, 12, next_reg) in
+    let r3  = add_chain_for(x, 3, r12.next_reg) in
+    let t   = r3.next_reg in
+    { insts: list.concat([r12.insts, r3.insts,
+        [{ op: "AddI64", dst: t, lhs: r12.result, rhs: r3.result }]]),
+      result: t, next_reg: t + 1 }
+  else
+    { insts: [], result: x, next_reg: next_reg }
+}
+
 fn log2(n) {
   if n == 1 then 0
   else if n == 2 then 1
@@ -36,7 +108,7 @@ fn sr_block(block, max_reg) {
     else acc
   }) in
 
-  // Process instructions, replacing MulI64(x, 2^k) with add chain
+  // Process instructions, replacing MulI64(x, 2^k or small k) with add chain
   let result = list.fold(block.insts, { insts: [], next_reg: max_reg + 100 }, fn(acc, inst) {
     if inst.op != "MulI64" then
       { insts: list.append(acc.insts, inst), next_reg: acc.next_reg }
@@ -48,7 +120,19 @@ fn sr_block(block, max_reg) {
         else if rhs_const != null && is_power_of_2(rhs_const) then { val: rhs_const, reg: inst.lhs }
         else null in
       if val_reg == null then
-        { insts: list.append(acc.insts, inst), next_reg: acc.next_reg }
+        // Try small non-power-of-2 multiplier
+        let lhs_c = if lhs_const != null then lhs_const else -1 in
+        let rhs_c = if rhs_const != null then rhs_const else -1 in
+        let sm_val = if lhs_c != -1 && is_small_mul(lhs_c) then { val: lhs_c, reg: inst.rhs }
+          else if rhs_c != -1 && is_small_mul(rhs_c) then { val: rhs_c, reg: inst.lhs }
+          else null in
+        if sm_val == null then
+          { insts: list.append(acc.insts, inst), next_reg: acc.next_reg }
+        else
+          let chain = add_chain_for(sm_val.reg, sm_val.val, acc.next_reg) in
+          let copy = { op: "CopyI64", dst: inst.dst, src: chain.result } in
+          { insts: list.concat([acc.insts, list.concat([chain.insts, [copy]])]),
+            next_reg: chain.next_reg }
       else
         let k = log2(val_reg.val) in
         if k == 0 then
