@@ -155,7 +155,8 @@ Achieved via:
     loop-depth spill cost weighting (10x per loop level)
   - Loop unrolling: constant-bound while loops fully unrolled at AST level;
     SCCP+const-fold collapse to single constant (zero overhead)
-  - Strength reduction: MulI64(n, 2^k) -> k AddI64 doublings (n*4 = 2 adds)
+  - Strength reduction: MulI64(n, 2^k) -> k AddI64 doublings (n*4 = 2 adds);
+    extended to non-power-of-2: n*3=2adds, n*5=3adds, n*6=3adds, n*7=4adds
   - PGO Phase 1: instrumented compilation, static __profile section in __DATA,
     IncrCounter at each block, profile dump to fd=2 on exit
   - PGO Phase 2: profile-guided inliner; hot functions (count>50) get
@@ -200,12 +201,15 @@ Achieved via:
   - Structured loop IR: natural loop detection via back edges + idom;
     loop body/header/latch/preheader/exits; IV analysis via step closure;
     while 0 fn(s){s<n} fn(s){s+1} -> {init=0, step=1, op=AddI64}
+  - Loop strength reduction: non-power-of-2 multipliers -> addition chains;
+    add_chain_for handles {3,5,6,7,9,10,12,15}; s*3 -> 2 adds;
+    verified: MulI64 eliminated from step closure
   - ARM64 parity: full VMIR pipeline, callee-saved reg handling,
     large literal encoding via bits.bshl (FARD truncates >2^31)
 
 ## Source
 
-14,907 lines of FARD across 65 files in src/orgntr_prim/.
+14,991 lines of FARD across 65 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (775 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -233,10 +237,10 @@ Achieved via:
 
 ## Next
 
-   Loop strength reduction using IV analysis
    Vectorization (SIMD instruction emission for counted loops)
    PE/COFF target (Windows x86-64)
    Dead store elimination via MemorySSA
+   Nested loop detection and loop interchange
 
 ## Repos
 
