@@ -193,12 +193,16 @@ Achieved via:
   - Cross-block redundant load elimination: domtree-walk GVN with
     MemorySSA versions; available load table flows dom->dominated;
     r.a+r.a across blocks -> 1 load + copy
+  - __debug_line: DWARF4 line number table; DW_LNE_set_address per
+    function, DW_LNS_copy rows, DW_LNE_end_sequence; 111 bytes;
+    verified with dwarfdump; sidecar .dwarf file due to macOS
+    __LINKEDIT-must-be-last constraint on embedded DWARF
   - ARM64 parity: full VMIR pipeline, callee-saved reg handling,
     large literal encoding via bits.bshl (FARD truncates >2^31)
 
 ## Source
 
-14,668 lines of FARD across 64 files in src/orgntr_prim/.
+14,683 lines of FARD across 64 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (775 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -226,10 +230,10 @@ Achieved via:
 
 ## Next
 
-   __debug_line section (PC -> source line mapping for breakpoints)
    Structured loop IR for IV reasoning and vectorization
    PE/COFF target (Windows x86-64)
    Dead store elimination via MemorySSA
+   __LINKEDIT ordering fix for embedded DWARF in executables
 
 ## Repos
 
