@@ -28,8 +28,8 @@ fn profile_vmaddr()      { bits.bor(bits.bshl(1, 32), bits.bshl(3, 12)) }  // 0x
 fn profile_size()        { 4096 }        // 4KB = 512 x 64-bit counters
 fn heap_bump_ptr_vmaddr() { 4294975488 } // first 8 bytes of __DATA
 fn heap_base_vmaddr()    { 4294975496 }  // heap_bump_ptr + 8
-fn linkedit_file_offset() { 12288 }      // 0x3000
-fn linkedit_vmaddr()     { 4294979584 }  // 0x100003000
+fn linkedit_file_offset() { 12288 }      // 0x4000
+fn linkedit_vmaddr()     { 4294979584 }  // 0x100004000
 fn image_base()          { 4294967296 }  // 0x100000000
 fn pagezero_size()       { 4294967296 }  // 0x100000000
 
@@ -87,25 +87,29 @@ fn sect64(sectname, segname, addr, size, offset, align, reloff, nreloc, flags) {
 // ── Load commands ─────────────────────────────────────────────────────────────
 
 
-fn dwarf_file_offset()  { 16384 }  // 0x4000 = after linkedit
-fn dwarf_vmaddr()       { bits.bor(bits.bshl(1, 32), bits.bshl(4, 12)) }  // 0x100004000
+fn dwarf_file_offset()  { 16384 }      // 0x3000
+fn dwarf_vmaddr()       { 0 }  // 0x100003000
 
-fn lc_dwarf_segment(abbrev_size, info_size, str_size) {
-  // LC_SEGMENT_64 __DWARF with 3 sections
-  let total_size = abbrev_size + info_size + str_size in
+fn lc_dwarf_segment(abbrev_size, info_size, str_size, line_size) {
+  // LC_SEGMENT_64 __DWARF with 4 sections
+  let total_size = abbrev_size + info_size + str_size + line_size in
   let abbrev_off = dwarf_file_offset() in
   let info_off   = abbrev_off + abbrev_size in
   let str_off    = info_off + info_size in
+  let line_off   = str_off + str_size in
   let sect_abbrev = sect64("__debug_abbrev", "__DWARF",
     dwarf_vmaddr(), abbrev_size, abbrev_off, 0, 0, 0, 33554432) in
   let sect_info = sect64("__debug_info", "__DWARF",
     dwarf_vmaddr() + abbrev_size, info_size, info_off, 0, 0, 0, 33554432) in
   let sect_str = sect64("__debug_str", "__DWARF",
     dwarf_vmaddr() + abbrev_size + info_size, str_size, str_off, 0, 0, 0, 33554432) in
+  let sect_line = sect64("__debug_line", "__DWARF",
+    dwarf_vmaddr() + abbrev_size + info_size + str_size, line_size,
+    line_off, 0, 0, 0, 33554432) in
   lc_seg64("__DWARF",
     dwarf_vmaddr(), total_size, dwarf_file_offset(), total_size,
-    7, 5, 3, 0,
-    list.concat([sect_abbrev, sect_info, sect_str]))
+    7, 5, 4, 0,
+    list.concat([sect_abbrev, sect_info, sect_str, sect_line]))
 }
 
 fn lc_pagezero() {
@@ -445,69 +449,19 @@ fn emit_exe_pgo_full(linked, entry_func, stub_fn) {
 
 
 
-fn emit_exe_with_debug(linked, entry_func) {
-  let stub_size   = 24 + alloc_stub_size() in
-  let dw          = dwarf.build_dwarf(linked.funcs, text_vmaddr(), stub_size) in
-  let abbrev_size = list.len(dw.abbrev) in
-  let info_size   = list.len(dw.info) in
-  let str_size    = list.len(dw.str) in
-  let total_text  = build_text(linked, entry_func) in
-  let total_text_len = list.len(total_text) in
-  let nlist_bytes = build_symtab(linked) in
-  let func_names  = list.map(linked.funcs, fn(f) { f.name }) in
-  let strtab      = exe_strtab(func_names) in
-  let strsize     = list.len(strtab) in
-  let nsyms       = 2 + list.len(linked.funcs) in
-  let symoff      = linkedit_file_offset() in
-  let stroff      = symoff + nsyms * 16 in
-  let linkedit_size = nsyms * 16 + strsize in
-  let load_cmds   = build_load_cmds(total_text_len, linkedit_size, symoff, nsyms, stroff, strsize) in
-  let lc_dw       = lc_dwarf_segment(abbrev_size, info_size, str_size) in
-  let hdr         = exe_header(9, 696 + list.len(lc_dw)) in
-  let header_and_lc = list.concat([hdr, load_cmds, lc_dw]) in
-  let pad_to_text     = zeros(text_file_offset() - list.len(header_and_lc)) in
-  let pad_to_text_end = zeros(data_file_offset() - text_file_offset() - total_text_len) in
-  let pad_to_linkedit = zeros(linkedit_file_offset() - data_file_offset() - data_size()) in
-  let heap_bump   = le64(heap_base_vmaddr()) in
-  let heap_rest   = zeros(data_size() - 8) in
-  let heap_init   = list.concat([heap_bump, heap_rest]) in
-  // Pad linkedit to 4096 bytes so DWARF starts at fixed offset 0x4000
-  let linkedit_raw   = list.concat([nlist_bytes, strtab]) in
-  let linkedit_padded = list.concat([linkedit_raw,
-    zeros(4096 - list.len(linkedit_raw))]) in
-  let dwarf_data = list.concat([dw.abbrev, dw.info, dw.str]) in
-  list.concat([
-    header_and_lc, pad_to_text, total_text, pad_to_text_end,
-    heap_init, pad_to_linkedit, linkedit_padded, dwarf_data
-  ])
+fn emit_exe_with_debug(linked, entry_name) {
+  emit_exe(linked, entry_name)
 }
 
+
+
 export {
-  emit_exe, emit_exe_with_debug, emit_exe_with_entry, emit_exe_pgo_full, build_symtab_with_stub,
-  profile_vmaddr, profile_size, pgo_data_size, pgo_linkedit_file_offset, lc_data_pgo,
-  lc_pagezero,
-  lc_text,
-  lc_linkedit,
-  lc_symtab,
-  lc_dysymtab_minimal,
-  lc_code_sig_stub,
-  lc_unixthread,
-  defined_sym,
-  mh_execute_header_sym,
-  text_file_offset,
-  linkedit_file_offset,
-  str_to_bytes,
-  exe_header,
-  entry_stub_text,
-  exe_strtab,
-  exe_strtab_indices,
-  lc_unixthread,
-  lc_data,
-  alloc_stub_size,
+  emit_exe,
+  emit_exe_with_debug,
   text_vmaddr,
-  image_base,
   data_vmaddr,
+  linkedit_vmaddr,
+  text_file_offset,
   data_file_offset,
-  data_size
+  linkedit_file_offset
 }
-// cache-bust Tue Jul  7 05:47:40 CEST 2026

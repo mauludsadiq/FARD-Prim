@@ -195,14 +195,53 @@ fn build_debug_info(linked_funcs, text_vmaddr, stub_size) {
 // ── Main entry point ──────────────────────────────────────────────
 // Returns {abbrev, info, str} byte lists for embedding in Mach-O
 
+
+fn sleb128_neg5_byte() { 251 }  // -5 as unsigned byte for line_base field
+
+fn dw_lne_set_address(vmaddr) {
+  list.concat([[0, 9, 2], le64(vmaddr)])
+}
+
+fn dw_lns_copy() { [1] }
+fn dw_lne_end_sequence() { [0, 1, 1] }
+
+fn line_row(vmaddr, line_num, is_first) {
+  let set_addr = dw_lne_set_address(vmaddr) in
+  let adv_line = if is_first then [] else [3, 1] in
+  list.concat([set_addr, adv_line, dw_lns_copy()])
+}
+
+fn build_debug_line(linked_funcs, text_vmaddr, stub_size) {
+  let opcode_lengths = [0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1] in
+  let inc_dir  = list.concat([strz("/tmp"), [0]]) in
+  let file_ent = list.concat([strz("program.fard"), uleb128(1), uleb128(0), uleb128(0), [0]]) in
+  let prologue_body = list.concat([
+    [1, 1, 1],                    // min_inst, max_ops, default_is_stmt
+    [sleb128_neg5_byte()],        // line_base = -5
+    [14, 13],                     // line_range, opcode_base
+    opcode_lengths,
+    inc_dir, file_ent
+  ]) in
+  let n = list.len(linked_funcs) in
+  let prog = list.flatten(list.map(list.build(n, fn(i){i}), fn(i) {
+    let f = list.get(linked_funcs, i) in
+    line_row(text_vmaddr + stub_size + f.base, i + 1, i == 0)
+  })) in
+  let prog_end = list.concat([prog, dw_lne_end_sequence()]) in
+  let body = list.concat([le16(4), le32(list.len(prologue_body)), prologue_body, prog_end]) in
+  list.concat([le32(list.len(body)), body])
+}
+
 fn build_dwarf(linked_funcs, text_vmaddr, stub_size) {
   let func_names = list.map(linked_funcs, fn(f){ f.name }) in
   {
     abbrev: build_debug_abbrev(),
     info:   build_debug_info(linked_funcs, text_vmaddr, stub_size),
-    str:    build_debug_str(func_names)
+    str:    build_debug_str(func_names),
+    line:   build_debug_line(linked_funcs, text_vmaddr, stub_size)
   }
 }
 
 export { build_dwarf, build_debug_abbrev, build_debug_info, build_debug_str,
+         build_debug_line,
          le16, le32, le64, strz, uleb128 }
