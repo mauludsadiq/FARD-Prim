@@ -1,0 +1,224 @@
+/// ocir_loop_ir.fard -- Structured loop IR for OCIR
+///
+/// Detects natural loops from CFG back edges and builds a structured
+/// loop representation suitable for IV analysis and vectorization.
+///
+/// A natural loop has a single header block that dominates all blocks
+/// in the loop. The loop is identified by its back edge (latch -> header).
+///
+/// Loop structure:
+///   { header, preheader, body, latches, exits, depth }
+///
+/// IV analysis: identifies induction variables (registers that are
+/// incremented/decremented by a constant each iteration).
+///   { reg, init, step, step_op }
+///
+/// Invariant detection: registers defined outside the loop that are
+/// used inside (loop-invariant values).
+
+import("std/list") as list
+import("std/rec")  as rec
+import("std/str")  as str
+
+// ── Back edge detection ───────────────────────────────────────────
+// A back edge is an edge (from -> to) where to dominates from.
+// Uses the idom tree: to dominates from iff to is an ancestor of from.
+
+fn dominates(a, b, idom) {
+  // Does a dominate b? Walk up idom tree from b until we reach a or root.
+  let result = list.fold(list.build(50, fn(_){0}), { cur: b, found: false },
+    fn(acc, _) {
+      if acc.found then acc
+      else if acc.cur == a then { cur: acc.cur, found: true }
+      else
+        let k = str.from(acc.cur) in
+        if !rec.has(idom, k) then acc
+        else if rec.get(idom, k) == acc.cur then acc  // at root
+        else { cur: rec.get(idom, k), found: false }
+    }
+  ) in
+  result.found
+}
+
+fn find_back_edges(blocks, idom) {
+  list.flatten(list.map(blocks, fn(b) {
+    let succs = block_succs(b) in
+    list.filter(
+      list.map(succs, fn(s){ { from: b.label, to: s } }),
+      fn(e){ dominates(e.to, e.from, idom) }
+    )
+  }))
+}
+
+fn block_succs(block) {
+  let op = block.term.op in
+  if op == "BrCond" then [block.term.then_blk, block.term.else_blk]
+  else if op == "Br" then [block.term.to]
+  else []
+}
+
+// ── Natural loop body detection ───────────────────────────────────
+// Given a back edge (latch -> header), find all blocks in the loop body.
+// Algorithm: reverse CFG DFS from latch up to header.
+
+fn collect_loop_body(header, latch, pred_map) {
+  // BFS backward from latch, stopping at header
+  let init = { visited: rec.set({}, str.from(header), true), worklist: [latch] } in
+  let result = list.fold(list.build(100, fn(_){0}), init, fn(acc, _) {
+    if list.len(acc.worklist) == 0 then acc
+    else
+      let node = list.get(acc.worklist, 0) in
+      let rest = list.filter(acc.worklist, fn(x){ x != node }) in
+      let nk = str.from(node) in
+      if rec.has(acc.visited, nk) then { visited: acc.visited, worklist: rest }
+      else
+        let preds = if rec.has(pred_map, nk) then rec.get(pred_map, nk) else [] in
+        let new_work = list.filter(preds, fn(p){
+          !rec.has(acc.visited, str.from(p))
+        }) in
+        { visited: rec.set(acc.visited, nk, true),
+          worklist: list.concat([rest, new_work]) }
+  }) in
+  rec.keys(result.visited)
+}
+
+fn find_preheader(header, pred_map, body_set) {
+  // Preheader: the unique predecessor of header not in the loop body
+  let preds = if rec.has(pred_map, str.from(header))
+    then rec.get(pred_map, str.from(header))
+    else [] in
+  let outside = list.filter(preds, fn(p){
+    !rec.has(body_set, str.from(p))
+  }) in
+  if list.len(outside) == 1 then list.get(outside, 0) else -1
+}
+
+fn find_exits(body_set, succ_map) {
+  // Exit blocks: successors of body blocks that are outside the loop
+  list.flatten(list.map(rec.keys(body_set), fn(bk) {
+    let succs = if rec.has(succ_map, bk) then rec.get(succ_map, bk) else [] in
+    list.filter(succs, fn(s){ !rec.has(body_set, str.from(s)) })
+  }))
+}
+
+// ── Loop detection ────────────────────────────────────────────────
+
+fn detect_loops_func(f, cfg) {
+  let back_edges = find_back_edges(f.blocks, cfg.idom) in
+  list.map(back_edges, fn(be) {
+    let header = be.to in
+    let latch  = be.from in
+    let body_keys = collect_loop_body(header, latch, cfg.pred_map) in
+    let body_set  = list.fold(body_keys, {}, fn(acc, k){ rec.set(acc, k, true) }) in
+    let preheader = find_preheader(header, cfg.pred_map, body_set) in
+    let exits     = find_exits(body_set, cfg.succ_map) in
+    let body_labels = list.map(body_keys, fn(k){
+      list.fold(str.chars(k), 0, fn(n, c){
+        n * 10 + (str.char_code(c, 0) - 48)
+      })
+    }) in
+    { header: header, latch: latch, preheader: preheader,
+      body: body_labels, exits: exits }
+  })
+}
+
+// ── Induction variable analysis ───────────────────────────────────
+// An IV is a register that:
+//   1. Has a phi-like definition at the loop header (from preheader and latch)
+//   2. Is updated by adding/subtracting a constant in the loop body
+//
+// In FARD's closure-based loops, the loop state variable is the closure
+// argument. We look for CopyI64 in the latch block that feeds back to
+// the header's initial value.
+//
+// Pattern: preheader emits ImmI64(init) -> header uses it as loop var
+//          latch emits AddI64(var, step) -> CopyI64 -> back to header
+
+fn find_iv_in_block(block) {
+  // Look for AddI64/SubI64 where one operand is the loop variable
+  list.filter(block.insts, fn(i){
+    i.op == "AddI64" || i.op == "SubI64"
+  })
+}
+
+fn analyze_iv(loop_info, blocks) {
+  // Find the latch block
+  let latch_blk = list.find(blocks, fn(b){ b.label == loop_info.latch }) in
+  if !rec.has(latch_blk, "some") then []
+  else
+    let latch = latch_blk.some in
+    let updates = find_iv_in_block(latch) in
+    list.map(updates, fn(upd) {
+      // Find the initial value: look for ImmI64 in preheader
+      let pre_blk = list.find(blocks, fn(b){ b.label == loop_info.preheader }) in
+      let init = if rec.has(pre_blk, "some") then
+        let imms = list.filter(pre_blk.some.insts, fn(i){ i.op == "ImmI64" }) in
+        if list.len(imms) > 0 then list.get(imms, 0).val else 0
+      else 0 in
+      { reg: upd.dst, op: upd.op,
+        lhs: if rec.has(upd,"lhs") then upd.lhs else -1,
+        rhs: if rec.has(upd,"rhs") then upd.rhs else -1,
+        init: init }
+    })
+}
+
+
+// ── IV analysis via step closure ─────────────────────────────────
+// In FARD while loops the IV update lives inside the step closure.
+// Pattern: step closure has AddI64(param0, ImmI64(step)) as its body.
+
+fn find_step_closure_iv(latch_block, all_funcs) {
+  let calls = list.filter(latch_block.insts, fn(i){ i.op == "CallIndirect" }) in
+  if list.len(calls) == 0 then []
+  else
+    list.flatten(list.map(all_funcs, fn(fn_) {
+      if list.len(fn_.blocks) != 1 then []
+      else
+        let b = list.get(fn_.blocks, 0) in
+        let adds = list.filter(b.insts, fn(i){ i.op == "AddI64" || i.op == "SubI64" }) in
+        let imms = list.filter(b.insts, fn(i){ i.op == "ImmI64" }) in
+        if list.len(adds) == 1 && list.len(imms) >= 1 then
+          let add = list.get(adds, 0) in
+          let imm = list.get(imms, 0) in
+          [{ reg: add.dst, op: add.op,
+             step: if rec.has(imm,"val") then imm.val else 1,
+             init: 0, source: fn_.name }]
+        else []
+    }))
+}
+
+fn analyze_iv_with_closures(loop_info, blocks, all_funcs) {
+  let base_ivs = analyze_iv(loop_info, blocks) in
+  if list.len(base_ivs) > 0 then base_ivs
+  else
+    let latch_blk = list.find(blocks, fn(b){ b.label == loop_info.latch }) in
+    if !rec.has(latch_blk, "some") then []
+    else
+      let closure_ivs = find_step_closure_iv(latch_blk.some, all_funcs) in
+      let pre_blk = list.find(blocks, fn(b){ b.label == loop_info.preheader }) in
+      let init = if rec.has(pre_blk, "some") then
+        let imms = list.filter(pre_blk.some.insts, fn(i){ i.op == "ImmI64" }) in
+        if list.len(imms) > 0 then list.get(imms, 0).val else 0
+      else 0 in
+      list.map(closure_ivs, fn(iv){ rec.set(iv, "init", init) })
+}
+
+// ── Module-level loop analysis ────────────────────────────────────
+
+fn analyze_loops_module(m, cfg_map) {
+  { entry: m.entry,
+    funcs: list.map(m.funcs, fn(f) {
+      let cfg = if rec.has(cfg_map, f.name) then rec.get(cfg_map, f.name)
+        else { idom: {}, pred_map: {}, succ_map: {}, dom_frontiers: {}, rpo: [] } in
+      let loops = detect_loops_func(f, cfg) in
+      let loops_with_iv = list.map(loops, fn(lp) {
+        rec.set(lp, "ivs", analyze_iv_with_closures(lp, f.blocks, m.funcs))
+      }) in
+      { name: f.name, loops: loops_with_iv }
+    })
+  }
+}
+
+export { detect_loops_func, analyze_loops_module, analyze_iv,
+         analyze_iv_with_closures, find_step_closure_iv,
+         find_back_edges, dominates, block_succs }
