@@ -16,6 +16,7 @@ import("../orgntr_prim/vmir_sched")       as sched
 import("../orgntr_prim/ocir_gvn")       as gvn
 import("../orgntr_prim/ocir_memssa")     as memssa
 import("../orgntr_prim/ocir_alias")      as alias_ana
+import("../orgntr_prim/ocir_dse")        as dse
 import("../orgntr_prim/ocir_domtree")    as domtree
 import("../orgntr_prim/ocir_gvn_mem")    as gvn_mem
 import("../orgntr_prim/ocir_sccp")      as sccp
@@ -50,6 +51,7 @@ fn compile_module(src) {
   let ocir_mod = opt.opt_module(gvn.gvn_module(sccp.sccp_module(opt.opt_module(ocir_mod)))) in
   let ocir_mod = memssa.elim_redundant_loads(ocir_mod) in
   let ocir_mod = alias_ana.alias_aware_load_elim(ocir_mod) in
+  let ocir_mod = dse.dse_module(ocir_mod) in
   let ocir_mod = dfe.dfe_module(ocir_mod) in
   let vmir_mod = sched.schedule_module(vmir_sel.sel_module(ocir_mod)) in
   let omir_mod = vmir_lower.lower_module(vmir_mod) in
@@ -75,6 +77,7 @@ fn compile_and_emit(src, out_path) {
   let ocir_mod = opt.opt_module(gvn.gvn_module(sccp.sccp_module(opt.opt_module(ocir_mod)))) in
   let ocir_mod = memssa.elim_redundant_loads(ocir_mod) in
   let ocir_mod = alias_ana.alias_aware_load_elim(ocir_mod) in
+  let ocir_mod = dse.dse_module(ocir_mod) in
   let ocir_mod = dfe.dfe_module(ocir_mod) in
   let vmir_mod = sched.schedule_module(vmir_sel.sel_module(ocir_mod)) in
   let omir_mod = vmir_lower.lower_module(vmir_mod) in

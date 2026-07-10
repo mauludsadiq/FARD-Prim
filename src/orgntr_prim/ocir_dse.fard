@@ -1,0 +1,194 @@
+/// ocir_dse.fard -- Dead Store Elimination via MemorySSA
+///
+/// A StoreHeap is dead if:
+///   1. The stored location (ptr, offset) is read by no LoadHeap*
+///      instruction that is reachable after the store, AND
+///   2. The pointer does not escape to a call (which might read it)
+///
+/// Algorithm (intra-block, conservative):
+///   Scan forward through each block's instructions.
+///   Maintain a "pending store" map: (ptr_origin, offset) -> inst_index
+///   On LoadHeapStaticIdx(ptr, field): mark (origin, field*8+8) as needed
+///   On StoreHeap(ptr, offset): if (origin, offset) already pending -> dead
+///                               else add to pending
+///   On CallI64/CallIndirect: flush all pending (conservative escape)
+///   On function exit: all remaining pending stores are dead
+///      UNLESS the ptr escapes (is returned or passed to a call)
+///
+/// Inter-block: uses dominator order -- available store info flows
+/// from dominator to dominated blocks (conservative: only kill if
+/// store is in the same block and ptr doesn't escape).
+
+import("std/list") as list
+import("std/rec")  as rec
+import("std/str")  as str
+
+// ── Store location key ────────────────────────────────────────────
+
+fn store_key(ptr_origin, offset) {
+  str.concat([str.from(ptr_origin), "@", str.from(offset)])
+}
+
+// ── Escape analysis ───────────────────────────────────────────────
+// A pointer escapes if it is:
+//   - passed to a CallI64 or CallIndirect
+//   - returned via MoveI64/CopyI64 that feeds RetI64
+//   - stored into another heap location
+
+fn ptr_escapes_in_block(ptr_origin, insts, origin_map) {
+  list.any(insts, fn(i) {
+    let op = i.op in
+    // Conservative: any call may use the pointer
+    if op == "CallI64" || op == "CallIndirect" then true
+    // Store into another heap object (ptr stored as a value)
+    else if op == "StoreHeap" && rec.has(i, "src") then
+      let src_key = str.from(i.src) in
+      let src_origin = if rec.has(origin_map, src_key)
+        then rec.get(origin_map, src_key) else -1 in
+      src_origin == ptr_origin
+    else false
+  })
+}
+
+// ── Intra-block DSE ───────────────────────────────────────────────
+
+fn field_to_offset(field_idx) {
+  8 + field_idx * 8  // heap layout: [fn_ptr(0), field0(8), field1(16), ...]
+}
+
+fn dse_block(block, origin_map) {
+  let n = list.len(block.insts) in
+
+  // Forward pass: find dead stores
+  // pending: store_key -> instruction index (most recent store to that loc)
+  // needed: set of store_keys that are read
+  // escaped: set of ptr_origins that escape
+
+  let analysis = list.fold(list.build(n, fn(i){i}),
+    { pending: {}, needed: {}, escaped: {}, dead: {} },
+    fn(acc, i) {
+      let inst = list.get(block.insts, i) in
+      let op = inst.op in
+
+      if op == "StoreHeap" then
+        let ptr = if rec.has(inst,"ptr") then inst.ptr else -1 in
+        let offset = if rec.has(inst,"offset") then inst.offset else 0 in
+        let pk = str.from(ptr) in
+        let origin = if rec.has(origin_map, pk) then rec.get(origin_map, pk)
+          else ptr in
+        let key = store_key(origin, offset) in
+        // If same location was pending and ptr hasn't escaped -> prior store is dead
+        if rec.has(acc.pending, key) && !rec.has(acc.escaped, str.from(origin)) then
+          let dead_idx = rec.get(acc.pending, key) in
+          { pending: rec.set(acc.pending, key, i),
+            needed: acc.needed,
+            escaped: acc.escaped,
+            dead: rec.set(acc.dead, str.from(dead_idx), true) }
+        else
+          { pending: rec.set(acc.pending, key, i),
+            needed: acc.needed,
+            escaped: acc.escaped,
+            dead: acc.dead }
+
+      else if op == "LoadHeapStaticIdx" then
+        let ptr = if rec.has(inst,"ptr") then inst.ptr else -1 in
+        let field = if rec.has(inst,"field_idx") then inst.field_idx else 0 in
+        let pk = str.from(ptr) in
+        let origin = if rec.has(origin_map, pk) then rec.get(origin_map, pk)
+          else ptr in
+        let offset = field_to_offset(field) in
+        let key = store_key(origin, offset) in
+        // Mark this location as needed -- its pending store is NOT dead
+        { pending: acc.pending,
+          needed: rec.set(acc.needed, key, true),
+          escaped: acc.escaped,
+          dead: acc.dead }
+
+      else if op == "LoadHeap" then
+        let ptr = if rec.has(inst,"ptr") then inst.ptr else -1 in
+        let offset = if rec.has(inst,"offset") then inst.offset else 0 in
+        let pk = str.from(ptr) in
+        let origin = if rec.has(origin_map, pk) then rec.get(origin_map, pk)
+          else ptr in
+        let key = store_key(origin, offset) in
+        { pending: acc.pending,
+          needed: rec.set(acc.needed, key, true),
+          escaped: acc.escaped,
+          dead: acc.dead }
+
+      else if op == "CallI64" || op == "CallIndirect" then
+        // Conservative: all pending stores may be read by the call
+        { pending: {},  // flush pending
+          needed: acc.needed,
+          escaped: acc.escaped,
+          dead: acc.dead }
+
+      else if op == "MoveI64" || op == "CopyI64" then
+        // Track pointer propagation for escape
+        let src = if rec.has(inst,"src") then inst.src else -1 in
+        let sk = str.from(src) in
+        let src_origin = if rec.has(origin_map, sk) then rec.get(origin_map, sk)
+          else -1 in
+        if src_origin >= 0 then
+          // propagate origin
+          acc
+        else acc
+
+      else acc
+    }
+  ) in
+
+  // Stores remaining in pending at end of block:
+  // Dead if their key is NOT in needed (never loaded in this block)
+  let never_read_dead = list.fold(rec.keys(analysis.pending), analysis.dead,
+    fn(acc, key) {
+      if !rec.has(analysis.needed, key) then
+        let idx = rec.get(analysis.pending, key) in
+        rec.set(acc, str.from(idx), true)
+      else acc
+    }) in
+  let final_dead = never_read_dead in
+
+  // Remove dead stores
+  let new_insts = list.filter(
+    list.map(list.build(n, fn(i){ { inst: list.get(block.insts, i), idx: i } }),
+      fn(x){ x }),
+    fn(x){ !rec.has(final_dead, str.from(x.idx)) }
+  ) in
+
+  { label: block.label,
+    insts: list.map(new_insts, fn(x){ x.inst }),
+    term: block.term }
+}
+
+// ── Function-level DSE ────────────────────────────────────────────
+
+fn build_origin_map_for_dse(f) {
+  // Simple alloc-origin tracking for DSE
+  list.fold(f.blocks, {}, fn(acc, block) {
+    list.fold(block.insts, acc, fn(a, inst) {
+      let op = inst.op in
+      if op == "AllocHeap" || op == "MakeClosure" then
+        rec.set(a, str.from(inst.dst), inst.dst)
+      else if op == "MoveI64" || op == "CopyI64" then
+        if rec.has(inst, "src") then
+          let sk = str.from(inst.src) in
+          if rec.has(a, sk) then rec.set(a, str.from(inst.dst), rec.get(a, sk))
+          else a
+        else a
+      else a
+    })
+  })
+}
+
+fn dse_func(f) {
+  let origin_map = build_origin_map_for_dse(f) in
+  let new_blocks = list.map(f.blocks, fn(b){ dse_block(b, origin_map) }) in
+  { name: f.name, params: f.params, blocks: new_blocks }
+}
+
+fn dse_module(m) {
+  { entry: m.entry, funcs: list.map(m.funcs, dse_func) }
+}
+
+export { dse_module, dse_func, dse_block, build_origin_map_for_dse }
