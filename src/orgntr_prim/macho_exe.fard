@@ -275,16 +275,18 @@ fn find_func_offset(funcs, name) {
   if rec.has(found, "some") then found.some.base else 0
 }
 
-fn alloc_stub_size() { 45 }  // bytes in fard_alloc_stub_gc (with bounds check)
-fn gc_entry_stub_size() { 104 }  // bytes in entry_stub_text_gc
+fn alloc_stub_size() { 53 }  // bytes in fard_alloc_stub_gc
+fn gc_stub_size()    { 406 } // gc_trigger+mark_object+mark_roots+sweep
+fn gc_entry_stub_size() { 108 }  // bytes in entry_stub_text_gc
 
 fn build_text(linked, entry_func) {
   let real_entry = linked.entry in
   let func_off   = find_func_offset(linked.funcs, real_entry) in
-  let total_off  = gc_entry_stub_size() + alloc_stub_size() + func_off in
+  let total_off  = gc_entry_stub_size() + alloc_stub_size() + gc_stub_size() + func_off in
   let entry_stub = enc.entry_stub_text_gc(total_off, heap_bump_ptr_vmaddr()) in
   let alloc_stub = enc.fard_alloc_stub_gc(heap_bump_ptr_vmaddr()) in
-  list.concat([entry_stub, alloc_stub, linked.text])
+  let gc_stub    = enc.fard_gc_stub(heap_bump_ptr_vmaddr()) in
+  list.concat([entry_stub, alloc_stub, gc_stub, linked.text])
 }
 
 fn build_symtab_with_stub(linked, stub_size) {

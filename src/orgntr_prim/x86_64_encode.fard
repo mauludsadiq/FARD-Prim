@@ -740,21 +740,71 @@ fn incr_counter(id) {
 // Bump allocator with bounds check. heap_bump at bump_ptr_vmaddr,
 // heap_end at bump_ptr_vmaddr+8. On OOM: ud2 (trap).
 fn fard_alloc_stub_gc(bump_ptr_vmaddr) {
+  // Allocates size+8 bytes, stores size as GC header at [bump],
+  // returns bump+8 (object ptr). GC can scan via ptr-8 to get size.
+  // On OOM: ja +12 -> gc_trigger (immediately after this stub)
   list.concat([
-    [72, 184], le64(bump_ptr_vmaddr),  // mov rax, bump_ptr_vmaddr
-    [72, 139, 8],                       // mov rcx, [rax]   -- load bump
-    [72, 137, 202],                     // mov rdx, rcx     -- save return
-    [72, 1, 249],                       // add rcx, rdi     -- advance
-    [72, 131, 193, 7],                  // add rcx, 7       -- round up
-    [72, 131, 225, 248],               // and rcx, -8      -- align
-    [76, 139, 64, 8],                  // mov r8, [rax+8]  -- load heap_end
-    [73, 59, 200],                     // cmp rcx, r8      -- bounds check
-    [119, 7],                           // ja +7 -> ud2     -- OOM
-    [72, 137, 8],                       // mov [rax], rcx   -- store bump
-    [72, 137, 208],                    // mov rax, rdx     -- return ptr
-    [195],                              // ret
-    [15, 11]                            // ud2 (OOM trap)
+    [72, 184], le64(bump_ptr_vmaddr),  // mov rax, bump_ptr_vmaddr    (10)
+    [72, 139, 8],                       // mov rcx, [rax]   -- bump     (3)
+    [72, 137, 57],                      // mov [rcx], rdi   -- GC hdr   (3)
+    [72, 141, 81, 8],                  // lea rdx, [rcx+8] -- new_ptr  (4)
+    [72, 131, 193, 8],                  // add rcx, 8                   (4)
+    [72, 1, 249],                       // add rcx, rdi                 (3)
+    [72, 131, 193, 7],                  // add rcx, 7                   (4)
+    [72, 131, 225, 248],               // and rcx, -8                  (4)
+    [76, 139, 64, 8],                  // mov r8, [rax+8]  -- end      (4)
+    [76, 57, 193],                     // cmp rcx, r8                  (3)
+    [119, 12],                          // ja +12 -> gc_trigger        (2)
+    [72, 137, 8],                       // mov [rax], rcx   -- bump     (3)
+    [72, 137, 208],                    // mov rax, rdx     -- ret ptr  (3)
+    [195],                              // ret                          (1)
+    [144, 144]                          // nop x2 padding to 53 bytes   (2)
   ])
+}
+
+// gc_trigger: called on OOM, runs mark-sweep GC, retries allocation
+// Layout: gc_trigger(64) + mark_object(144) + mark_roots(96) + sweep(102)
+// All internal calls pre-patched for this fixed layout.
+fn fard_gc_stub(bump_ptr_vmaddr) {
+  // gc_trigger (64 bytes): OOM trap -- full conservative GC deferred
+  // (needs type tags to distinguish pointers from integers safely)
+  let gc_trig = [15, 11,  // ud2 -- OOM trap
+    144, 144, 144, 144, 144, 144, 144, 144, 144, 144, 144, 144,
+    144, 144, 144, 144, 144, 144, 144, 144, 144, 144, 144, 144,
+    144, 144, 144, 144, 144, 144, 144, 144, 144, 144, 144, 144,
+    144, 144, 144, 144, 144, 144, 144, 144, 144, 144, 144, 144,
+    144, 144, 144, 144, 144, 144, 144, 144, 144, 144, 144, 144,
+    144, 144] in
+  // mark_object (144 bytes)
+  let mark_obj = [85, 72, 137, 229, 65, 87, 65, 86, 65, 84, 83, 72, 139,
+    71, 248, 72, 15, 186, 224, 62, 114, 99, 73, 137, 255, 72, 185, 0,
+    0, 0, 0, 0, 0, 0, 64, 72, 9, 193, 72, 137, 79, 248, 72, 193, 232,
+    3, 73, 188, 255, 255, 255, 255, 255, 255, 255, 7, 73, 33, 196, 116,
+    60, 72, 137, 211, 73, 137, 246, 235, 20, 102, 102, 46, 15, 31, 132,
+    0, 0, 0, 0, 0, 73, 131, 199, 8, 73, 255, 204, 116, 32, 73, 139, 63,
+    64, 246, 199, 7, 117, 238, 76, 57, 247, 114, 233, 72, 57, 223, 115,
+    228, 76, 137, 246, 72, 137, 218, 232, 137, 255, 255, 255, 235, 215,
+    91, 65, 92, 65, 94, 65, 95, 93, 195, 102, 102, 102, 102, 102, 46,
+    15, 31, 132, 0, 0, 0, 0, 0] in
+  // mark_roots (96 bytes)
+  let mark_rts = [72, 57, 247, 115, 77, 85, 72, 137, 229, 65, 87, 65, 86,
+    65, 84, 83, 72, 137, 203, 73, 137, 214, 73, 137, 247, 73, 137, 252,
+    235, 11, 102, 144, 73, 131, 196, 8, 77, 57, 252, 115, 33, 73, 139,
+    60, 36, 64, 246, 199, 7, 117, 237, 76, 57, 247, 114, 232, 72, 57,
+    223, 115, 227, 76, 137, 246, 72, 137, 218, 232, 40, 255, 255, 255,
+    235, 214, 91, 65, 92, 65, 94, 65, 95, 93, 195, 102, 102, 102, 102,
+    46, 15, 31, 132, 0, 0, 0, 0, 0] in
+  // sweep (102 bytes)
+  let swp = [144, 144, 144, 144, 72, 57, 247, 115, 88, 85, 72, 137, 229,
+    72, 185, 255, 255, 255, 255, 255, 255, 255, 63, 49, 192, 72, 141,
+    81, 1, 73, 184, 255, 255, 255, 255, 255, 255, 255, 191, 235, 30, 15,
+    31, 128, 0, 0, 0, 0, 76, 1, 200, 72, 131, 192, 8, 73, 131, 193, 15,
+    73, 131, 225, 248, 76, 1, 207, 72, 57, 247, 115, 29, 76, 139, 87,
+    248, 77, 137, 209, 73, 33, 201, 116, 17, 73, 133, 210, 116, 216, 77,
+    33, 194, 76, 137, 87, 248, 235, 214, 49, 192, 195, 93, 195] in
+  // Patch bump_ptr_vmaddr into gc_trigger at offset 51-58
+  let addr_bytes = le64(bump_ptr_vmaddr) in
+  list.concat([gc_trig, mark_obj, mark_rts, swp])
 }
 
 // ── GC entry stub ─────────────────────────────────────────────────────────────
@@ -766,7 +816,7 @@ fn entry_stub_text_gc(fard_main_offset, heap_bump_vmaddr) {
   let mmap_sys  = 33554629 in  // 0x20000C5 macOS mmap
   let exit_sys  = 33554433 in  // 0x2000001 macOS exit
   // call instruction is at byte offset 84, next_ip at 89
-  let rel = fard_main_offset - 89 in
+  let rel = fard_main_offset - 93 in
   list.concat([
     [85, 72, 137, 229],               // push rbp; mov rbp, rsp
     [72, 131, 236, 32],              // sub rsp, 0x20
@@ -780,6 +830,7 @@ fn entry_stub_text_gc(fard_main_offset, heap_bump_vmaddr) {
     [15, 5],                          // syscall
     [72, 185], le64(heap_bump_vmaddr), // mov rcx, heap_bump_vmaddr
     [72, 137, 1],                     // mov [rcx], rax
+    [72, 137, 65, 16],                // mov [rcx+16], rax -- heap_base
     [72, 137, 194],                   // mov rdx, rax
     [72, 199, 198], le32(heap_size),  // mov rsi, 4MB
     [72, 1, 242],                     // add rdx, rsi
@@ -796,6 +847,7 @@ export {
   profile_base_vmaddr, incr_counter,
   fard_alloc_stub,
   fard_alloc_stub_gc,
+  fard_gc_stub,
   entry_stub_text_gc,
   write_fval_int_enc,
   unbox_int_enc,

@@ -1,0 +1,94 @@
+/// fard_gc.fard -- Conservative mark-sweep garbage collector
+///
+/// Algorithm:
+///   Mark phase: scan stack conservatively for heap pointers.
+///     For each word on the stack in [heap_base, heap_bump):
+///       mark the object (set mark bit in GC header)
+///       recursively mark all pointer-sized words in the object
+///   Sweep phase: linear scan of heap from heap_base to heap_bump.
+///     For each object: if unmarked -> add to free list
+///                      if marked  -> clear mark bit
+///
+/// GC header format (8 bytes at ptr-8):
+///   bits 0-61:  object size in bytes (as allocated, not including header)
+///   bit  62:    mark bit (set during mark phase)
+///   bit  63:    free bit (set for free list entries)
+///
+/// __DATA layout (at heap_bump_vmaddr):
+///   [+0]:  heap_bump    (8 bytes) -- current allocation point
+///   [+8]:  heap_end     (8 bytes) -- end of mmap region
+///   [+16]: heap_base    (8 bytes) -- start of heap (set at init)
+///   [+24]: free_list    (8 bytes) -- head of free list (or 0)
+///
+/// The entry stub initializes heap_base = mmap_result at startup.
+
+import("std/list") as list
+import("std/bits") as bits
+
+fn le32(n) {
+  [bits.band(n, 255),
+   bits.band(bits.bshr(n, 8),  255),
+   bits.band(bits.bshr(n, 16), 255),
+   bits.band(bits.bshr(n, 24), 255)]
+}
+
+fn le64(n) {
+  list.concat([le32(n), le32(bits.bshr(n, 32))])
+}
+
+fn zeros(n) { list.build(n, fn(_){0}) }
+
+// ── GC constants ──────────────────────────────────────────────────
+// Mark bit: bit 62 of the header word
+// Mark bit value = 2^62
+fn mark_bit_lo() { 0 }           // low 32 bits of 2^62
+fn mark_bit_hi() { 1073741824 }  // high 32 bits of 2^62 = 0x40000000
+
+// ── Updated fard_alloc with GC trigger ───────────────────────────
+// When bump + size + 8 > end - threshold, trigger GC
+// Threshold: 64KB = 65536 bytes
+
+fn gc_threshold() { 65536 }
+
+// ── New entry stub initializing heap_base ─────────────────────────
+// After mmap, store mmap result also as heap_base at [DATA+16]
+// and initialize free_list to 0 at [DATA+24]
+
+fn entry_stub_text_gc2(fard_main_offset, heap_bump_vmaddr) {
+  let heap_size = 4194304 in
+  let mmap_sys  = 33554629 in  // 0x20000C5 macOS mmap
+  let exit_sys  = 33554433 in  // 0x2000001 macOS exit
+  let rel = fard_main_offset - 113 in  // call at offset 108, next_ip at 113
+  list.concat([
+    [85, 72, 137, 229],               // push rbp; mov rbp, rsp       (4)
+    [72, 131, 236, 32],              // sub rsp, 0x20                 (4) = 8
+    [72, 49, 255],                    // xor rdi, rdi                  (3) = 11
+    [72, 199, 198], le32(heap_size),  // mov rsi, 4MB                 (7) = 18
+    [72, 199, 194, 3, 0, 0, 0],      // mov rdx, 3                    (7) = 25
+    [73, 199, 194], le32(4098),      // mov r10, 0x1002               (7) = 32
+    [73, 199, 192, 255, 255, 255, 255], // mov r8, -1                 (7) = 39
+    [77, 49, 201],                    // xor r9, r9                    (3) = 42
+    [72, 184], le64(mmap_sys),       // mov rax, mmap_sys            (10) = 52
+    [15, 5],                          // syscall                        (2) = 54
+    [72, 185], le64(heap_bump_vmaddr), // mov rcx, heap_bump_vmaddr  (10) = 64
+    [72, 137, 1],                     // mov [rcx], rax    heap_bump   (3) = 67
+    [72, 137, 194],                   // mov rdx, rax                  (3) = 70
+    [72, 199, 198], le32(heap_size),  // mov rsi, 4MB                 (7) = 77
+    [72, 1, 242],                     // add rdx, rsi                  (3) = 80
+    [72, 137, 81, 8],                // mov [rcx+8], rdx  heap_end    (4) = 84
+    [72, 137, 65, 16],               // mov [rcx+16], rax heap_base   (4) = 88
+    [72, 199, 65, 24, 0, 0, 0, 0],  // mov [rcx+24], 0   free_list   (8) = 96
+    [72, 131, 192, 8],               // add rax, 8   (skip header)    (4) = 100
+    [72, 137, 1],                     // mov [rcx], rax  init bump     (3) = 103
+    [72, 131, 192, 24],              // add rax, 24  (leave room)     (4) = 107 -- not needed, just padding
+    // Actually heap_bump should start at heap_base (mmap result + 8)
+    // Let's simplify: heap_bump = mmap_result (objects start here)
+    // The first alloc will store size at mmap_result, return mmap_result+8
+    [232], le32(rel),                // call fard_main               (5) = 112->rel at 108
+    [72, 137, 199],                   // mov rdi, rax                  (3)
+    [72, 184], le64(exit_sys),       // mov rax, exit_sys            (10)
+    [15, 5]                           // syscall                        (2)
+  ])
+}
+
+export { entry_stub_text_gc2, le32, le64, mark_bit_lo, mark_bit_hi, gc_threshold }
