@@ -1,0 +1,285 @@
+/// pe_exe.fard -- PE/COFF x86-64 executable emitter
+///
+/// Produces a minimal Windows x86-64 PE32+ executable (.exe):
+///   - DOS stub (64 bytes)
+///   - PE signature + COFF header + Optional header (PE32+)
+///   - .text section (code)
+///   - .idata section (import table for ExitProcess)
+///
+/// The entry stub calls ExitProcess(linked.entry_func_result) via IAT.
+/// No C runtime. No MSVCRT. Just kernel32.dll ExitProcess.
+///
+/// Layout:
+///   File 0: header (512 bytes, file-aligned)
+///   File 512: .text  (code, file-aligned to 512)
+///   File 1024: .idata (import table)
+///
+///   RVA  4096: .text
+///   RVA  8192: .idata
+
+import("std/list") as list
+import("std/bits") as bits
+import("std/str")  as str
+
+// ── Primitives ────────────────────────────────────────────────────
+
+fn le16(n) {
+  [bits.band(n, 255), bits.band(bits.bshr(n, 8), 255)]
+}
+
+fn le32(n) {
+  [bits.band(n, 255),
+   bits.band(bits.bshr(n, 8),  255),
+   bits.band(bits.bshr(n, 16), 255),
+   bits.band(bits.bshr(n, 24), 255)]
+}
+
+fn le64(n) {
+  list.concat([le32(n), le32(bits.bshr(n, 32))])
+}
+
+fn zeros(n) { list.build(n, fn(_){0}) }
+
+fn pad_to(data, size) {
+  list.concat([data, zeros(size - list.len(data))])
+}
+
+fn str_bytes(s) {
+  list.append(
+    list.map(list.build(str.len(s), fn(i){ str.char_code(s, i) }), fn(c){c}),
+    0)
+}
+
+// ── PE constants ──────────────────────────────────────────────────
+
+fn image_base()     { bits.bshl(1, 32) + bits.bshl(1, 30) }   // 0x140000000
+fn file_align()     { 512 }                 // 512
+fn sect_align()     { 4096 }                // 4096
+fn text_rva()       { 4096 }                // 4096
+fn idata_rva()      { 8192 }                // 8192
+fn text_foff()      { 512 }                 // 512
+fn idata_foff()     { 1024 }               // 1024
+
+// idata offsets within .idata section
+fn off_iat()        { 0 }
+fn off_idt()        { 16 }
+fn off_int()        { 56 }
+fn off_dllname()    { 72 }
+fn off_hintname()   { 86 }
+
+// ── DOS stub ──────────────────────────────────────────────────────
+// Minimal DOS stub: MZ header + e_lfanew=64
+
+fn dos_stub() {
+  let mz = [77, 90] in  // "MZ"
+  let pad58 = zeros(58) in
+  let e_lfanew = le32(64) in  // PE header at offset 64
+  list.concat([mz, pad58, e_lfanew])
+}
+
+// ── COFF header (20 bytes) ────────────────────────────────────────
+
+fn coff_header() {
+  list.concat([
+    le16(34404),  // Machine: AMD64
+    le16(2),       // NumberOfSections
+    le32(0),       // TimeDateStamp
+    le32(0),       // PointerToSymbolTable
+    le32(0),       // NumberOfSymbols
+    le16(240),     // SizeOfOptionalHeader
+    le16(34)   // Characteristics: EXECUTABLE | LARGE_ADDRESS_AWARE
+  ])
+}
+
+// ── Optional header (PE32+, 240 bytes) ───────────────────────────
+
+fn data_dir(rva, size) { list.concat([le32(rva), le32(size)]) }
+fn null_dir() { zeros(8) }
+
+fn optional_header(code_size, size_of_image) {
+  let std_fields = list.concat([
+    le16(523),    // Magic: PE32+
+    [14, 0],         // Linker version
+    le32(code_size), // SizeOfCode
+    le32(0),         // SizeOfInitializedData
+    le32(0),         // SizeOfUninitializedData
+    le32(text_rva()),// AddressOfEntryPoint
+    le32(text_rva()) // BaseOfCode
+  ]) in
+  let win_fields = list.concat([
+    le64(image_base()),  // ImageBase
+    le32(sect_align()),  // SectionAlignment
+    le32(file_align()),  // FileAlignment
+    le16(6), le16(0),    // OS version 6.0
+    le16(0), le16(0),    // Image version
+    le16(6), le16(0),    // Subsystem version 6.0
+    le32(0),             // Win32VersionValue
+    le32(size_of_image), // SizeOfImage
+    le32(file_align()),  // SizeOfHeaders
+    le32(0),             // CheckSum
+    le16(3),             // Subsystem: CUI (console)
+    le16(320),        // DllCharacteristics: NX_COMPAT|DYNAMIC_BASE
+    le64(1048576),       // SizeOfStackReserve (1048576)
+    le64(4096),          // SizeOfStackCommit
+    le64(1048576),       // SizeOfHeapReserve
+    le64(4096),          // SizeOfHeapCommit
+    le32(0),             // LoaderFlags
+    le32(16)             // NumberOfRvaAndSizes
+  ]) in
+  // 16 data directories
+  let dirs = list.concat([
+    null_dir(),                                           // 0 Export
+    data_dir(idata_rva() + off_idt(), 40),               // 1 Import
+    null_dir(), null_dir(), null_dir(), null_dir(),       // 2-5
+    null_dir(), null_dir(), null_dir(), null_dir(),       // 6-9
+    null_dir(), null_dir(),                               // 10-11
+    data_dir(idata_rva() + off_iat(), 8),                // 12 IAT
+    null_dir(), null_dir(), null_dir()                    // 13-15
+  ]) in
+  list.concat([std_fields, win_fields, dirs])
+}
+
+// ── Section header (40 bytes each) ───────────────────────────────
+
+fn section_header(name, vsize, vrva, raw_size, raw_off, chars) {
+  let name_bytes = pad_to(
+    list.map(list.build(str.len(name), fn(i){ str.char_code(name, i) }), fn(c){c}),
+    8) in
+  list.concat([
+    name_bytes,
+    le32(vsize),    // VirtualSize
+    le32(vrva),     // VirtualAddress
+    le32(raw_size), // SizeOfRawData
+    le32(raw_off),  // PointerToRawData
+    le32(0),        // PointerToRelocations
+    le32(0),        // PointerToLinenumbers
+    le16(0),        // NumberOfRelocations
+    le16(0),        // NumberOfLinenumbers
+    le32(chars)     // Characteristics
+  ])
+}
+
+// ── .idata section ────────────────────────────────────────────────
+// Import table for kernel32.dll / ExitProcess
+
+fn idata_section() {
+  let idata = zeros(112) in
+
+  // IAT[0] = RVA of hint/name entry
+  let iat = le64(idata_rva() + off_hintname()) in
+
+  // IDT entry (20 bytes)
+  let idt = list.concat([
+    le32(idata_rva() + off_int()),      // OriginalFirstThunk
+    le32(0),                             // TimeDateStamp
+    le32(0),                             // ForwarderChain
+    le32(idata_rva() + off_dllname()),   // Name
+    le32(idata_rva() + off_iat())        // FirstThunk (IAT)
+  ]) in
+  let idt_null = zeros(20) in  // NULL terminator
+
+  // INT[0] = same as IAT[0]
+  let int_entry = le64(idata_rva() + off_hintname()) in
+
+  // DLL name
+  let dll_name = str_bytes("KERNEL32.DLL") in
+
+  // Hint/Name: hint(2) + "ExitProcess\0"
+  let hint_name = list.concat([[148, 0], str_bytes("ExitProcess")]) in
+
+  // Assemble: pad each part to its offset
+  let s0  = iat in                          // offset 0:  IAT (8 bytes)
+  let s1  = zeros(8) in                     // offset 8:  IAT null terminator
+  let s2  = idt in                          // offset 16: IDT entry (20 bytes)
+  let s3  = idt_null in                     // offset 36: IDT null (20 bytes)
+  let s4  = zeros(off_int() - 56) in        // pad to offset 56
+  let s5  = int_entry in                    // offset 56: INT (8 bytes)
+  let s6  = zeros(off_dllname() - 64) in    // pad to offset 72
+  let s7  = dll_name in                     // offset 72: DLL name (13 bytes)
+  let s8  = zeros(off_hintname() - 85) in   // pad to offset 86
+  let s9  = hint_name in                    // offset 86: hint+name (14 bytes)
+
+  list.concat([s0, s1, s2, s3, s4, s5, s6, s7, s8, s9])
+}
+
+// ── Entry stub ────────────────────────────────────────────────────
+// Windows x64 entry: call ExitProcess(return_value)
+// sub  rsp, 40        (shadow space)
+// mov  rcx, <offset>    (jump to real entry)
+// call [rip + disp]     (ExitProcess via IAT)
+
+fn pe_entry_stub(func_offset) {
+  // sub rsp, 40
+  let sub_rsp = [72, 131, 236, 40] in
+  // call <func_offset> relative to after this instruction
+  // We want to call the actual entry function first, get result in rax
+  // then pass rax to ExitProcess
+  // 
+  // Simplified: just set rcx to func_offset result
+  // For now: call the main function, pass result to ExitProcess
+  //
+  // Layout:
+  //   0: sub rsp, 40            (4 bytes)
+  //   4: call rel32               (5 bytes) -> calls fard entry
+  //   9: mov rcx, rax             (3 bytes) -> move result to arg1
+  //   12: call [rip+disp]         (6 bytes) -> ExitProcess
+  //
+  // call rel32: E8 disp32
+  // next_ip after call = text_rva() + 9
+  // target = text_rva() + 24 + func_offset (after stub)
+  let call_next_ip = text_rva() + 9 in
+  let target_rva   = text_rva() + 24 + func_offset in  // 24 = stub size
+  let call_disp    = target_rva - call_next_ip in
+  let call_fard    = list.concat([[232], le32(call_disp)]) in
+  // mov rcx, rax
+  let mov_rcx_rax  = [72, 137, 193] in
+  // call [rip + disp] -> ExitProcess via IAT
+  // next_ip = text_rva() + 18
+  let ep_call_next = text_rva() + 18 in
+  let iat_rva      = idata_rva() + off_iat() in
+  let ep_disp      = iat_rva - ep_call_next in
+  let call_ep      = list.concat([[255, 21], le32(ep_disp)]) in
+  list.concat([sub_rsp, call_fard, mov_rcx_rax, call_ep, zeros(6)])
+}
+
+// ── Main emitter ──────────────────────────────────────────────────
+
+fn emit_pe(linked, entry_func) {
+  // Find entry function offset
+  let func_names = list.map(linked.funcs, fn(f){ f.name }) in
+  let entry_off  = list.fold(
+    list.build(list.len(linked.funcs), fn(i){i}), 0,
+    fn(acc, i) {
+      if list.get(func_names, i) == entry_func
+        then list.get(linked.funcs, i).base
+        else acc
+    }) in
+
+  let stub      = pe_entry_stub(entry_off) in
+  let stub_size = list.len(stub) in
+  let text_data = list.concat([stub, linked.text]) in
+  let code_size = list.len(text_data) in
+
+  let idata     = idata_section() in
+  let size_of_image = sect_align() * 3 in  // 12288
+
+  // Headers
+  let dos       = dos_stub() in
+  let pe_sig    = [80, 69, 0, 0] in  // "PE\0\0"
+  let coff      = coff_header() in
+  let opt       = optional_header(code_size, size_of_image) in
+  let text_sh   = section_header(".text",  code_size,       text_rva(),
+    file_align(), text_foff(),  1610612768) in
+  let idata_sh  = section_header(".idata", list.len(idata), idata_rva(),
+    file_align(), idata_foff(), 3221225536) in
+
+  let header    = pad_to(list.concat([dos, pe_sig, coff, opt, text_sh, idata_sh]),
+    file_align()) in
+  let text_pad  = pad_to(text_data, file_align()) in
+  let idata_pad = pad_to(idata, file_align()) in
+
+  list.concat([header, text_pad, idata_pad])
+}
+
+export { emit_pe, pe_entry_stub, idata_section,
+         text_rva, idata_rva, image_base, le16, le32, le64 }
