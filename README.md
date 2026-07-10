@@ -207,12 +207,15 @@ Achieved via:
   - Loop strength reduction: non-power-of-2 multipliers -> addition chains;
     add_chain_for handles {3,5,6,7,9,10,12,15}; s*3 -> 2 adds;
     verified: MulI64 eliminated from step closure
+  - Dead store elimination: intra-block DSE via alloc-origin tracking;
+    StoreHeap never-read -> eliminated; {a:n, b:n+1} reading only .a
+    eliminates 2 of 3 stores (fn_ptr@0 and b@16); 11/11 regression PASS
   - ARM64 parity: full VMIR pipeline, callee-saved reg handling,
     large literal encoding via bits.bshl (FARD truncates >2^31)
 
 ## Source
 
-14,991 lines of FARD across 65 files in src/orgntr_prim/.
+15,188 lines of FARD across 66 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (775 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -237,6 +240,7 @@ Achieved via:
    macho_dwarf.fard        DWARF4 debug info emitter (290 lines)
    ast_licm.fard           loop invariant code motion, AST level (216 lines)
    ocir_dfe.fard           dead function elimination post-inline (53 lines)
+   ocir_dse.fard           dead store elimination, intra-block (188 lines)
    fard_source_to_native_arm64.fard ARM64 ELF64 pipeline (47 lines)
    ast_unroll.fard         loop unrolling, constant-bound while (193 lines)
    ocir_sr.fard            strength reduction, mul->add + small-k chains (195 lines)
@@ -246,10 +250,10 @@ Achieved via:
 
 ## Next
 
-   Vectorization (SIMD instruction emission for counted loops)
    PE/COFF target (Windows x86-64)
-   Dead store elimination via MemorySSA
    Nested loop detection and loop interchange
+   Vectorization (requires typed arrays first)
+   Cross-block DSE (extend to multi-block functions)
 
 ## Repos
 
