@@ -37,6 +37,7 @@ All produce the same native binary. Same IR, same backend, same output.
 | Linux x86-64 | ELF64  | 11/11  |
 | Linux ARM64  | ELF64  | 6/6    |
 | macOS ARM64  | Mach-O | blocked by AppleSystemPolicy (macOS 15) |
+| Windows x64  | PE32+  | verified structure; run on Wine/Windows  |
 
 Linux targets tested via Docker on Ubuntu 22.04.
 
@@ -210,12 +211,17 @@ Achieved via:
   - Dead store elimination: intra-block DSE via alloc-origin tracking;
     StoreHeap never-read -> eliminated; {a:n, b:n+1} reading only .a
     eliminates 2 of 3 stores (fn_ptr@0 and b@16); 11/11 regression PASS
+  - PE/COFF target: Windows x86-64 PE32+ executable emitter;
+    pe_exe.fard: DOS stub, COFF header, PE32+ optional header,
+    .text + .idata sections, ExitProcess import from kernel32.dll;
+    entry stub: call fard_main, mov rcx rax, call ExitProcess via IAT;
+    1536 bytes; verified MZ/PE/ImageBase/EntryPoint/sections
   - ARM64 parity: full VMIR pipeline, callee-saved reg handling,
     large literal encoding via bits.bshl (FARD truncates >2^31)
 
 ## Source
 
-15,188 lines of FARD across 66 files in src/orgntr_prim/.
+15,545 lines of FARD across 68 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (775 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -241,6 +247,8 @@ Achieved via:
    ast_licm.fard           loop invariant code motion, AST level (216 lines)
    ocir_dfe.fard           dead function elimination post-inline (53 lines)
    ocir_dse.fard           dead store elimination, intra-block (188 lines)
+   pe_exe.fard             PE32+ Windows x86-64 emitter (285 lines)
+   fard_source_to_pe.fard  FARD -> Windows PE pipeline (55 lines)
    fard_source_to_native_arm64.fard ARM64 ELF64 pipeline (47 lines)
    ast_unroll.fard         loop unrolling, constant-bound while (193 lines)
    ocir_sr.fard            strength reduction, mul->add + small-k chains (195 lines)
@@ -250,10 +258,10 @@ Achieved via:
 
 ## Next
 
-   PE/COFF target (Windows x86-64)
-   Nested loop detection and loop interchange
-   Vectorization (requires typed arrays first)
+   Wine/Windows validation of PE exit code
    Cross-block DSE (extend to multi-block functions)
+   Nested loop detection and loop interchange
+   Typed arrays (prerequisite for vectorization)
 
 ## Repos
 
