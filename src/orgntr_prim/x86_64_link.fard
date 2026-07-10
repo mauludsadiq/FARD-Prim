@@ -34,8 +34,8 @@ fn build_symbol_table(laid_out) {
 // base = base address of this function in the linked text
 // Returns { resolved: bool, text: patched_text }
 fn text_vmaddr() { 4294971392 }  // 0x100001000 (Mach-O default)
-fn alloc_stub_size() { 34 }
-fn entry_stub_size() { 24 }
+fn alloc_stub_size() { 45 }
+fn entry_stub_size() { 104 }
 fn fn_vmaddr(base_in_linked_text) {
   text_vmaddr() + entry_stub_size() + alloc_stub_size() + base_in_linked_text
 }
@@ -95,9 +95,9 @@ fn resolve_func_relocs(laid_out_entry, sym_table) {
 fn link_module(encoded_module) {
   let laid_out = layout_funcs(encoded_module.funcs) in
   let sym_table_base = build_symbol_table(laid_out) in
-  // Add fard_alloc at offset -34 in linked.text coords
+  // Add fard_alloc immediately before linked.text in linked-text coordinates
   // (it lives 34 bytes before linked.text, at full-text offset 24)
-  let alloc_offset_in_linked_text = 0 - 34 in
+  let alloc_offset_in_linked_text = 0 - alloc_stub_size() in
   let sym_table = rec.set(sym_table_base, "fard_alloc", alloc_offset_in_linked_text) in
   let linked_funcs = list.map(laid_out, fn(entry) {
     resolve_func_relocs(entry, sym_table)
