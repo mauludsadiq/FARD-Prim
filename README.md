@@ -36,7 +36,7 @@ All produce the same native binary. Same IR, same backend, same output.
 | macOS x86-64 | Mach-O | 11/11  |
 | Linux x86-64 | ELF64  | 11/11  |
 | Linux ARM64  | ELF64  | 6/6    |
-| macOS ARM64  | Mach-O | blocked by AppleSystemPolicy (macOS 15) |
+| macOS ARM64  | Mach-O | structurally correct; blocked by ASP on macOS 15 without provisioning profile |
 | Windows x64  | PE32+  | verified structure; run on Wine/Windows  |
 
 Linux targets tested via Docker on Ubuntu 22.04.
@@ -222,7 +222,7 @@ Achieved via:
 
 ## Source
 
-15,755 lines of FARD across 69 files in src/orgntr_prim/.
+15,794 lines of FARD across 69 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (775 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
