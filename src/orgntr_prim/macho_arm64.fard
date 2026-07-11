@@ -37,7 +37,7 @@ fn text_file_offset()     { 4096 }     // 0x1000
 fn data_file_offset()     { 8192 }     // 0x2000
 fn linkedit_file_offset() { 12288 }    // 0x3000
 
-fn entry_stub_size()  { 20 }
+fn entry_stub_size()  { entry_stub_size_arm64() }
 fn alloc_stub_size()  { enc.alloc_stub_size() }
 
 // ── Primitives ────────────────────────────────────────────────────────────────
@@ -165,8 +165,9 @@ fn lc_uuid() {
 }
 
 fn lc_build_version() {
-  // LC_BUILD_VERSION=0x32, platform=1(macOS), minos=14.0.0, sdk=14.0.0, ntools=0
-  list.concat([le32(50), le32(24), le32(1), le32(917504), le32(917504), le32(0)])
+  // LC_BUILD_VERSION=0x32, platform=1(macOS), minos=15.0.0, sdk=15.0.0, ntools=0
+  // cmdsize=32 (24 header + 8 for tools array even if empty, matches dyld expectation)
+  list.concat([le32(50), le32(32), le32(1), le32(983040), le32(983040), le32(0), le32(0), le32(0)])
 }
 
 fn lc_source_version() {
@@ -204,8 +205,21 @@ fn lc_code_signature(dataoff, datasize) {
 // Minimal __LINKEDIT: chained fixups, exports trie, symtab, strtab
 
 fn chained_fixups_data() {
-  // Minimal LC_DYLD_CHAINED_FIXUPS blob (56 bytes, all zeros except header)
-  list.concat([le32(3), le32(56), zeros(48)])
+  // dyld_chained_fixups_header (version=0, starts_off=32, imports_offset=48,
+  // symbols_offset=48, imports_count=0, imports_format=1, symbols_format=0)
+  // Must match what dyld expects: version=0, not 3
+  list.concat([
+    le32(0),   // fixups_version = 0
+    le32(32),  // starts_offset = 32 (points to dyld_chained_starts_in_image)
+    le32(48),  // imports_offset = 48
+    le32(48),  // symbols_offset = 48
+    le32(0),   // imports_count = 0
+    le32(1),   // imports_format = DYLD_CHAINED_IMPORT (1)
+    le32(0),   // symbols_format = 0
+    // dyld_chained_starts_in_image at offset 32:
+    le32(0),   // seg_count = 0
+    zeros(16)  // padding to 56 bytes
+  ])
 }
 
 fn exports_trie_data() {
@@ -239,17 +253,42 @@ fn find_func_offset(funcs, name) {
 import("std/rec") as rec
 
 fn entry_stub_arm64(fn_offset) {
-  // stp x29,x30,[sp,#-16]!  mov x29,sp  bl fard_main  movz x16,#1  svc #0x80
-  let rel_bytes = fn_offset - 8 in
-  let bl_instr_off = rel_bytes / 4 in
+  // stp x29,x30,[sp,#-16]!  mov x29,sp
+  // movz x19, #heap_lo; movk x19, #heap_hi1, lsl 16; ...  (init bump ptr)
+  // bl fard_main  movz x16,#1  svc #0x80
+  let heap_base = heap_base_vmaddr() in
+  let w0 = bits.band(heap_base, 65535) in
+  let w1 = bits.band(bits.bshr(heap_base, 16), 65535) in
+  let w2 = bits.band(bits.bshr(heap_base, 32), 65535) in
+  let w3 = bits.band(bits.bshr(heap_base, 48), 65535) in
+  let init_x19 = list.concat([
+    enc.movz(19, w0),
+    if w1 != 0 then enc.movk(19, w1, 16) else [],
+    if w2 != 0 then enc.movk(19, w2, 32) else [],
+    if w3 != 0 then enc.movk(19, w3, 48) else []
+  ]) in
+  let init_size = list.len(init_x19) in
+  // bl offset: from bl instruction to fard_main
+  // bl is at byte 8 + init_size, next instr at 8+init_size+4
+  let bl_off_bytes = fn_offset - (8 + init_size) in
+  let bl_instr_off = bl_off_bytes / 4 in
   let bl_enc = bits.bor(bits.bshl(148, 24), bits.band(bl_instr_off, 67108863)) in
   list.concat([
     enc.stp_fp_lr(),
     enc.mov_fp_sp(),
+    init_x19,
     enc.le32(bl_enc),
     enc.movz(16, 1),
     enc.le32(bits.bor(bits.bshl(54272, 16), 4097))
   ])
+}
+
+fn entry_stub_size_arm64() {
+  // 2 fixed instrs (stp+mov) + 3 init instrs (movz+movk+movk for 0x100002008)
+  // + bl + exit(2) = 8 instrs = 32 bytes
+  // heap_base = 0x100002008: w0=0x2008 w1=0 w2=1 w3=0 -> movz+movk(32) = 2 instrs
+  // Total: 2+2+1+2 = 7 instrs = 28 bytes
+  28
 }
 
 fn build_text(linked, entry_func) {
