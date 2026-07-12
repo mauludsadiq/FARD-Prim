@@ -77,7 +77,7 @@ Instrumented pipeline (fard_source_to_native_pgo.fard):
      -> ELF64 or Mach-O binary
 
 No external linker. No C runtime. No libSystem.
-Heap: 4MB mmap at startup (was 4KB static). Bounds-checked bump allocator.
+Heap: 4MB mmap at startup. Conservative mark-sweep GC. Bounds-checked bump allocator.
 
 ## IR layers
 
@@ -222,7 +222,7 @@ Achieved via:
 
 ## Source
 
-15,794 lines of FARD across 69 files in src/orgntr_prim/.
+15,826 lines of FARD across 69 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (775 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
