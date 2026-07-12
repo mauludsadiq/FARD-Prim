@@ -87,6 +87,10 @@ fn sel_inst(inst) {
     [vi_load_heap_dyn(inst.dst, inst.ptr, inst.idx)]
   else if op == "StoreHeap" then
     [vi_store_heap(inst.ptr, inst.offset, inst.src)]
+  else if op == "PrintStr" then
+    [{ op: "PrintStr", arg: vreg(inst.arg) }]
+  else if op == "PrintInt" then
+    [{ op: "PrintInt", arg: vreg(inst.arg) }]
   else if op == "AllocHeap" then
     [vi_alloc(inst.dst, inst.size)]
   else if op == "ConstStr" then

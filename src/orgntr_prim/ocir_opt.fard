@@ -32,6 +32,8 @@ fn subst_inst(inst, smap) {
   else if op == "CallIndirect" then
     { op: op, dst: inst.dst, closure_reg: subst_reg(inst.closure_reg, smap),
       args: list.map(inst.args, fn(a) { subst_reg(a, smap) }) }
+  else if op == "PrintStr" || op == "PrintInt" then
+    { op: op, arg: subst_reg(inst.arg, smap) }
   else if op == "StoreHeap" then
     { op: op, ptr: subst_reg(inst.ptr, smap), offset: inst.offset, src: subst_reg(inst.src, smap) }
   else if op == "LoadHeapDyn" then
@@ -157,6 +159,9 @@ fn collect_uses_inst(inst, uses) {
     then list.fold(inst.args, rec.set(uses, str.from(inst.closure_reg), true),
       fn(acc, a) { rec.set(acc, str.from(a), true) })
     else uses in
+  let uses = if op == "PrintStr" || op == "PrintInt"
+    then rec.set(uses, str.from(inst.arg), true)
+    else uses in
   let uses = if op == "StoreHeap"
     then rec.set(rec.set(uses, str.from(inst.ptr), true), str.from(inst.src), true)
     else uses in
@@ -189,7 +194,8 @@ fn collect_uses_func(f) {
 
 fn has_side_effects(inst) {
   let op = inst.op in
-  op == "CallI64" || op == "CallIndirect" || op == "StoreHeap"
+  op == "CallI64" || op == "CallIndirect" || op == "StoreHeap" ||
+  op == "PrintStr" || op == "PrintInt"
 }
 
 fn dce_block(block, uses) {

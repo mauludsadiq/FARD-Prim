@@ -34,7 +34,7 @@ fn build_symbol_table(laid_out) {
 // base = base address of this function in the linked text
 // Returns { resolved: bool, text: patched_text }
 fn text_vmaddr() { 4294971392 }  // 0x100001000 (Mach-O default)
-fn alloc_stub_size() { 53 + 406 }  // alloc(53) + gc_code(406)
+fn alloc_stub_size() { 53 + 406 + 285 }  // alloc(53) + gc(406) + stdlib(285)
 fn entry_stub_size() { 127 }
 fn fn_vmaddr(base_in_linked_text) {
   text_vmaddr() + entry_stub_size() + alloc_stub_size() + base_in_linked_text
@@ -99,6 +99,8 @@ fn link_module(encoded_module) {
   // (it lives 34 bytes before linked.text, at full-text offset 24)
   let alloc_offset_in_linked_text = 0 - alloc_stub_size() in
   let sym_table = rec.set(sym_table_base, "fard_alloc", alloc_offset_in_linked_text) in
+  let sym_table = rec.set(sym_table, "fard_print", 0 - 285) in
+  let sym_table = rec.set(sym_table, "fard_print_int", 0 - 157) in
   let linked_funcs = list.map(laid_out, fn(entry) {
     resolve_func_relocs(entry, sym_table)
   }) in
@@ -129,6 +131,8 @@ fn link_module_with_vmaddr(encoded_module, base_vmaddr) {
   let laid_out = layout_funcs(encoded_module.funcs) in
   let sym_table_base = build_symbol_table(laid_out) in
   let sym_table = rec.set(sym_table_base, "fard_alloc", 0 - alloc_stub_size()) in
+  let sym_table = rec.set(sym_table, "fard_print", 0 - 285) in
+  let sym_table = rec.set(sym_table, "fard_print_int", 0 - 157) in
   let linked_funcs = list.map(laid_out, fn(entry) { resolve_func_relocs_with_vmaddr(entry, sym_table, base_vmaddr) }) in
   let text = list.flatten(list.map(linked_funcs, fn(f) { f.text })) in
   let unresolved = list.flatten(list.map(linked_funcs, fn(f) { f.relocs })) in

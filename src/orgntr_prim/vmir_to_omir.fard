@@ -40,6 +40,8 @@ fn collect_vregs(insts) {
       then rec.set(acc, slot_key(inst.ptr.r), true) else acc in
     let acc = if rec.has(inst,"idx") && inst.idx.k == "vreg"
       then rec.set(acc, slot_key(inst.idx.r), true) else acc in
+    let acc = if rec.has(inst,"arg") && inst.arg.k == "vreg"
+      then rec.set(acc, slot_key(inst.arg.r), true) else acc in
     let acc = if rec.has(inst,"ptr_reg") && inst.ptr_reg.k == "vreg"
       then rec.set(acc, slot_key(inst.ptr_reg.r), true) else acc in
     let acc = if rec.has(inst,"args")
@@ -76,6 +78,7 @@ fn align16(n) { if n % 16 == 0 then n else n + (16 - n % 16) }
 
 fn rax() { { k: "reg", name: "rax" } }
 fn rdi() { { k: "reg", name: "rdi" } }
+fn rsi() { { k: "reg", name: "rsi" } }
 
 fn mov_imm(val)       { { op: "MovImm64", dst: rax(), val: val } }
 fn mov_r2s(dst, src)  { { op: "MovRegToStack", dst: dst, src: src } }
@@ -166,6 +169,18 @@ fn lower_vmir_inst(inst, slots) {
     let ptr = slot_for(slots, inst.ptr) in
     let src = slot_for(slots, inst.src) in
     [{ op: "StoreHeap", ptr: ptr, offset: inst.offset, src: src }]
+  else if op == "PrintStr" then
+    let arg = slot_for(slots, inst.arg) in
+    [mov_s2r(rsi(), arg),
+     mov_imm(0),
+     { op: "MovRegToReg", dst: rdi(), src: rax() },
+     { op: "CallReloc", name: "fard_print" }]
+  else if op == "PrintInt" then
+    let arg = slot_for(slots, inst.arg) in
+    [mov_s2r(rsi(), arg),
+     mov_imm(0),
+     { op: "MovRegToReg", dst: rdi(), src: rax() },
+     { op: "CallReloc", name: "fard_print_int" }]
   else if op == "Alloc" then
     let dst = slot_for(slots, inst.dst) in
     [{ op: "MovImm64", dst: rdi(), val: inst.size },

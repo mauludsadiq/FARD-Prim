@@ -109,6 +109,10 @@ fn verify_inst(inst, env, func_name, block_label, func_arities) {
     ok(put_ty(env, inst.dst, "I64"))
   else if inst.op == "GetField" then
     ok(put_ty(env, inst.dst, "I64"))
+  else if inst.op == "PrintStr" then
+    ok(env)
+  else if inst.op == "PrintInt" then
+    ok(env)
   else
     err("UNKNOWN_INST", { func: func_name, block: block_label, op: inst.op })
 }

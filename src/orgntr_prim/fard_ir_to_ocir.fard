@@ -90,11 +90,15 @@ fn lower_instr_one(instr, fn_names, field_order, stdlib_regs) {
     else if instr.name == "list.get" then
       // list.get(xs, i) -> LoadHeapDyn
       { op: "LoadHeapDyn", dst: instr.dst, ptr: list.get(instr.args, 0), idx: list.get(instr.args, 1) }
+    else if instr.name == "io.print" then
+      { op: "PrintStr", dst: instr.dst, arg: list.get(instr.args, 0) }
+    else if instr.name == "io.print_int" then
+      { op: "PrintInt", dst: instr.dst, arg: list.get(instr.args, 0) }
     else
       ocir.inst_call_i64(instr.dst, instr.name, instr.args)
   else if op == "neg" then
-    // Negate: emit 0 - src
-    ocir.inst_add_i64(instr.dst, 0, instr.src)
+    // Handled in lower_instr -- should not reach here
+    { op: "ImmI64", dst: instr.dst, val: 0 }
   else if op == "sub" then { op: "SubI64", dst: instr.dst, lhs: instr.a, rhs: instr.b }
   else if op == "mul" then { op: "MulI64", dst: instr.dst, lhs: instr.a, rhs: instr.b }
   else if op == "eq" || op == "ne" || op == "lt" || op == "le" ||
@@ -209,6 +213,10 @@ fn lower_instr(instr, fn_names, field_order, stdlib_regs) {
   else if op == "CallIndirect" then
     [{ op: "CallIndirect", dst: instr.dst,
        closure_reg: instr.closure_reg, args: instr.args }]
+  else if op == "neg" then
+    let tmp_reg = 30000 + instr.dst in
+    [{ op: "ImmI64", dst: tmp_reg, val: 0 },
+     { op: "SubI64", dst: instr.dst, lhs: tmp_reg, rhs: instr.src }]
   else
     [lower_instr_one(instr, fn_names, field_order, stdlib_regs)]
 }

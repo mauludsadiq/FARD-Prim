@@ -223,6 +223,22 @@ fn lower_expr(node, env, code, ctx) {
   else if t == "fn" then
     lower_fn_expr(node, env, code, ctx)
 
+  else if t == "call" &&
+    list.len(node.args) == 1 &&
+    node.fn_n.t == "var" && node.fn_n.v == "print" then
+    let arg = lower_expr(list.get(node.args, 0), env, code, ctx) in
+    let dst = alloc_local(ctx) in
+    let _ = emit(code, { op: "call_global", name: "io.print",
+      dst: dst, args: [arg] }) in
+    dst
+  else if t == "call" &&
+    list.len(node.args) == 1 &&
+    node.fn_n.t == "var" && node.fn_n.v == "print_int" then
+    let arg = lower_expr(list.get(node.args, 0), env, code, ctx) in
+    let dst = alloc_local(ctx) in
+    let _ = emit(code, { op: "call_global", name: "io.print_int",
+      dst: dst, args: [arg] }) in
+    dst
   else if t == "call" then
     lower_call(node, env, code, ctx)
 
