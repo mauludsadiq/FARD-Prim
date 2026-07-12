@@ -754,7 +754,7 @@ fn fard_alloc_stub_gc(bump_ptr_vmaddr) {
     [72, 131, 225, 248],               // and rcx, -8                  (4)
     [76, 139, 64, 8],                  // mov r8, [rax+8]  -- end      (4)
     [76, 57, 193],                     // cmp rcx, r8                  (3)
-    [119, 12],                          // ja +12 -> gc_trigger        (2)
+    [119, 9],                           // ja +9 -> gc_trigger         (2)
     [72, 137, 8],                       // mov [rax], rcx   -- bump     (3)
     [72, 137, 208],                    // mov rax, rdx     -- ret ptr  (3)
     [195],                              // ret                          (1)
@@ -766,15 +766,13 @@ fn fard_alloc_stub_gc(bump_ptr_vmaddr) {
 // Layout: gc_trigger(64) + mark_object(144) + mark_roots(96) + sweep(102)
 // All internal calls pre-patched for this fixed layout.
 fn fard_gc_stub(bump_ptr_vmaddr) {
-  // gc_trigger (64 bytes): OOM trap -- full conservative GC deferred
-  // (needs type tags to distinguish pointers from integers safely)
-  let gc_trig = [15, 11,  // ud2 -- OOM trap
-    144, 144, 144, 144, 144, 144, 144, 144, 144, 144, 144, 144,
-    144, 144, 144, 144, 144, 144, 144, 144, 144, 144, 144, 144,
-    144, 144, 144, 144, 144, 144, 144, 144, 144, 144, 144, 144,
-    144, 144, 144, 144, 144, 144, 144, 144, 144, 144, 144, 144,
-    144, 144, 144, 144, 144, 144, 144, 144, 144, 144, 144, 144,
-    144, 144] in
+  // gc_trigger (64 bytes): runs mark-sweep GC then retries allocation
+  let gc_trig = [85, 72, 137, 229, 87, 83, 72, 137, 195, 72, 137, 231,
+    72, 137, 238, 72, 139, 83, 16, 72, 139, 11, 232, 181, 0, 0, 0,
+    72, 139, 123, 16, 72, 139, 51, 232, 9, 1, 0, 0, 72, 139, 67, 16,
+    72, 137, 3, 91, 95, 93, 72, 184,
+    0, 32, 0, 0, 1, 0, 0, 0,
+    233, 139, 255, 255, 255] in
   // mark_object (144 bytes)
   let mark_obj = [85, 72, 137, 229, 65, 87, 65, 86, 65, 84, 83, 72, 139,
     71, 248, 72, 15, 186, 224, 62, 114, 99, 73, 137, 255, 72, 185, 0,
@@ -812,33 +810,67 @@ fn fard_gc_stub(bump_ptr_vmaddr) {
 // mmap(0, 4MB, PROT_RW=3, MAP_ANON|PRIVATE=0x1002, -1, 0)
 // __DATA: [heap_bump(8)][heap_end(8)][objects...]
 fn entry_stub_text_gc(fard_main_offset, heap_bump_vmaddr) {
-  let heap_size = 4194304 in   // 4MB
-  let mmap_sys  = 33554629 in  // 0x20000C5 macOS mmap
-  let exit_sys  = 33554433 in  // 0x2000001 macOS exit
-  // call instruction is at byte offset 84, next_ip at 89
-  let rel = fard_main_offset - 93 in
+  // Entry stub: mmap 4MB heap, init DATA slots, call fard_main, exit.
+  // __DATA layout: [+0]=heap_bump [+8]=heap_end [+16]=heap_base [+24]=free_list
+  // heap_base = mmap+16 (first valid ptr, so in_heap check works correctly)
+  // heap_bump = mmap+8  (first header location)
+  // Byte layout (127 bytes total):
+  //   0-3:   push rbp; mov rbp,rsp      (4)
+  //   4-7:   sub rsp, 0x20              (4)
+  //   8-10:  xor rdi, rdi               (3)
+  //   11-17: mov rsi, 4MB               (7)
+  //   18-24: mov rdx, 3                 (7)
+  //   25-31: mov r10, 0x1002            (7)
+  //   32-38: mov r8, -1                 (7)
+  //   39-41: xor r9, r9                 (3)
+  //   42-51: mov rax, mmap_sys         (10)
+  //   52-53: syscall                    (2)
+  //   54-63: mov rcx, heap_bump_vmaddr (10)
+  //   64-66: mov [rcx], rax  (store mmap result temporarily) (3)
+  //   67-69: mov rdx, rax               (3)
+  //   70-76: mov rsi, 4MB               (7)
+  //   77-79: add rdx, rsi               (3)
+  //   80-83: mov [rcx+8], rdx heap_end  (4)
+  //   84-91: mov [rcx+24], 0 free_list  (8)
+  //   92-95: add rax, 8 -> mmap+8       (4)
+  //   96-98: mov [rcx], rax heap_bump   (3)
+  //   99-102: add rax, 8 -> mmap+16     (4)
+  //   103-106: mov [rcx+16], rax heap_base (4) -- first valid ptr
+  //   107-111: call fard_main           (5)
+  //   112-114: mov rdi, rax             (3)
+  //   115-124: mov rax, exit_sys       (10)
+  //   125-126: syscall                  (2)
+  // Total: 127 bytes. call at 107, next_ip=112.
+  let heap_size = 4194304 in
+  let mmap_sys  = 33554629 in  // 0x20000C5
+  let exit_sys  = 33554433 in  // 0x2000001
+  let rel = fard_main_offset - 112 in
   list.concat([
-    [85, 72, 137, 229],               // push rbp; mov rbp, rsp
-    [72, 131, 236, 32],              // sub rsp, 0x20
-    [72, 49, 255],                    // xor rdi, rdi
-    [72, 199, 198], le32(heap_size),  // mov rsi, 4MB
-    [72, 199, 194, 3, 0, 0, 0],      // mov rdx, 3
-    [73, 199, 194], le32(4098),      // mov r10, 0x1002
-    [73, 199, 192, 255, 255, 255, 255], // mov r8, -1
-    [77, 49, 201],                    // xor r9, r9
-    [72, 184], le64(mmap_sys),       // mov rax, mmap_sys
-    [15, 5],                          // syscall
-    [72, 185], le64(heap_bump_vmaddr), // mov rcx, heap_bump_vmaddr
-    [72, 137, 1],                     // mov [rcx], rax
-    [72, 137, 65, 16],                // mov [rcx+16], rax -- heap_base
-    [72, 137, 194],                   // mov rdx, rax
-    [72, 199, 198], le32(heap_size),  // mov rsi, 4MB
-    [72, 1, 242],                     // add rdx, rsi
-    [72, 137, 81, 8],                // mov [rcx+8], rdx
-    [232], le32(rel),                // call fard_main
-    [72, 137, 199],                   // mov rdi, rax
-    [72, 184], le64(exit_sys),       // mov rax, exit_sys
-    [15, 5]                           // syscall
+    [85, 72, 137, 229],                   // push rbp; mov rbp,rsp     (4)
+    [72, 131, 236, 32],                  // sub rsp, 0x20             (4)
+    [72, 49, 255],                        // xor rdi, rdi              (3)
+    [72, 199, 198], le32(heap_size),      // mov rsi, 4MB              (7)
+    [72, 199, 194, 3, 0, 0, 0],          // mov rdx, 3                (7)
+    [73, 199, 194], le32(4098),          // mov r10, 0x1002           (7)
+    [73, 199, 192, 255, 255, 255, 255],  // mov r8, -1                (7)
+    [77, 49, 201],                        // xor r9, r9                (3)
+    [72, 184], le64(mmap_sys),           // mov rax, mmap_sys        (10)
+    [15, 5],                              // syscall                   (2)
+    [72, 185], le64(heap_bump_vmaddr),   // mov rcx, heap_bump_vmaddr(10)
+    [72, 137, 1],                         // mov [rcx], rax tmp        (3)
+    [72, 137, 194],                       // mov rdx, rax              (3)
+    [72, 199, 198], le32(heap_size),      // mov rsi, 4MB              (7)
+    [72, 1, 242],                         // add rdx, rsi              (3)
+    [72, 137, 81, 8],                    // mov [rcx+8], rdx heap_end (4)
+    [72, 199, 65, 24, 0, 0, 0, 0],      // mov [rcx+24], 0 free_list (8)
+    [72, 131, 192, 8],                   // add rax, 8 -> mmap+8      (4)
+    [72, 137, 1],                         // mov [rcx], rax heap_bump  (3)
+    [72, 131, 192, 8],                   // add rax, 8 -> mmap+16     (4)
+    [72, 137, 65, 16],                   // mov [rcx+16], rax heap_base(4)
+    [232], le32(rel),                    // call fard_main             (5)
+    [72, 137, 199],                       // mov rdi, rax              (3)
+    [72, 184], le64(exit_sys),           // mov rax, exit_sys        (10)
+    [15, 5]                               // syscall                   (2)
   ])
 }
 

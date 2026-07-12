@@ -35,7 +35,7 @@ fn build_symbol_table(laid_out) {
 // Returns { resolved: bool, text: patched_text }
 fn text_vmaddr() { 4294971392 }  // 0x100001000 (Mach-O default)
 fn alloc_stub_size() { 53 + 406 }  // alloc(53) + gc_code(406)
-fn entry_stub_size() { 108 }
+fn entry_stub_size() { 127 }
 fn fn_vmaddr(base_in_linked_text) {
   text_vmaddr() + entry_stub_size() + alloc_stub_size() + base_in_linked_text
 }

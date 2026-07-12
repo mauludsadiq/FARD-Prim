@@ -277,7 +277,7 @@ fn find_func_offset(funcs, name) {
 
 fn alloc_stub_size() { 53 }  // bytes in fard_alloc_stub_gc
 fn gc_stub_size()    { 406 } // gc_trigger+mark_object+mark_roots+sweep
-fn gc_entry_stub_size() { 108 }  // bytes in entry_stub_text_gc
+fn gc_entry_stub_size() { 127 }  // bytes in entry_stub_text_gc
 
 fn build_text(linked, entry_func) {
   let real_entry = linked.entry in
