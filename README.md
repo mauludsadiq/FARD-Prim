@@ -217,6 +217,12 @@ Achieved via:
     .text + .idata sections, ExitProcess import from kernel32.dll;
     entry stub: call fard_main, mov rcx rax, call ExitProcess via IAT;
     1536 bytes; verified MZ/PE/ImageBase/EntryPoint/sections
+  - Standard library: print(str) and print_int(n) as 285-byte x86-64 stubs;
+    write syscall direct, no libc; FARD ABI-aware (rsi=first arg);
+    neg op fixed (was inst_add instead of SubI64); print/print_int verified
+  - GC Phase 1+2: 4MB mmap heap, conservative mark-sweep GC;
+    GC header (ptr-8) stores size+mark bit; loop(300000) allocating
+    32-byte records -> GC fires, collects, returns 42 ✓
   - ARM64 parity: full VMIR pipeline, callee-saved reg handling,
     large literal encoding via bits.bshl (FARD truncates >2^31)
 
@@ -226,7 +232,7 @@ Achieved via:
 
    x86_64_encode.fard      x86-64 instruction encoding (775 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
-   fard_lower.fard         AST to flat IR, closures, while loops (589 lines)
+   fard_lower.fard         AST to flat IR, closures, while loops, print (589 lines)
    fardparse.fard          FARD parser with while expression (520 lines)
    macho_exe.fard          Mach-O x86-64 emitter (343 lines)
    omir_peephole.fard      copy prop + DSE + fusion + const fold (521 lines)
@@ -253,16 +259,17 @@ Achieved via:
    fard_source_to_native_arm64.fard ARM64 ELF64 pipeline (47 lines)
    ast_unroll.fard         loop unrolling, constant-bound while (193 lines)
    ocir_sr.fard            strength reduction, mul->add + small-k chains (195 lines)
+   fard_gc.fard            GC entry stub, mark-sweep infrastructure (94 lines)
    lower_ocir_to_omir.fard OCIR -> OMIR (ARM64/ELF legacy path) (391 lines)
    python_to_uvir.fard     Python subset frontend (289 lines)
    js_to_uvir.fard         JavaScript subset frontend (270 lines)
 
 ## Next
 
-   Wine/Windows validation of PE exit code
+   Standard library: string ops, file I/O (print/print_int done)
    Cross-block DSE (extend to multi-block functions)
-   Nested loop detection and loop interchange
-   Typed arrays (prerequisite for vectorization)
+   Type tags for GC precision (conservative currently safe)
+   Wine/Windows validation of PE exit code
 
 ## Repos
 
