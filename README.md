@@ -270,7 +270,8 @@ Achieved via:
 
 ## Next
 
-   Standard library: string ops, file I/O (print/print_int done)
+   Standard library: str_concat/str_len/str_get/str_eq/int_to_str/print/print_int done
+   File I/O
    Cross-block DSE (extend to multi-block functions)
    Type tags for GC precision (conservative currently safe)
    Wine/Windows validation of PE exit code
