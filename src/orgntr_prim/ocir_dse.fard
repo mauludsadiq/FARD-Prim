@@ -39,7 +39,9 @@ fn ptr_escapes_in_block(ptr_origin, insts, origin_map) {
   list.any(insts, fn(i) {
     let op = i.op in
     // Conservative: any call may use the pointer
-    if op == "CallI64" || op == "CallIndirect" then true
+    if op == "CallI64" || op == "CallIndirect" ||
+       op == "StrConcat" || op == "StrLen" || op == "StrGet" ||
+       op == "StrEq" || op == "IntToStr" then true
     // Store into another heap object (ptr stored as a value)
     else if op == "StoreHeap" && rec.has(i, "src") then
       let src_key = str.from(i.src) in
@@ -133,6 +135,13 @@ fn dse_block(block, origin_map) {
           // propagate origin
           acc
         else acc
+
+      else if op == "StrConcat" || op == "StrLen" || op == "StrGet" ||
+              op == "StrEq" || op == "IntToStr" then
+        // String ops read heap data via pointers -- mark all pending stores as needed
+        let needed2 = list.fold(rec.keys(acc.pending), acc.needed,
+          fn(n, k) { rec.set(n, k, true) }) in
+        { pending: acc.pending, needed: needed2, escaped: acc.escaped, dead: acc.dead }
 
       else acc
     }

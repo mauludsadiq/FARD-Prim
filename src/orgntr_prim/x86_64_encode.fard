@@ -129,14 +129,24 @@ fn mov_r64_imm64(dst, val) {
   list.concat([[rex_w_for(dst), 184 + bits.band(c, 7)], le64(val)])
 }
 
+fn modrm_disp32(reg, rm) {
+  128 + (bits.band(reg, 7) * 8) + bits.band(rm, 7)
+}
+
 fn mov_stack_to_reg(dst, src_stack) {
   let c = reg_code(dst) in
-  [rex_wr_for(dst), 139, modrm_disp8(c, 5), disp8(src_stack.slot)]
+  let s = src_stack.slot in
+  if s >= -128 && s <= 127
+    then [rex_wr_for(dst), 139, modrm_disp8(c, 5), disp8(s)]
+    else list.concat([[rex_wr_for(dst), 139, modrm_disp32(c, 5)], le32(s)])
 }
 
 fn mov_reg_to_stack(dst_stack, src) {
   let c = reg_code(src) in
-  [rex_wr_for(src), 137, modrm_disp8(c, 5), disp8(dst_stack.slot)]
+  let s = dst_stack.slot in
+  if s >= -128 && s <= 127
+    then [rex_wr_for(src), 137, modrm_disp8(c, 5), disp8(s)]
+    else list.concat([[rex_wr_for(src), 137, modrm_disp32(c, 5)], le32(s)])
 }
 
 fn load_to_reg(dst_reg, src) {
@@ -145,8 +155,8 @@ fn load_to_reg(dst_reg, src) {
 }
 
 fn store_from_reg(dst, src_reg) {
- if dst.k == "reg" then mov_reg_to_reg(dst, src_reg)
- else mov_reg_to_stack(dst, src_reg)
+  if dst.k == "reg" then mov_reg_to_reg(dst, src_reg)
+  else mov_reg_to_stack(dst, src_reg)
 }
 
 fn add_reg_stack(dst, src_stack) {
@@ -394,6 +404,64 @@ fn encode_inst(inst) {
     if rec.has(inst, "used_callee_saved")
       then list.concat([pop_callee_saved(inst.used_callee_saved), base])
       else base
+  else if inst.op == "StrCall1Omir" then
+    let load_rsi = if inst.arg.k == "reg"
+      then mov_reg_to_reg({k:"reg",name:"rsi"}, inst.arg)
+      else if inst.arg.slot >= -128 && inst.arg.slot <= 127
+        then [72, 139, 117, bits.band(inst.arg.slot, 255)]
+        else list.concat([[72, 139, 181], le32(inst.arg.slot)]) in
+    let store_dst = if inst.dst.k == "reg"
+      then mov_reg_to_reg(inst.dst, {k:"reg",name:"rax"})
+      else if inst.dst.slot >= -128 && inst.dst.slot <= 127
+        then [72, 137, 69, bits.band(inst.dst.slot, 255)]
+        else list.concat([[72, 137, 133], le32(inst.dst.slot)]) in
+    list.concat([load_rsi, [232, 0, 0, 0, 0], store_dst])
+  else if inst.op == "StrCall2Omir" then
+    let load_rsi = if inst.arg.k == "reg"
+      then mov_reg_to_reg({k:"reg",name:"rsi"}, inst.arg)
+      else if inst.arg.slot >= -128 && inst.arg.slot <= 127
+        then [72, 139, 117, bits.band(inst.arg.slot, 255)]
+        else list.concat([[72, 139, 181], le32(inst.arg.slot)]) in
+    let load_rdx = if inst.arg2.k == "reg"
+      then mov_reg_to_reg({k:"reg",name:"rdx"}, inst.arg2)
+      else if inst.arg2.slot >= -128 && inst.arg2.slot <= 127
+        then [72, 139, 85, bits.band(inst.arg2.slot, 255)]
+        else list.concat([[72, 139, 149], le32(inst.arg2.slot)]) in
+    let store_dst = if inst.dst.k == "reg"
+      then mov_reg_to_reg(inst.dst, {k:"reg",name:"rax"})
+      else if inst.dst.slot >= -128 && inst.dst.slot <= 127
+        then [72, 137, 69, bits.band(inst.dst.slot, 255)]
+        else list.concat([[72, 137, 133], le32(inst.dst.slot)]) in
+    list.concat([load_rsi, load_rdx, [232, 0, 0, 0, 0], store_dst])
+  else if inst.op == "StrCall1Direct" then
+    let s = inst.arg_slot in
+    let d = inst.dst_slot in
+    let load_rsi = if s >= -128 && s <= 127
+      then [72, 139, 117, bits.band(s, 255)]
+      else list.concat([[72, 139, 181], le32(s)]) in
+    let store_dst = if d >= -128 && d <= 127
+      then [72, 137, 69, bits.band(d, 255)]
+      else list.concat([[72, 137, 133], le32(d)]) in
+    list.concat([load_rsi, [232, 0, 0, 0, 0], store_dst])
+  else if inst.op == "StrCall2Direct" then
+    let s = inst.arg_slot in
+    let s2 = inst.arg2_slot in
+    let d = inst.dst_slot in
+    let load_rsi = if s >= -128 && s <= 127
+      then [72, 139, 117, bits.band(s, 255)]
+      else list.concat([[72, 139, 181], le32(s)]) in
+    let load_rdx = if s2 >= -128 && s2 <= 127
+      then [72, 139, 85, bits.band(s2, 255)]
+      else list.concat([[72, 139, 149], le32(s2)]) in
+    let store_dst = if d >= -128 && d <= 127
+      then [72, 137, 69, bits.band(d, 255)]
+      else list.concat([[72, 137, 133], le32(d)]) in
+    list.concat([load_rsi, load_rdx, [232, 0, 0, 0, 0], store_dst])
+  else if inst.op == "StoreRax" then
+    let s = inst.slot in
+    if s >= -128 && s <= 127
+      then [72, 137, 69, bits.band(s, 255)]
+      else list.concat([[72, 137, 133], le32(s)])
   else if inst.op == "MovImm64" then
     mov_r64_imm64(inst.dst, inst.val)
   else if inst.op == "MovStackToReg" then
@@ -449,14 +517,13 @@ fn encode_inst(inst) {
   else if inst.op == "Label" then
     []
   else if inst.op == "StoreHeap" then
-    // mov rax, [rbp+ptr]; mov rcx, [rbp+src]; mov [rax+offset], rcx
     let rax = { k: "reg", name: "rax" } in
     let rcx = { k: "reg", name: "rcx" } in
     list.concat([
       load_to_reg(rax, inst.ptr),
       load_to_reg(rcx, inst.src),
-      // mov [rax + offset], rcx: REX.W 89 /r ModRM(disp8) = 72 137 104 offset
-      [72, 137, 72, inst.offset]
+      [72, 137, 136],
+      le32(inst.offset)
     ])
   else if inst.op == "LoadHeap" then
     // dst = [ptr + offset]: mov rax,[rbp+ptr]; mov rax,[rax+disp32]; mov [rbp+dst],rax
@@ -891,6 +958,18 @@ fn fard_print_int_stub() {
 fn stdlib_size() { 285 }  // fard_print(128) + fard_print_int(157)
 
 
+fn fard_str_stubs() {
+  let str_len    = [85, 72, 137, 229, 72, 139, 6, 93, 195, 15, 31, 128, 0, 0, 0, 0] in
+  let str_get    = [85, 72, 137, 229, 72, 139, 68, 214, 8, 93, 195, 15, 31, 68, 0, 0] in
+  let str_concat = [85, 72, 137, 229, 65, 87, 65, 86, 65, 85, 65, 84, 83, 80, 72, 137, 211, 73, 137, 246, 76, 139, 38, 76, 139, 58, 79, 141, 44, 39, 74, 141, 60, 237, 8, 0, 0, 0, 232, 205, 252, 255, 255, 76, 137, 40, 77, 133, 228, 116, 35, 49, 201, 102, 102, 46, 15, 31, 132, 0, 0, 0, 0, 0, 73, 139, 84, 206, 8, 72, 137, 84, 200, 8, 72, 141, 81, 1, 72, 137, 209, 73, 57, 212, 117, 234, 77, 133, 255, 116, 42, 74, 141, 12, 224, 72, 131, 193, 8, 49, 210, 102, 102, 46, 15, 31, 132, 0, 0, 0, 0, 0, 72, 139, 116, 211, 8, 72, 137, 52, 209, 72, 141, 114, 1, 72, 137, 242, 73, 57, 247, 117, 235, 72, 131, 196, 8, 91, 65, 92, 65, 93, 65, 94, 65, 95, 93, 195, 102, 102, 102, 46, 15, 31, 132, 0, 0, 0, 0, 0] in
+  let int_to_str = [85, 72, 137, 229, 83, 72, 131, 236, 40, 72, 133, 246, 15, 132, 176, 0, 0, 0, 72, 137, 241, 72, 247, 217, 72, 15, 72, 206, 49, 255, 73, 184, 205, 204, 204, 204, 204, 204, 204, 204, 15, 31, 132, 0, 0, 0, 0, 0, 72, 137, 200, 73, 247, 224, 72, 193, 234, 3, 141, 4, 18, 141, 4, 128, 65, 137, 201, 65, 41, 193, 65, 128, 201, 48, 68, 136, 76, 61, 208, 72, 255, 199, 72, 131, 249, 10, 72, 137, 209, 115, 213, 72, 131, 255, 1, 116, 50, 72, 141, 71, 254, 49, 201, 102, 15, 31, 132, 0, 0, 0, 0, 0, 15, 182, 84, 13, 208, 68, 15, 182, 68, 5, 209, 68, 136, 68, 13, 208, 136, 84, 5, 209, 72, 255, 193, 72, 141, 80, 255, 72, 57, 193, 72, 137, 200, 124, 221, 72, 133, 246, 121, 37, 72, 141, 71, 255, 15, 31, 64, 0, 137, 193, 15, 182, 76, 13, 208, 136, 76, 5, 209, 72, 255, 200, 141, 72, 2, 131, 249, 1, 127, 234, 198, 69, 208, 45, 72, 255, 199, 72, 99, 223, 235, 9, 198, 69, 208, 48, 187, 1, 0, 0, 0, 72, 141, 60, 221, 8, 0, 0, 0, 232, 128, 251, 255, 255, 72, 137, 24, 72, 131, 251, 1, 72, 131, 211, 0, 49, 201, 102, 102, 46, 15, 31, 132, 0, 0, 0, 0, 0, 72, 15, 190, 84, 13, 208, 72, 137, 84, 200, 8, 72, 255, 193, 72, 57, 203, 117, 237, 72, 131, 196, 40, 91, 93, 195, 102, 15, 31, 68, 0, 0] in
+  let str_eq     = [85, 72, 137, 229, 72, 139, 14, 72, 59, 10, 117, 38, 49, 192, 102, 144, 72, 137, 199, 72, 57, 193, 116, 16, 72, 141, 71, 1, 76, 139, 68, 254, 8, 76, 59, 68, 250, 8, 116, 232, 49, 192, 72, 57, 207, 15, 147, 192, 93, 195, 49, 192, 93, 195] in
+  list.concat([str_len, str_get, str_concat, int_to_str, str_eq])
+}
+
+fn str_stdlib_size() { 518 }
+
+
 export {
   profile_base_vmaddr, incr_counter,
   fard_alloc_stub,
@@ -899,6 +978,8 @@ export {
   fard_print_stub,
   fard_print_int_stub,
   stdlib_size,
+  fard_str_stubs,
+  str_stdlib_size,
   entry_stub_text_gc,
   write_fval_int_enc,
   unbox_int_enc,

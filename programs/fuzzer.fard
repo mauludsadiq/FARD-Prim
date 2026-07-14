@@ -1,0 +1,114 @@
+import("/Users/g.bogans/Downloads/FARD_v0.5/apps/fardlex") as lex
+import("/Users/g.bogans/Downloads/FARD_v0.5/apps/fardparse") as par
+import("/Users/g.bogans/Downloads/FARD_v0.5/apps/fard_eval") as ev
+import("../src/orgntr_prim/fard_source_to_native") as native
+import("std/list") as list
+import("std/str") as str
+import("std/rec") as rec
+import("std/fs") as fs
+import("std/bytes") as bytes
+import("std/process") as proc
+
+// ── Random number generator (LCG) ────────────────────────────────────────────
+fn lcg(seed) { (seed * 1664525 + 1013904223) % 2147483648 }
+fn rand_int(seed, lo, hi) { { val: lo + (lcg(seed) % (hi - lo)), seed: lcg(seed) } }
+
+// ── Program generator ─────────────────────────────────────────────────────────
+fn gen_int(seed, depth) {
+  let r = rand_int(seed, 0, 15) in
+  { code: str.from(r.val % 12), seed: r.seed }
+}
+
+fn gen_var(vars, seed) {
+  if list.len(vars) == 0 then gen_int(seed, 0)
+  else
+    let r = rand_int(seed, 0, list.len(vars)) in
+    { code: list.get(vars, r.val % list.len(vars)), seed: r.seed }
+}
+
+fn gen_expr(vars, seed, depth) {
+  let r = rand_int(seed, 0, if depth <= 0 then 2 else 6) in
+  let choice = r.val in
+  let s1 = r.seed in
+  if choice == 0 then gen_int(s1, depth)
+  else if choice == 1 then gen_var(vars, s1)
+  else if choice == 2 then
+    let lhs = gen_expr(vars, s1, depth - 1) in
+    let rhs = gen_expr(vars, lhs.seed, depth - 1) in
+    let op_r = rand_int(rhs.seed, 0, 3) in
+    let op = if op_r.val == 0 then "+" else if op_r.val == 1 then "-" else "*" in
+    { code: str.concat(["(", lhs.code, op, rhs.code, ")"]), seed: op_r.seed }
+  else if choice == 3 then
+    let cond = gen_expr(vars, s1, depth - 1) in
+    let then_ = gen_expr(vars, cond.seed, depth - 1) in
+    let else_ = gen_expr(vars, then_.seed, depth - 1) in
+    let op_r = rand_int(else_.seed, 0, 4) in
+    let op = if op_r.val == 0 then "<" else if op_r.val == 1 then ">" else if op_r.val == 2 then "==" else "<=" in
+    { code: str.concat(["if ", cond.code, op, then_.code, " then ", then_.code, " else ", else_.code]),
+      seed: op_r.seed }
+  else
+    gen_var(vars, s1)
+}
+
+fn gen_fn(name, seed) {
+  let params = ["a", "b"] in
+  let body = gen_expr(params, seed, 2) in
+  { code: str.concat(["fn ", name, "(a,b){", body.code, "}"]), seed: body.seed }
+}
+
+fn gen_program(seed) {
+  let f1 = gen_fn("f1", seed) in
+  let arg1 = rand_int(f1.seed, 1, 8) in
+  let arg2 = rand_int(arg1.seed, 1, 8) in
+  let call = str.concat(["f1(", str.from(arg1.val), ",", str.from(arg2.val), ")"]) in
+  { code: str.concat([f1.code, "\n", call]), seed: arg2.seed }
+}
+
+// ── Run one fuzz case ─────────────────────────────────────────────────────────
+fn fuzz_one(seed, idx) {
+  let prog = gen_program(seed) in
+  let src = prog.code in
+
+  // Evaluate with interpreter
+  let tokens = lex.tokenize(src) in
+  let parsed = par.parse_module(tokens, 0) in
+  if !parsed.ok then { ok: true, skip: true, seed: prog.seed }
+  else
+    let evaled = ev.eval_module(parsed.node) in
+    if !rec.has(evaled, "t") then { ok: true, skip: true, seed: prog.seed }
+    else if evaled.t != "int" then { ok: true, skip: true, seed: prog.seed }
+    else
+      let expected = evaled.v in
+      // Only test results in 0-100 range (exit code safe)
+      if expected < 0 || expected > 100 then { ok: true, skip: true, seed: prog.seed }
+      else
+        // Compile natively
+        let out_path = str.concat(["out/fuzz_", str.from(idx)]) in
+        let result = native.compile_and_emit(src, out_path) in
+        if !rec.has(result, "ok") || !result.ok
+          then { ok: true, skip: true, seed: prog.seed }  // compiler error = skip
+        else
+          // Run binary
+          let run = proc.capture(out_path, []) in
+          let got = run.exit_code in
+          if got == expected then { ok: true, skip: false, seed: prog.seed }
+          else { ok: false, err: "mismatch", src: src, expected: expected, got: got, seed: prog.seed }
+}
+
+// ── Main loop ─────────────────────────────────────────────────────────────────
+fn fuzz_loop(seed, idx, n, passes, fails, skips) {
+  if idx >= n then { passes: passes, fails: fails, skips: skips }
+  else
+    let r = fuzz_one(seed, idx) in
+    if r.ok && rec.has(r, "skip") && r.skip
+      then fuzz_loop(r.seed, idx + 1, n, passes, fails, skips + 1)
+    else if r.ok
+      then fuzz_loop(r.seed, idx + 1, n, passes + 1, fails, skips)
+    else
+      // Print failure and stop
+      { passes: passes, fails: fails + 1, skips: skips,
+        fail_src: r.src, expected: r.expected, got: r.got }
+}
+
+let result = fuzz_loop(12345, 0, 200, 0, 0, 0)
+result

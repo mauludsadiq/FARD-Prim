@@ -37,6 +37,10 @@ fn def_slot(inst) {
   else if op == "CmpI64"   then inst.dst.slot
   else if op == "LoadHeap" then inst.dst.slot
   else if op == "LoadHeapDyn" then inst.dst.slot
+  else if op == "StrCall1Omir" then
+    if inst.dst.k == "stack" then inst.dst.slot else -999999
+  else if op == "StrCall2Omir" then
+    if inst.dst.k == "stack" then inst.dst.slot else -999999
   else -999999
 }
 
@@ -57,6 +61,12 @@ fn use_slots(inst) {
   else if op == "AddRegStack" then [inst.src.slot]
   else if op == "CallIndirect" then
     if inst.closure.k == "stack" then [inst.closure.slot] else []
+  else if op == "StrCall1Omir" then
+    if inst.arg.k == "stack" then [inst.arg.slot] else []
+  else if op == "StrCall2Omir" then
+    let s1 = if inst.arg.k == "stack" then [inst.arg.slot] else [] in
+    let s2 = if inst.arg2.k == "stack" then [inst.arg2.slot] else [] in
+    list.concat([s1, s2])
   else []
 }
 
@@ -113,6 +123,13 @@ fn unrewritable_slots(insts) {
         if rec.has(inst,"dst") then unsafe_slot(inst.dst) else []
       else if op == "LoadArg" then
         if rec.has(inst,"slot") then [inst.slot] else []
+      else if op == "MovStackToReg" && rec.has(inst,"src") && inst.src.k == "stack" &&
+        rec.has(inst,"dst") && inst.dst.k == "reg" &&
+        (inst.dst.name == "rsi" || inst.dst.name == "rdx") then
+        [inst.src.slot]
+      else if op == "StoreRax" then [inst.slot]
+      else if op == "StrCall1Direct" then [inst.arg_slot, inst.dst_slot]
+      else if op == "StrCall2Direct" then [inst.arg_slot, inst.arg2_slot, inst.dst_slot]
       else if op == "WriteFvalIntOps" || op == "UnboxInt" then
         list.concat([if rec.has(inst,"dst_slot") then [inst.dst_slot] else [],
                       if rec.has(inst,"src_slot") then [inst.src_slot] else [],
@@ -328,6 +345,15 @@ fn rewrite_inst(inst, assignments) {
   else if op == "CallIndirect" then
     let closure2 = if inst.closure.k == "stack" then slot_or_reg(inst.closure.slot, assignments) else inst.closure in
     { op: "CallIndirect", closure: closure2 }
+  else if op == "StrCall1Omir" then
+    let arg2 = if inst.arg.k == "stack" then slot_or_reg(inst.arg.slot, assignments) else inst.arg in
+    let dst2 = if inst.dst.k == "stack" then slot_or_reg(inst.dst.slot, assignments) else inst.dst in
+    { op: "StrCall1Omir", func: inst.func, arg: arg2, dst: dst2 }
+  else if op == "StrCall2Omir" then
+    let arg2  = if inst.arg.k == "stack" then slot_or_reg(inst.arg.slot, assignments) else inst.arg in
+    let arg22 = if inst.arg2.k == "stack" then slot_or_reg(inst.arg2.slot, assignments) else inst.arg2 in
+    let dst2  = if inst.dst.k == "stack" then slot_or_reg(inst.dst.slot, assignments) else inst.dst in
+    { op: "StrCall2Omir", func: inst.func, arg: arg2, arg2: arg22, dst: dst2 }
   else inst
 }
 

@@ -42,6 +42,8 @@ fn collect_vregs(insts) {
       then rec.set(acc, slot_key(inst.idx.r), true) else acc in
     let acc = if rec.has(inst,"arg") && inst.arg.k == "vreg"
       then rec.set(acc, slot_key(inst.arg.r), true) else acc in
+    let acc = if rec.has(inst,"arg2") && inst.arg2.k == "vreg"
+      then rec.set(acc, slot_key(inst.arg2.r), true) else acc in
     let acc = if rec.has(inst,"ptr_reg") && inst.ptr_reg.k == "vreg"
       then rec.set(acc, slot_key(inst.ptr_reg.r), true) else acc in
     let acc = if rec.has(inst,"args")
@@ -79,6 +81,7 @@ fn align16(n) { if n % 16 == 0 then n else n + (16 - n % 16) }
 fn rax() { { k: "reg", name: "rax" } }
 fn rdi() { { k: "reg", name: "rdi" } }
 fn rsi() { { k: "reg", name: "rsi" } }
+fn rdx() { { k: "reg", name: "rdx" } }
 
 fn mov_imm(val)       { { op: "MovImm64", dst: rax(), val: val } }
 fn mov_r2s(dst, src)  { { op: "MovRegToStack", dst: dst, src: src } }
@@ -181,11 +184,20 @@ fn lower_vmir_inst(inst, slots) {
      mov_imm(0),
      { op: "MovRegToReg", dst: rdi(), src: rax() },
      { op: "CallReloc", name: "fard_print_int" }]
+  else if op == "StrCall1" then
+    let dst = slot_for(slots, inst.dst) in
+    let arg = slot_for(slots, inst.arg) in
+    [{ op: "StrCall1Direct", func: inst.func, arg_slot: arg.slot, dst_slot: dst.slot }]
+  else if op == "StrCall2" then
+    let dst = slot_for(slots, inst.dst) in
+    let arg = slot_for(slots, inst.arg) in
+    let arg2 = slot_for(slots, inst.arg2) in
+    [{ op: "StrCall2Direct", func: inst.func, arg_slot: arg.slot, arg2_slot: arg2.slot, dst_slot: dst.slot }]
   else if op == "Alloc" then
     let dst = slot_for(slots, inst.dst) in
     [{ op: "MovImm64", dst: rdi(), val: inst.size },
      { op: "CallReloc", name: "fard_alloc" },
-     mov_r2s(dst, rax())]
+     { op: "StoreRax", slot: dst.slot }]
 
   else if op == "Ret" then
     let src = slot_for(slots, inst.src) in
@@ -212,7 +224,11 @@ fn lower_vmir_func(f) {
     rec.set(acc, k, true)
   }) in
   let layout = assign_slots(vregs) in
-  let frame_size = align16(layout.offset) in
+  let max_slot = list.fold(rec.keys(layout.slots), 0, fn(acc, k) {
+    let s = 0 - rec.get(layout.slots, k).slot in
+    if s > acc then s else acc
+  }) in
+  let frame_size = align16(max_slot) in
   let slots = layout.slots in
 
   // Collect params: assign LoadParam instructions

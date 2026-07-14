@@ -1,0 +1,13 @@
+// coalescing-fix-1783943249
+import("../src/orgntr_prim/fard_source_to_native") as p
+let src = "fn main(){
+  let s = \"hi\" in
+  let l = str_len(s) in
+  let _ = print_int(l) in
+  0
+}
+main()"
+p.compile_and_emit(src, "out/test_str_len")
+// no-peep-1783943398
+// actual-no-peep-1783943457
+// strcall-fix-1783943698

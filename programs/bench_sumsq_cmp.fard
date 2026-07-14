@@ -1,0 +1,2 @@
+import("../src/orgntr_prim/fard_source_to_native") as pipeline
+pipeline.compile_and_emit("fn sq(x){x*x}\nfn sumSq(n){if n<=0 then 0 else sq(n)+sumSq(n-1)}\nsumSq(100000)", "out/bench_sumsq_inl")

@@ -101,6 +101,13 @@ fn apply_subst_to_inst(inst, subst) {
   else if op == "LoadArg" then
     { op: "LoadArg", arg_idx: inst.arg_idx,
       slot: if rec.has(inst, "slot") then subst_slot(inst.slot, subst) else inst.slot }
+  else if op == "StrCall1Direct" then
+    { op: "StrCall1Direct", func: inst.func,
+      arg_slot: subst_slot(inst.arg_slot, subst), dst_slot: inst.dst_slot }
+  else if op == "StrCall2Direct" then
+    { op: "StrCall2Direct", func: inst.func,
+      arg_slot: subst_slot(inst.arg_slot, subst),
+      arg2_slot: subst_slot(inst.arg2_slot, subst), dst_slot: inst.dst_slot }
   else if op == "StoreHeap" then
     { op: "StoreHeap", offset: inst.offset,
       ptr: safe_subst(inst.ptr, subst), src: safe_subst(inst.src, subst) }
@@ -214,7 +221,12 @@ fn compute_cross_block_live(insts) {
 
 fn use_slots_for_cross(inst) {
   let op = inst.op in
-  if op == "CopyI64" then if is_stack(inst.src) then [inst.src.slot] else []
+  if op == "StrCall1Omir" then if rec.has(inst,"arg") && inst.arg.k == "stack" then [inst.arg.slot] else []
+  else if op == "StrCall2Omir" then
+    let s1 = if rec.has(inst,"arg") && inst.arg.k == "stack" then [inst.arg.slot] else [] in
+    let s2 = if rec.has(inst,"arg2") && inst.arg2.k == "stack" then [inst.arg2.slot] else [] in
+    list.concat([s1, s2])
+  else if op == "CopyI64" then if is_stack(inst.src) then [inst.src.slot] else []
   else if op == "SubI64" || op == "AddI64" || op == "MulI64" || op == "CmpI64" then
     list.map(list.filter([inst.lhs, inst.rhs], fn(o){is_stack(o)}), fn(o){o.slot})
   else if op == "CmpStackZero" || op == "MovStackToReg" then
@@ -336,6 +348,9 @@ fn peephole_func(f) {
       if is_stack(inst.idx) then rec.set(a2, slot_key(inst.idx.slot), true) else a2
     else if op == "MovStackToStack" then if is_stack(inst.src) then rec.set(acc, slot_key(inst.src.slot), true) else acc
     else if op == "AddRegStack" then if rec.has(inst,"src") && is_stack(inst.src) then rec.set(acc, slot_key(inst.src.slot), true) else acc
+    else if op == "StoreRax" then rec.set(acc, slot_key(inst.slot), true)
+    else if op == "StrCall1Direct" then rec.set(acc, slot_key(inst.arg_slot), true)
+    else if op == "StrCall2Direct" then rec.set(rec.set(acc, slot_key(inst.arg_slot), true), slot_key(inst.arg2_slot), true)
     else if op == "SubRegImm" || op == "AddRegImm" || op == "CmpRegImm" then if rec.has(inst,"src") && is_stack(inst.src) then rec.set(acc, slot_key(inst.src.slot), true) else acc
     else acc
   }) in

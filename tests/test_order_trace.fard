@@ -1,0 +1,48 @@
+import("../src/orgntr_prim/fardlex") as lex
+import("../src/orgntr_prim/fardparse") as par
+import("../src/orgntr_prim/fard_lower") as lower
+import("../src/orgntr_prim/fard_ir_to_ocir") as bridge
+import("../src/orgntr_prim/ocir_opt") as opt
+import("../src/orgntr_prim/ocir_sccp") as sccp
+import("../src/orgntr_prim/ocir_to_vmir") as vsel
+import("../src/orgntr_prim/vmir_to_omir") as vmir_lower
+import("../src/orgntr_prim/omir_tco") as tco
+import("../src/orgntr_prim/omir_igra") as igra
+import("../src/orgntr_prim/omir_peephole") as peep
+import("std/list") as list
+
+let src = "fn main(){ let s = \"abc\" in let t = \"de\" in let u = str_concat(s,t) in str_len(u) } main()"
+
+let parsed = par.parse_module(lex.tokenize(src), 0)
+let ir = lower.lower_program(parsed.node)
+let ocir0 = bridge.lower_module(ir)
+let ocir = opt.opt_module(sccp.sccp_module(ocir0))
+let vmir = vsel.sel_module(ocir)
+let omir0 = vmir_lower.lower_module(vmir)
+let omir1 = tco.tco_module(omir0)
+let omir2 = igra.igra_module(omir1)
+let omir3 = peep.peephole_module(omir2)
+
+let vf = list.get(list.filter(vmir.funcs, fn(f){ f.name == "main" }), 0)
+let o0 = list.get(list.filter(omir0.funcs, fn(f){ f.name == "main" }), 0)
+let o1 = list.get(list.filter(omir1.funcs, fn(f){ f.name == "main" }), 0)
+let o2 = list.get(list.filter(omir2.funcs, fn(f){ f.name == "main" }), 0)
+let o3 = list.get(list.filter(omir3.funcs, fn(f){ f.name == "main" }), 0)
+
+{
+  vmir: list.build(list.len(vf.insts), fn(i){
+    { seq: i, inst: list.get(vf.insts, i) }
+  }),
+  omir_lower: list.build(list.len(o0.insts), fn(i){
+    { seq: i, inst: list.get(o0.insts, i) }
+  }),
+  omir_tco: list.build(list.len(o1.insts), fn(i){
+    { seq: i, inst: list.get(o1.insts, i) }
+  }),
+  omir_igra: list.build(list.len(o2.insts), fn(i){
+    { seq: i, inst: list.get(o2.insts, i) }
+  }),
+  omir_peephole: list.build(list.len(o3.insts), fn(i){
+    { seq: i, inst: list.get(o3.insts, i) }
+  })
+}

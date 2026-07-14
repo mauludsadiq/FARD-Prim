@@ -92,7 +92,7 @@ fn compute_spill_costs(insts) {
 // For CopyI64(dst, src): if dst and src don't interfere, merge them
 // by unioning their interference sets and treating them as the same node
 
-fn coalesce_copies(insts, intervals, adj) {
+fn coalesce_copies(insts, intervals, adj, unsafe) {
   let copy_insts = list.filter(insts, fn(i) {
     i.op == "CopyI64" && rec.has(i,"dst") && i.dst.k == "stack" &&
     rec.has(i,"src") && i.src.k == "stack"
@@ -101,6 +101,7 @@ fn coalesce_copies(insts, intervals, adj) {
     let dk = slot_key(inst.dst.slot) in
     let sk = slot_key(inst.src.slot) in
     if dk == sk then acc
+    else if rec.has(unsafe, dk) || rec.has(unsafe, sk) then acc
     else if !rec.has(acc.intervals, dk) || !rec.has(acc.intervals, sk) then acc
     else
       let ivi = rec.get(acc.intervals, dk) in
@@ -378,7 +379,7 @@ fn igra_func(f) {
   let adj = build_interference_graph(intervals) in
 
   // Copy coalescing
-  let coalesced = coalesce_copies(insts, intervals, adj) in
+  let coalesced = coalesce_copies(insts, intervals, adj, unsafe) in
   let intervals2 = coalesced.intervals in
   let adj2 = coalesced.adj in
   let aliases = coalesced.aliases in
@@ -392,7 +393,8 @@ fn igra_func(f) {
   // Apply aliases: if sk was merged into dk, give sk dk's color
   let assignments2 = list.fold(rec.keys(aliases), assignments, fn(acc, sk) {
     let dk = rec.get(aliases, sk) in
-    if rec.has(acc, dk) then rec.set(acc, sk, rec.get(acc, dk))
+    if rec.has(unsafe, sk) || rec.has(unsafe, dk) then acc
+    else if rec.has(acc, dk) then rec.set(acc, sk, rec.get(acc, dk))
     else acc
   }) in
 
@@ -404,8 +406,22 @@ fn igra_func(f) {
   }) in
 
   // Rewrite instructions
+  // Resolve aliases for StrCallDirect slot references
+  let resolve_slot = fn(slot) {
+    let k = str.from(slot) in
+    if rec.has(aliases, k) then rec.get(aliases, k) else slot
+  } in
   let rewritten = list.map(insts, fn(inst) {
-    linear.rewrite_inst(inst, assignments2)
+    let inst2 = linear.rewrite_inst(inst, assignments2) in
+    if inst2.op == "StrCall1Direct" then
+      { op: "StrCall1Direct", func: inst2.func,
+        arg_slot: resolve_slot(inst2.arg_slot), dst_slot: resolve_slot(inst2.dst_slot) }
+    else if inst2.op == "StrCall2Direct" then
+      { op: "StrCall2Direct", func: inst2.func,
+        arg_slot: resolve_slot(inst2.arg_slot),
+        arg2_slot: resolve_slot(inst2.arg2_slot),
+        dst_slot: resolve_slot(inst2.dst_slot) }
+    else inst2
   }) in
 
   // Update Prologue/Epilogue with used callee-saved
@@ -476,7 +492,7 @@ fn igra_func_with_profile(f, block_hotness) {
   let all_keys = rec.keys(intervals) in
   let keys = list.filter(all_keys, fn(k){ !rec.has(unsafe, k) }) in
   let adj = build_interference_graph(intervals) in
-  let coalesced = coalesce_copies(insts, intervals, adj) in
+  let coalesced = coalesce_copies(insts, intervals, adj, unsafe) in
   let intervals2 = coalesced.intervals in
   let adj2 = coalesced.adj in
   let aliases = coalesced.aliases in
@@ -486,7 +502,8 @@ fn igra_func_with_profile(f, block_hotness) {
   let assignments = assign_colors_with_costs(keys2, adj2, intervals2, insts, unsafe, spill_costs) in
   let assignments2 = list.fold(rec.keys(aliases), assignments, fn(acc, sk) {
     let dk = rec.get(aliases, sk) in
-    if rec.has(acc, dk) then rec.set(acc, sk, rec.get(acc, dk))
+    if rec.has(unsafe, sk) || rec.has(unsafe, dk) then acc
+    else if rec.has(acc, dk) then rec.set(acc, sk, rec.get(acc, dk))
     else acc
   }) in
   let used_callee = list.filter(callee_regs(), fn(r) {
@@ -494,8 +511,22 @@ fn igra_func_with_profile(f, block_hotness) {
       rec.get(assignments2, k) == r
     })) > 0
   }) in
+  // Resolve aliases for StrCallDirect slot references
+  let resolve_slot = fn(slot) {
+    let k = str.from(slot) in
+    if rec.has(aliases, k) then rec.get(aliases, k) else slot
+  } in
   let rewritten = list.map(insts, fn(inst) {
-    linear.rewrite_inst(inst, assignments2)
+    let inst2 = linear.rewrite_inst(inst, assignments2) in
+    if inst2.op == "StrCall1Direct" then
+      { op: "StrCall1Direct", func: inst2.func,
+        arg_slot: resolve_slot(inst2.arg_slot), dst_slot: resolve_slot(inst2.dst_slot) }
+    else if inst2.op == "StrCall2Direct" then
+      { op: "StrCall2Direct", func: inst2.func,
+        arg_slot: resolve_slot(inst2.arg_slot),
+        arg2_slot: resolve_slot(inst2.arg2_slot),
+        dst_slot: resolve_slot(inst2.dst_slot) }
+    else inst2
   }) in
   let final_insts = list.map(rewritten, fn(inst) {
     if inst.op == "Prologue"

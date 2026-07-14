@@ -278,17 +278,19 @@ fn find_func_offset(funcs, name) {
 fn alloc_stub_size() { 53 }  // bytes in fard_alloc_stub_gc
 fn gc_stub_size()    { 406 } // gc_trigger+mark_object+mark_roots+sweep
 fn stdlib_stub_size() { 285 } // fard_print(128) + fard_print_int(157)
+fn str_stdlib_size()  { 518 } // str_len+str_get+str_concat+int_to_str+str_eq
 fn gc_entry_stub_size() { 127 }  // bytes in entry_stub_text_gc
 
 fn build_text(linked, entry_func) {
   let real_entry = linked.entry in
   let func_off   = find_func_offset(linked.funcs, real_entry) in
-  let total_off  = gc_entry_stub_size() + alloc_stub_size() + gc_stub_size() + stdlib_stub_size() + func_off in
+  let total_off  = gc_entry_stub_size() + alloc_stub_size() + gc_stub_size() + stdlib_stub_size() + str_stdlib_size() + func_off in
   let entry_stub = enc.entry_stub_text_gc(total_off, heap_bump_ptr_vmaddr()) in
   let alloc_stub = enc.fard_alloc_stub_gc(heap_bump_ptr_vmaddr()) in
   let gc_stub    = enc.fard_gc_stub(heap_bump_ptr_vmaddr()) in
   let stdlib     = list.concat([enc.fard_print_stub(), enc.fard_print_int_stub()]) in
-  list.concat([entry_stub, alloc_stub, gc_stub, stdlib, linked.text])
+  let str_stubs  = enc.fard_str_stubs() in
+  list.concat([entry_stub, alloc_stub, gc_stub, stdlib, str_stubs, linked.text])
 }
 
 fn build_symtab_with_stub(linked, stub_size) {

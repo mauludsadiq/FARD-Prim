@@ -89,30 +89,41 @@ fn sel_inst(inst) {
     [vi_store_heap(inst.ptr, inst.offset, inst.src)]
   else if op == "PrintStr" then
     [{ op: "PrintStr", arg: vreg(inst.arg) }]
+  else if op == "StrLen" then
+    [{ op: "StrCall1", func: "fard_str_len", dst: vreg(inst.dst), arg: vreg(inst.arg) }]
+  else if op == "StrGet" then
+    [{ op: "StrCall2", func: "fard_str_get", dst: vreg(inst.dst),
+       arg: vreg(inst.arg), arg2: vreg(inst.arg2) }]
+  else if op == "StrConcat" then
+    [{ op: "StrCall2", func: "fard_str_concat", dst: vreg(inst.dst),
+       arg: vreg(inst.arg), arg2: vreg(inst.arg2) }]
+  else if op == "IntToStr" then
+    [{ op: "StrCall1", func: "fard_int_to_str", dst: vreg(inst.dst), arg: vreg(inst.arg) }]
+  else if op == "StrEq" then
+    [{ op: "StrCall2", func: "fard_str_eq", dst: vreg(inst.dst),
+       arg: vreg(inst.arg), arg2: vreg(inst.arg2) }]
   else if op == "PrintInt" then
     [{ op: "PrintInt", arg: vreg(inst.arg) }]
   else if op == "AllocHeap" then
     [vi_alloc(inst.dst, inst.size)]
   else if op == "ConstStr" then
-    // Expand to: Alloc ptr_reg, StoreHeap len, StoreHeap chars, Copy dst=ptr_reg
-    // Use scratch vregs 50000 + dst*1000 + i to avoid collisions
+    // Expand to: Alloc directly into dst, StoreHeap len, StoreHeap chars
+    // dst vreg is used directly as the alloc target -- no copy needed
     let s = inst.s in
     let n = str.len(s) in
     let size = (1 + n) * 8 in
     let base = 50000 + inst.dst * 1000 in
-    let ptr_r = base in
-    let len_r = base + 1 in
-    let alloc_inst = { op: "Alloc", dst: vreg(ptr_r), size: size } in
+    let len_r = base in
+    let alloc_inst = { op: "Alloc", dst: vreg(inst.dst), size: size } in
     let len_inst = vi_imm(len_r, n) in
-    let len_store = { op: "StoreHeap", ptr: vreg(ptr_r), offset: 0, src: vreg(len_r) } in
+    let len_store = { op: "StoreHeap", ptr: vreg(inst.dst), offset: 0, src: vreg(len_r) } in
     let char_insts = list.flatten(list.build(n, fn(i) {
       let ch = str.char_code(str.char_at(s, i)) in
-      let cr = base + 2 + i in
+      let cr = base + 1 + i in
       [vi_imm(cr, ch),
-       { op: "StoreHeap", ptr: vreg(ptr_r), offset: 8 + i * 8, src: vreg(cr) }]
+       { op: "StoreHeap", ptr: vreg(inst.dst), offset: 8 + i * 8, src: vreg(cr) }]
     })) in
-    let copy_inst = vi_copy(inst.dst, ptr_r) in
-    list.concat([[alloc_inst, len_inst, len_store], char_insts, [copy_inst]])
+    list.concat([[alloc_inst, len_inst, len_store], char_insts])
   else if op == "IncrCounter" then
     [inst]  // pass through directly to OMIR
   else

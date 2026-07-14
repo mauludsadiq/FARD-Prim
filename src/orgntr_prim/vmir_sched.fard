@@ -24,13 +24,16 @@ import("std/str") as str
 fn latency(op) {
   if op == "LoadHeap" || op == "LoadHeapDyn" then 5
   else if op == "Mul" then 3
-  else if op == "Call" || op == "CallIndirect" || op == "Alloc" then 20
+  else if op == "Call" || op == "CallIndirect" ||
+          op == "StrCall1" || op == "StrCall2" ||
+          op == "Alloc" then 20
   else 1
 }
 
 fn is_barrier(op) {
-  op == "Call" || op == "CallIndirect" || op == "Alloc" ||
-  op == "StoreHeap" || op == "MakeClosure"
+  op == "Call" || op == "CallIndirect" ||
+  op == "StrCall1" || op == "StrCall2" ||
+  op == "Alloc" || op == "StoreHeap" || op == "MakeClosure"
 }
 
 // Collect defined vreg for an instruction (null if none)
@@ -66,6 +69,10 @@ fn uses_of(inst) {
     then list.concat([acc, list.map(
       list.filter(inst.captures, fn(c){ c.k == "vreg" }), fn(c){ c.r })])
     else acc in
+  let acc = if rec.has(inst,"arg") && inst.arg.k == "vreg"
+    then list.append(acc, inst.arg.r) else acc in
+  let acc = if rec.has(inst,"arg2") && inst.arg2.k == "vreg"
+    then list.append(acc, inst.arg2.r) else acc in
   acc
 }
 
@@ -75,7 +82,8 @@ fn is_store_like(op) {
 }
 
 fn is_call_like(op) {
-  op == "Call" || op == "CallIndirect"
+  op == "Call" || op == "CallIndirect" ||
+  op == "StrCall1" || op == "StrCall2"
 }
 
 fn is_load_like(op) {

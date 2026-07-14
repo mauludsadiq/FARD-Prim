@@ -7,8 +7,18 @@ fn key_label(id) {
   str.from(id)
 }
 
+fn operand_load_size(op) {
+  if op.k == "reg" then 3 else 4  // mov reg,reg=3; mov reg,[rbp+imm8]=4
+}
+
 fn size_of_inst(inst) {
-  list.len(enc.encode_inst(inst))
+  if inst.op == "StrCall1Direct" then 4 + 5 + 4  // load_rsi + call + store_dst
+  else if inst.op == "StrCall2Direct" then 4 + 4 + 5 + 4  // load_rsi + load_rdx + call + store_dst
+  else if inst.op == "StrCall1Omir" then
+    operand_load_size(inst.arg) + 5 + operand_load_size(inst.dst)
+  else if inst.op == "StrCall2Omir" then
+    operand_load_size(inst.arg) + operand_load_size(inst.arg2) + 5 + operand_load_size(inst.dst)
+  else list.len(enc.encode_inst(inst))
 }
 
 fn scan_labels_and_patches(insts) {
@@ -50,6 +60,42 @@ fn scan_labels_and_patches(insts) {
         pc: acc.pc + size_of_inst(inst),
         labels: acc.labels,
         patches: list.append(acc.patches, { kind: "CallReloc", at: acc.pc + 1, next_ip: acc.pc + 5, symbol: inst.name })
+      }
+    else if inst.op == "StrCall1Direct" then
+      let s = inst.arg_slot in
+      let d = inst.dst_slot in
+      let rsi_sz = if s >= -128 && s <= 127 then 4 else 7 in
+      let dst_sz = if d >= -128 && d <= 127 then 4 else 7 in
+      let total = rsi_sz + 5 + dst_sz in
+      { pc: acc.pc + total, labels: acc.labels,
+        patches: list.append(acc.patches, { kind: "CallReloc", at: acc.pc + rsi_sz + 1, next_ip: acc.pc + rsi_sz + 5, symbol: inst.func }) }
+    else if inst.op == "StrCall2Direct" then
+      let s = inst.arg_slot in
+      let s2 = inst.arg2_slot in
+      let d = inst.dst_slot in
+      let rsi_sz = if s >= -128 && s <= 127 then 4 else 7 in
+      let rdx_sz = if s2 >= -128 && s2 <= 127 then 4 else 7 in
+      let dst_sz = if d >= -128 && d <= 127 then 4 else 7 in
+      let total = rsi_sz + rdx_sz + 5 + dst_sz in
+      { pc: acc.pc + total, labels: acc.labels,
+        patches: list.append(acc.patches, { kind: "CallReloc", at: acc.pc + rsi_sz + rdx_sz + 1, next_ip: acc.pc + rsi_sz + rdx_sz + 5, symbol: inst.func }) }
+    else if inst.op == "StrCall1Omir" then
+      let rsi_sz = operand_load_size(inst.arg) in
+      let total = rsi_sz + 5 + operand_load_size(inst.dst) in
+      {
+        pc: acc.pc + total,
+        labels: acc.labels,
+        patches: list.append(acc.patches, { kind: "CallReloc", at: acc.pc + rsi_sz + 1, next_ip: acc.pc + rsi_sz + 5, symbol: inst.func })
+      }
+    else if inst.op == "StrCall2Omir" then
+      let rsi_sz = operand_load_size(inst.arg) in
+      let rdx_sz = operand_load_size(inst.arg2) in
+      let call_at = rsi_sz + rdx_sz in
+      let total = call_at + 5 + operand_load_size(inst.dst) in
+      {
+        pc: acc.pc + total,
+        labels: acc.labels,
+        patches: list.append(acc.patches, { kind: "CallReloc", at: acc.pc + call_at + 1, next_ip: acc.pc + call_at + 5, symbol: inst.func })
       }
     else
       {

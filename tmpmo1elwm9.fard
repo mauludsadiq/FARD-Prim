@@ -1,0 +1,4 @@
+
+import("src/orgntr_prim/fard_source_to_native") as native
+let src = "fn rec(n){if n<=0 then 3 else n+rec(n-1)}\nrec(3)"
+native.compile_and_emit(src, "out/fuzz2_1")

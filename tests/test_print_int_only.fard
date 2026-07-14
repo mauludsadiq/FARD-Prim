@@ -1,0 +1,9 @@
+import("../src/orgntr_prim/fard_source_to_native") as p
+
+p.compile_and_emit("
+fn main(){
+  let _ = print_int(42) in
+  0
+}
+main()
+", "out/test_print_int_only")

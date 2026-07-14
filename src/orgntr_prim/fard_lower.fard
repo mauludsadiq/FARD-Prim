@@ -239,6 +239,49 @@ fn lower_expr(node, env, code, ctx) {
     let _ = emit(code, { op: "call_global", name: "io.print_int",
       dst: dst, args: [arg] }) in
     dst
+  else if t == "call" &&
+    list.len(node.args) == 1 &&
+    node.fn_n.t == "var" && node.fn_n.v == "str_len" then
+    let arg = lower_expr(list.get(node.args, 0), env, code, ctx) in
+    let dst = alloc_local(ctx) in
+    let _ = emit(code, { op: "call_global", name: "io.str_len",
+      dst: dst, args: [arg] }) in
+    dst
+  else if t == "call" &&
+    list.len(node.args) == 2 &&
+    node.fn_n.t == "var" && node.fn_n.v == "str_get" then
+    let arg0 = lower_expr(list.get(node.args, 0), env, code, ctx) in
+    let arg1 = lower_expr(list.get(node.args, 1), env, code, ctx) in
+    let dst = alloc_local(ctx) in
+    let _ = emit(code, { op: "call_global", name: "io.str_get",
+      dst: dst, args: [arg0, arg1] }) in
+    dst
+  else if t == "call" &&
+    list.len(node.args) == 2 &&
+    node.fn_n.t == "var" && node.fn_n.v == "str_concat" then
+    let arg0 = lower_expr(list.get(node.args, 0), env, code, ctx) in
+    let arg1 = lower_expr(list.get(node.args, 1), env, code, ctx) in
+    let dst = alloc_local(ctx) in
+    let _ = emit(code, { op: "call_global", name: "io.str_concat",
+      dst: dst, args: [arg0, arg1] }) in
+    dst
+  else if t == "call" &&
+    list.len(node.args) == 1 &&
+    node.fn_n.t == "var" && node.fn_n.v == "int_to_str" then
+    let arg = lower_expr(list.get(node.args, 0), env, code, ctx) in
+    let dst = alloc_local(ctx) in
+    let _ = emit(code, { op: "call_global", name: "io.int_to_str",
+      dst: dst, args: [arg] }) in
+    dst
+  else if t == "call" &&
+    list.len(node.args) == 2 &&
+    node.fn_n.t == "var" && node.fn_n.v == "str_eq" then
+    let arg0 = lower_expr(list.get(node.args, 0), env, code, ctx) in
+    let arg1 = lower_expr(list.get(node.args, 1), env, code, ctx) in
+    let dst = alloc_local(ctx) in
+    let _ = emit(code, { op: "call_global", name: "io.str_eq",
+      dst: dst, args: [arg0, arg1] }) in
+    dst
   else if t == "call" then
     lower_call(node, env, code, ctx)
 

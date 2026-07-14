@@ -1,0 +1,15 @@
+import("../src/orgntr_prim/fard_source_to_native") as p
+
+fn check() {
+  let r = p.compile_and_emit(
+    "fn main(){ let s = \"ab\" in let t = \"cd\" in let u = str_concat(s,t) in str_len(u) } main()",
+    "out/test_sc"
+  ) in
+  if r.ok
+    then { name: "str_concat", compiled: true, err: "" }
+    else { name: "str_concat", compiled: false, err: r.err }
+}
+
+[
+  check()
+]
