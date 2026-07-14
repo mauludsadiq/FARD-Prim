@@ -26,6 +26,10 @@ All produce the same native binary. Same IR, same backend, same output.
    xs[0]                                   = 10   list indexing
    r.a                                     = 42   record field access
    s[0]                                    = 104  string char
+   str_concat("hello"," world")            = "hello world"  string concat
+   str_len("hello world")                 = 11   string length
+   int_to_str(42)                          = "42"  integer to string
+   str_eq(s,s)                             = 1    string equality
    adder(10)(32)                           = 42   closure with captured variable
    while 0 fn(s){s<n} fn(s){s+1} / n=10  = 10   while loop
 
@@ -33,7 +37,7 @@ All produce the same native binary. Same IR, same backend, same output.
 
 | Platform     | Format | Result |
 |--------------|--------|--------|
-| macOS x86-64 | Mach-O | 11/11  |
+| macOS x86-64 | Mach-O | 11/11 + string stdlib |
 | Linux x86-64 | ELF64  | 11/11  |
 | Linux ARM64  | ELF64  | 6/6    |
 | macOS ARM64  | Mach-O | structurally correct; blocked by ASP on macOS 15 without provisioning profile |
