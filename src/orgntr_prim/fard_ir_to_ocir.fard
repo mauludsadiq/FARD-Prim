@@ -104,6 +104,26 @@ fn lower_instr_one(instr, fn_names, field_order, stdlib_regs) {
         arg2: list.get(instr.args, 1) }
     else if instr.name == "io.int_to_str" then
       { op: "IntToStr", dst: instr.dst, arg: list.get(instr.args, 0) }
+    else if instr.name == "io.fs_open" then
+      ocir.inst_call_i64(instr.dst, "fard_fs_open", instr.args)
+    else if instr.name == "io.fs_read" then
+      ocir.inst_call_i64(instr.dst, "fard_fs_read", instr.args)
+    else if instr.name == "io.fs_write" then
+      ocir.inst_call_i64(instr.dst, "fard_fs_write", instr.args)
+    else if instr.name == "io.fs_close" then
+      ocir.inst_call_i64(instr.dst, "fard_fs_close", instr.args)
+    else if instr.name == "io.fs_lseek" then
+      ocir.inst_call_i64(instr.dst, "fard_fs_lseek", instr.args)
+    else if instr.name == "io.fs_unlink" then
+      ocir.inst_call_i64(instr.dst, "fard_fs_unlink", instr.args)
+    else if instr.name == "io.fs_rename" then
+      ocir.inst_call_i64(instr.dst, "fard_fs_rename", instr.args)
+    else if instr.name == "io.fs_mkdir" then
+      ocir.inst_call_i64(instr.dst, "fard_fs_mkdir", instr.args)
+    else if instr.name == "io.fs_rmdir" then
+      ocir.inst_call_i64(instr.dst, "fard_fs_rmdir", instr.args)
+    else if instr.name == "io.fs_fstat" then
+      ocir.inst_call_i64(instr.dst, "fard_fs_fstat", instr.args)
     else if instr.name == "io.str_eq" then
       { op: "StrEq", dst: instr.dst, arg: list.get(instr.args, 0),
         arg2: list.get(instr.args, 1) }

@@ -34,7 +34,7 @@ fn build_symbol_table(laid_out) {
 // base = base address of this function in the linked text
 // Returns { resolved: bool, text: patched_text }
 fn text_vmaddr() { 4294971392 }  // 0x100001000 (Mach-O default)
-fn alloc_stub_size() { 53 + 406 + 285 + 518 }  // alloc(53) + gc(406) + print(285) + str(518)
+fn alloc_stub_size() { 53 + 406 + 285 + 518 + 492 }  // alloc(53) + gc(406) + print(285) + str(518)
 fn entry_stub_size() { 127 }
 fn fn_vmaddr(base_in_linked_text) {
   text_vmaddr() + entry_stub_size() + alloc_stub_size() + base_in_linked_text
@@ -106,6 +106,16 @@ fn link_module(encoded_module) {
   let sym_table = rec.set(sym_table, "fard_str_concat", -486) in
   let sym_table = rec.set(sym_table, "fard_int_to_str", -326) in
   let sym_table = rec.set(sym_table, "fard_str_eq", -54) in
+  let sym_table = rec.set(sym_table, "fard_fs_open", -492) in
+  let sym_table = rec.set(sym_table, "fard_fs_read", -416) in
+  let sym_table = rec.set(sym_table, "fard_fs_write", -397) in
+  let sym_table = rec.set(sym_table, "fard_fs_close", -378) in
+  let sym_table = rec.set(sym_table, "fard_fs_lseek", -359) in
+  let sym_table = rec.set(sym_table, "fard_fs_unlink", -340) in
+  let sym_table = rec.set(sym_table, "fard_fs_rename", -284) in
+  let sym_table = rec.set(sym_table, "fard_fs_mkdir", -199) in
+  let sym_table = rec.set(sym_table, "fard_fs_rmdir", -133) in
+  let sym_table = rec.set(sym_table, "fard_fs_fstat", -77) in
   let linked_funcs = list.map(laid_out, fn(entry) {
     resolve_func_relocs(entry, sym_table)
   }) in
@@ -143,6 +153,16 @@ fn link_module_with_vmaddr(encoded_module, base_vmaddr) {
   let sym_table = rec.set(sym_table, "fard_str_concat", -486) in
   let sym_table = rec.set(sym_table, "fard_int_to_str", -326) in
   let sym_table = rec.set(sym_table, "fard_str_eq", -54) in
+  let sym_table = rec.set(sym_table, "fard_fs_open", -492) in
+  let sym_table = rec.set(sym_table, "fard_fs_read", -416) in
+  let sym_table = rec.set(sym_table, "fard_fs_write", -397) in
+  let sym_table = rec.set(sym_table, "fard_fs_close", -378) in
+  let sym_table = rec.set(sym_table, "fard_fs_lseek", -359) in
+  let sym_table = rec.set(sym_table, "fard_fs_unlink", -340) in
+  let sym_table = rec.set(sym_table, "fard_fs_rename", -284) in
+  let sym_table = rec.set(sym_table, "fard_fs_mkdir", -199) in
+  let sym_table = rec.set(sym_table, "fard_fs_rmdir", -133) in
+  let sym_table = rec.set(sym_table, "fard_fs_fstat", -77) in
   let linked_funcs = list.map(laid_out, fn(entry) { resolve_func_relocs_with_vmaddr(entry, sym_table, base_vmaddr) }) in
   let text = list.flatten(list.map(linked_funcs, fn(f) { f.text })) in
   let unresolved = list.flatten(list.map(linked_funcs, fn(f) { f.relocs })) in

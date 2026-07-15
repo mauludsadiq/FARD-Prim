@@ -283,7 +283,35 @@ fn lower_expr(node, env, code, ctx) {
       dst: dst, args: [arg0, arg1] }) in
     dst
   else if t == "call" then
-    lower_call(node, env, code, ctx)
+    if rec.has(node, "fn_n") then
+      if node.fn_n.t == "get" then
+        if rec.has(node.fn_n, "obj") then
+          if node.fn_n.obj.t == "var" then
+            if rec.has(node.fn_n.obj, "v") then
+              if node.fn_n.obj.v == "fs" then
+                let method = rec.get(node.fn_n, "field") in
+                let lowered_args = list.map(node.args, fn(a){ lower_expr(a, env, code, ctx) }) in
+                let dst = alloc_local(ctx) in
+                let name = if method == "open" then "io.fs_open"
+                  else if method == "read" then "io.fs_read"
+                  else if method == "write" then "io.fs_write"
+                  else if method == "close" then "io.fs_close"
+                  else if method == "lseek" then "io.fs_lseek"
+                  else if method == "unlink" then "io.fs_unlink"
+                  else if method == "rename" then "io.fs_rename"
+                  else if method == "mkdir" then "io.fs_mkdir"
+                  else if method == "rmdir" then "io.fs_rmdir"
+                  else if method == "fstat" then "io.fs_fstat"
+                  else "io.fs_unknown" in
+                let _ = emit(code, { op: "call_global", name: name, dst: dst, args: lowered_args }) in
+                dst
+              else lower_call(node, env, code, ctx)
+            else lower_call(node, env, code, ctx)
+          else lower_call(node, env, code, ctx)
+        else lower_call(node, env, code, ctx)
+      else lower_call(node, env, code, ctx)
+    else lower_call(node, env, code, ctx)
+
 
   else if t == "match" then
     lower_match(node, env, code, ctx)

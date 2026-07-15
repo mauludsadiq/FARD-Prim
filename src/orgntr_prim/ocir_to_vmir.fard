@@ -73,7 +73,15 @@ fn sel_inst(inst) {
   else if op == "CmpI64" then
     [vi_cmp(inst.dst, inst.lhs, inst.rhs, inst.cmp)]
   else if op == "CallI64" then
-    [vi_call(inst.dst, inst.callee, inst.args)]
+    if !rec.has(inst,"callee") then [vi_call(inst.dst, inst.callee, inst.args)]
+    else if inst.callee == "fard_fs_open" || inst.callee == "fard_fs_read" ||
+        inst.callee == "fard_fs_write" || inst.callee == "fard_fs_close" ||
+        inst.callee == "fard_fs_lseek" || inst.callee == "fard_fs_unlink" ||
+        inst.callee == "fard_fs_rename" || inst.callee == "fard_fs_mkdir" ||
+        inst.callee == "fard_fs_rmdir" || inst.callee == "fard_fs_fstat" then
+      [{ op: "FsCallV", func: inst.callee, dst: vreg(inst.dst),
+         args: list.map(inst.args, fn(a){ vreg(a) }) }]
+    else [vi_call(inst.dst, inst.callee, inst.args)]
   else if op == "CallIndirect" then
     [vi_call_indirect(inst.dst, inst.closure_reg, inst.args)]
   else if op == "MakeClosure" then

@@ -128,6 +128,8 @@ fn unrewritable_slots(insts) {
         (inst.dst.name == "rsi" || inst.dst.name == "rdx") then
         [inst.src.slot]
       else if op == "StoreRax" then [inst.slot]
+      else if op == "FsCallDirect" then
+        list.concat([inst.arg_slots, [inst.dst_slot]])
       else if op == "StrCall1Direct" then [inst.arg_slot, inst.dst_slot]
       else if op == "StrCall2Direct" then [inst.arg_slot, inst.arg2_slot, inst.dst_slot]
       else if op == "WriteFvalIntOps" || op == "UnboxInt" then

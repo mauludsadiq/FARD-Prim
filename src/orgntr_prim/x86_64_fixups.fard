@@ -61,6 +61,14 @@ fn scan_labels_and_patches(insts) {
         labels: acc.labels,
         patches: list.append(acc.patches, { kind: "CallReloc", at: acc.pc + 1, next_ip: acc.pc + 5, symbol: inst.name })
       }
+    else if inst.op == "FsCallDirect" then
+      let load_sz = list.fold(inst.arg_slots, 0, fn(acc, s) {
+        acc + (if s >= -128 && s <= 127 then 4 else 7)
+      }) in
+      let d = inst.dst_slot in
+      let dst_sz = if d >= -128 && d <= 127 then 4 else 7 in
+      { pc: acc.pc + load_sz + 5 + dst_sz, labels: acc.labels,
+        patches: list.append(acc.patches, { kind: "CallReloc", at: acc.pc + load_sz + 1, next_ip: acc.pc + load_sz + 5, symbol: inst.func }) }
     else if inst.op == "StrCall1Direct" then
       let s = inst.arg_slot in
       let d = inst.dst_slot in

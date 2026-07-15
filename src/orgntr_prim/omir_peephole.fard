@@ -101,6 +101,10 @@ fn apply_subst_to_inst(inst, subst) {
   else if op == "LoadArg" then
     { op: "LoadArg", arg_idx: inst.arg_idx,
       slot: if rec.has(inst, "slot") then subst_slot(inst.slot, subst) else inst.slot }
+  else if op == "FsCallDirect" then
+    { op: "FsCallDirect", func: inst.func,
+      arg_slots: list.map(inst.arg_slots, fn(s){ subst_slot(s, subst) }),
+      dst_slot: inst.dst_slot }
   else if op == "StrCall1Direct" then
     { op: "StrCall1Direct", func: inst.func,
       arg_slot: subst_slot(inst.arg_slot, subst), dst_slot: inst.dst_slot }
@@ -349,6 +353,8 @@ fn peephole_func(f) {
     else if op == "MovStackToStack" then if is_stack(inst.src) then rec.set(acc, slot_key(inst.src.slot), true) else acc
     else if op == "AddRegStack" then if rec.has(inst,"src") && is_stack(inst.src) then rec.set(acc, slot_key(inst.src.slot), true) else acc
     else if op == "StoreRax" then rec.set(acc, slot_key(inst.slot), true)
+    else if op == "FsCallDirect" then
+      list.fold(inst.arg_slots, acc, fn(a, s){ rec.set(a, slot_key(s), true) })
     else if op == "StrCall1Direct" then rec.set(acc, slot_key(inst.arg_slot), true)
     else if op == "StrCall2Direct" then rec.set(rec.set(acc, slot_key(inst.arg_slot), true), slot_key(inst.arg2_slot), true)
     else if op == "SubRegImm" || op == "AddRegImm" || op == "CmpRegImm" then if rec.has(inst,"src") && is_stack(inst.src) then rec.set(acc, slot_key(inst.src.slot), true) else acc

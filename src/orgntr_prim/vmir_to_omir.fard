@@ -188,6 +188,10 @@ fn lower_vmir_inst(inst, slots) {
     let dst = slot_for(slots, inst.dst) in
     let arg = slot_for(slots, inst.arg) in
     [{ op: "StrCall1Direct", func: inst.func, arg_slot: arg.slot, dst_slot: dst.slot }]
+  else if op == "FsCallV" then
+    let dst = slot_for(slots, inst.dst) in
+    let arg_slots = list.map(inst.args, fn(a){ slot_for(slots, a).slot }) in
+    [{ op: "FsCallDirect", func: inst.func, arg_slots: arg_slots, dst_slot: dst.slot }]
   else if op == "StrCall2" then
     let dst = slot_for(slots, inst.dst) in
     let arg = slot_for(slots, inst.arg) in
