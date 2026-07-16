@@ -30,6 +30,7 @@ All produce the same native binary. Same IR, same backend, same output.
    str_len("hello world")                 = 11   string length
    int_to_str(42)                          = "42"  integer to string
    str_eq(s,s)                             = 1    string equality
+   fs.open/close/read/write               = fd   file I/O (FARD, Python, JS)
    adder(10)(32)                           = 42   closure with captured variable
    while 0 fn(s){s<n} fn(s){s+1} / n=10  = 10   while loop
 
@@ -232,7 +233,7 @@ Achieved via:
 
 ## Source
 
-16,219 lines of FARD across 69 files in src/orgntr_prim/.
+16373 lines of FARD across 69 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (775 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -270,7 +271,6 @@ Achieved via:
 
 ## Next
 
-   File I/O
    Cross-block DSE (extend to multi-block functions)
    Type tags for GC precision (conservative currently safe)
    Wine/Windows validation of PE exit code
