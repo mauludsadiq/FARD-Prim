@@ -25,14 +25,14 @@ fn latency(op) {
   if op == "LoadHeap" || op == "LoadHeapDyn" then 5
   else if op == "Mul" then 3
   else if op == "Call" || op == "CallIndirect" ||
-          op == "StrCall1" || op == "StrCall2" || op == "FsCallV" ||
+          op == "StrCall1" || op == "StrCall2" || op == "FsCallV" || op == "FsCallV" ||
           op == "Alloc" then 20
   else 1
 }
 
 fn is_barrier(op) {
   op == "Call" || op == "CallIndirect" ||
-  op == "StrCall1" || op == "StrCall2" || op == "FsCallV" ||
+  op == "StrCall1" || op == "StrCall2" || op == "FsCallV" || op == "FsCallV" ||
   op == "Alloc" || op == "StoreHeap" || op == "MakeClosure"
 }
 
@@ -83,7 +83,7 @@ fn is_store_like(op) {
 
 fn is_call_like(op) {
   op == "Call" || op == "CallIndirect" ||
-  op == "StrCall1" || op == "StrCall2"
+  op == "StrCall1" || op == "StrCall2" || op == "FsCallV"
 }
 
 fn is_load_like(op) {

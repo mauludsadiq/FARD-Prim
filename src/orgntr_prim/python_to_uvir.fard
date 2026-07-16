@@ -57,7 +57,7 @@ fn lower_expr(node, env, bb, ctx) {
     let v = node.value in
     let ins = if type.of(v) == "int" then uvir.inst_const(dst, uvir.val_int(v))
       else if type.of(v) == "bool" then uvir.inst_const(dst, uvir.val_bool(v))
-      else if type.of(v) == "string" then uvir.inst_str_const(dst, v)
+      else if type.of(v) == "string" || type.of(v) == "text" then uvir.inst_str_const(dst, v)
       else if v == null then uvir.inst_const(dst, uvir.val_null())
       else uvir.inst_const(dst, uvir.val_int(0)) in
     { reg: dst, bb: bb_emit(bb, ins), extra: [] }
@@ -102,7 +102,19 @@ fn lower_expr(node, env, bb, ctx) {
     }) in
     let dst = alloc_reg(ctx) in
     let fn_name = if node.func.t == "Name" then node.func.id else "__unknown__" in
-    if list.any(ctx.fn_names, fn(n) { n == fn_name }) then
+    if fn_name == "fs_open" then
+      { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, "fard_fs_open", ar.regs)), extra: ar.extra }
+    else if fn_name == "fs_read" then
+      { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, "fard_fs_read", ar.regs)), extra: ar.extra }
+    else if fn_name == "fs_write" then
+      { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, "fard_fs_write", ar.regs)), extra: ar.extra }
+    else if fn_name == "fs_close" then
+      { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, "fard_fs_close", ar.regs)), extra: ar.extra }
+    else if fn_name == "fs_lseek" then
+      { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, "fard_fs_lseek", ar.regs)), extra: ar.extra }
+    else if fn_name == "fs_unlink" then
+      { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, "fard_fs_unlink", ar.regs)), extra: ar.extra }
+    else if list.any(ctx.fn_names, fn(n) { n == fn_name }) then
       { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, fn_name, ar.regs)), extra: ar.extra }
     else
       let fr = lower_expr(node.func, env, ar.bb, ctx) in

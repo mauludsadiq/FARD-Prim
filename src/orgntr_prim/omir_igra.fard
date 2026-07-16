@@ -421,6 +421,10 @@ fn igra_func(f) {
         arg_slot: resolve_slot(inst2.arg_slot),
         arg2_slot: resolve_slot(inst2.arg2_slot),
         dst_slot: resolve_slot(inst2.dst_slot) }
+    else if inst2.op == "FsCallDirect" then
+      { op: "FsCallDirect", func: inst2.func,
+        arg_slots: list.map(inst2.arg_slots, fn(s){ resolve_slot(s) }),
+        dst_slot: resolve_slot(inst2.dst_slot) }
     else inst2
   }) in
 
@@ -525,6 +529,10 @@ fn igra_func_with_profile(f, block_hotness) {
       { op: "StrCall2Direct", func: inst2.func,
         arg_slot: resolve_slot(inst2.arg_slot),
         arg2_slot: resolve_slot(inst2.arg2_slot),
+        dst_slot: resolve_slot(inst2.dst_slot) }
+    else if inst2.op == "FsCallDirect" then
+      { op: "FsCallDirect", func: inst2.func,
+        arg_slots: list.map(inst2.arg_slots, fn(s){ resolve_slot(s) }),
         dst_slot: resolve_slot(inst2.dst_slot) }
     else inst2
   }) in
