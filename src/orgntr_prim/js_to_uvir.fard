@@ -55,7 +55,7 @@ fn lower_expr(node, env, bb, ctx) {
     let ins = if type.of(v) == "int" then uvir.inst_const(dst, uvir.val_int(v))
       else if type.of(v) == "float" then uvir.inst_const(dst, uvir.val_int(v))
       else if type.of(v) == "bool"   then uvir.inst_const(dst, uvir.val_bool(v))
-      else if type.of(v) == "string" then uvir.inst_str_const(dst, v)
+      else if type.of(v) == "string" || type.of(v) == "text" then uvir.inst_str_const(dst, v)
       else if v == null then uvir.inst_const(dst, uvir.val_null())
       else uvir.inst_const(dst, uvir.val_int(0)) in
     { reg: dst, bb: bb_emit(bb, ins), extra: [] }
