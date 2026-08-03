@@ -44,7 +44,11 @@ fn vi_store_heap(ptr, offset, src) {
   { op: "StoreHeap", ptr: vreg(ptr), offset: offset, src: vreg(src) }
 }
 fn vi_alloc(dst, size) {
-  { op: "Alloc", dst: vreg(dst), size: size }
+  { op: "Alloc", dst: vreg(dst), size: size, ptrmask: 0 }
+}
+
+fn vi_alloc_tagged(dst, size, ptrmask) {
+  { op: "Alloc", dst: vreg(dst), size: size, ptrmask: ptrmask }
 }
 fn vi_const_str(dst, s) {
   { op: "ConstStr", dst: vreg(dst), s: s }
@@ -113,7 +117,8 @@ fn sel_inst(inst) {
   else if op == "PrintInt" then
     [{ op: "PrintInt", arg: vreg(inst.arg) }]
   else if op == "AllocHeap" then
-    [vi_alloc(inst.dst, inst.size)]
+    let pm = if rec.has(inst, "ptrmask") then inst.ptrmask else 0 in
+    [vi_alloc_tagged(inst.dst, inst.size, pm)]
   else if op == "ConstStr" then
     // Expand to: Alloc directly into dst, StoreHeap len, StoreHeap chars
     // dst vreg is used directly as the alloc target -- no copy needed

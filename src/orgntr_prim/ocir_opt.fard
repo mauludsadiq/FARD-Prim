@@ -6,6 +6,7 @@
 ///   4. const_fold — AddI64/SubI64/MulI64 with two ImmI64 operands -> ImmI64
 
 import("std/list") as list
+import("std/bits") as bits
 import("std/rec")  as rec
 import("std/str")  as str
 import("ocir_analysis") as analysis
@@ -334,4 +335,53 @@ fn opt_module(m) {
   elim_empty_blocks_module(m1)
 }
 
-export { opt_module, opt_func, copy_prop_func, dce_func, const_fold_func, elim_empty_blocks_module }
+
+// ── Pointer bitmap computation for precise GC ─────────────────────────────
+// For each AllocHeap instruction, compute a bitmap of which fields are
+// pointer-typed (from AllocHeap or MakeClosure sources).
+// Bitmap bit i = 1 means field at offset (i*8) is a pointer.
+// Stored in inst.ptrmask (0 = unknown/conservative).
+
+fn compute_alloc_ptrmasks_block(block) {
+  let n = list.len(block.insts) in
+  // Build origin map: reg -> true if it came from AllocHeap/MakeClosure
+  let origins = list.fold(block.insts, {}, fn(acc, inst) {
+    if inst.op == "AllocHeap" || inst.op == "MakeClosure" then
+      rec.set(acc, str.from(inst.dst), true)
+    else if inst.op == "CopyI64" && rec.has(inst, "src") then
+      if rec.has(acc, str.from(inst.src)) then
+        rec.set(acc, str.from(inst.dst), true)
+      else acc
+    else acc
+  }) in
+  // For each AllocHeap, collect stores and build bitmap
+  let new_insts = list.map(block.insts, fn(inst) {
+    if inst.op != "AllocHeap" then inst
+    else
+      let ptr = inst.dst in
+      let bitmap = list.fold(block.insts, 0, fn(acc, si) {
+        if si.op != "StoreHeap" then acc
+        else if si.ptr != ptr then acc
+        else
+          let field_idx = si.offset / 8 in
+          let src_key = str.from(si.src) in
+          let is_ptr = rec.has(origins, src_key) in
+          if is_ptr && field_idx < 31
+            then acc + bits.bshl(1, field_idx)
+            else acc
+      }) in
+      { op: inst.op, dst: inst.dst, size: inst.size, ptrmask: bitmap }
+  }) in
+  { label: block.label, insts: new_insts, term: block.term }
+}
+
+fn compute_alloc_ptrmasks_func(f) {
+  { name: f.name, params: f.params,
+    blocks: list.map(f.blocks, fn(b){ compute_alloc_ptrmasks_block(b) }) }
+}
+
+fn compute_alloc_ptrmasks(m) {
+  { entry: m.entry, funcs: list.map(m.funcs, compute_alloc_ptrmasks_func) }
+}
+
+export { opt_module, opt_func, copy_prop_func, dce_func, const_fold_func, elim_empty_blocks_module, compute_alloc_ptrmasks }
