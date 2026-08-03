@@ -271,7 +271,6 @@ Achieved via:
 
 ## Next
 
-   Cross-block DSE (extend to multi-block functions)
    Type tags for GC precision (conservative currently safe)
    Wine/Windows validation of PE exit code
 
