@@ -271,7 +271,7 @@ Achieved via:
 
 ## Next
 
-   Type tags for GC precision (conservative currently safe)
+   Precise GC (ptrmask infrastructure in place; mark_object replacement pending)
 
 
 ## Repos
