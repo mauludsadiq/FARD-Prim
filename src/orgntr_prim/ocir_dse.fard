@@ -200,4 +200,182 @@ fn dse_module(m) {
   { entry: m.entry, funcs: list.map(m.funcs, dse_func) }
 }
 
-export { dse_module, dse_func, dse_block, build_origin_map_for_dse }
+
+// ── Cross-block DSE ───────────────────────────────────────────────
+// A StoreHeap in block B to location (origin, offset) is dead iff:
+//   1. No load of (origin, offset) is reachable from after the store
+//      before another store to the same location (cross-block liveness)
+//   2. The ptr_origin does not escape the function (not returned, not
+//      passed to a call that outlives the current frame)
+//
+// Implementation:
+//   - Compute escaped_origins: set of ptr_origins that flow into RetI64
+//     or CallI64/CallIndirect args across all blocks
+//   - Compute live_out[B][key]: backward dataflow
+//   - In each block backward scan: mark StoreHeap dead if !live_out && !escaped
+
+fn successors_of(term) {
+  if term.op == "Br" then [term.to]
+  else if term.op == "BrCond" then [term.then_blk, term.else_blk]
+  else []
+}
+
+fn union_sets(a, b) {
+  list.fold(rec.keys(b), a, fn(acc, k) { rec.set(acc, k, true) })
+}
+
+fn diff_sets(a, b) {
+  list.fold(rec.keys(a), {}, fn(acc, k) {
+    if rec.has(b, k) then acc else rec.set(acc, k, true)
+  })
+}
+
+fn compute_escaped_origins(blocks, origin_map) {
+  // A ptr_origin escapes if:
+  //   - it flows into RetI64 (via CopyI64/MoveI64 chains)
+  //   - it is passed as arg to CallI64/CallIndirect
+  // Conservative: track all registers that flow from AllocHeap
+  // and mark escaped if used in ret or call args
+  list.fold(blocks, {}, fn(acc, block) {
+    list.fold(block.insts, acc, fn(a, inst) {
+      let op = inst.op in
+      if op == "CallI64" || op == "CallIndirect" then
+        // All args that are ptr origins escape
+        let args = if rec.has(inst, "args") then inst.args else [] in
+        list.fold(args, a, fn(a2, arg) {
+          let pk = str.from(arg) in
+          if rec.has(origin_map, pk)
+            then rec.set(a2, str.from(rec.get(origin_map, pk)), true)
+            else a2
+        })
+      else a
+    })
+  })
+}
+
+fn block_gen_kill(block, origin_map) {
+  // Forward scan: gen = keys read before written; kill = keys written
+  let n = list.len(block.insts) in
+  list.fold(list.build(n, fn(i){i}), { gen: {}, kill: {} }, fn(acc, i) {
+    let inst = list.get(block.insts, i) in
+    let op = inst.op in
+    if op == "StoreHeap" then
+      let ptr = if rec.has(inst,"ptr") then inst.ptr else -1 in
+      let offset = if rec.has(inst,"offset") then inst.offset else 0 in
+      let pk = str.from(ptr) in
+      let origin = if rec.has(origin_map, pk) then rec.get(origin_map, pk) else ptr in
+      let key = store_key(origin, offset) in
+      { gen: acc.gen, kill: rec.set(acc.kill, key, true) }
+    else if op == "LoadHeapStaticIdx" then
+      let ptr = if rec.has(inst,"ptr") then inst.ptr else -1 in
+      let field = if rec.has(inst,"field_idx") then inst.field_idx else 0 in
+      let pk = str.from(ptr) in
+      let origin = if rec.has(origin_map, pk) then rec.get(origin_map, pk) else ptr in
+      let key = store_key(origin, field_to_offset(field)) in
+      if rec.has(acc.kill, key) then acc
+      else { gen: rec.set(acc.gen, key, true), kill: acc.kill }
+    else if op == "LoadHeap" then
+      let ptr = if rec.has(inst,"ptr") then inst.ptr else -1 in
+      let offset = if rec.has(inst,"offset") then inst.offset else 0 in
+      let pk = str.from(ptr) in
+      let origin = if rec.has(origin_map, pk) then rec.get(origin_map, pk) else ptr in
+      let key = store_key(origin, offset) in
+      if rec.has(acc.kill, key) then acc
+      else { gen: rec.set(acc.gen, key, true), kill: acc.kill }
+    else acc
+  })
+}
+
+fn compute_live_out(blocks, origin_map) {
+  // Backward dataflow: live_out[B] = union over succs S of live_in[S]
+  // live_in[B] = gen[B] | (live_out[B] - kill[B])
+  let gk_map = list.fold(blocks, {}, fn(acc, b) {
+    rec.set(acc, str.from(b.label), block_gen_kill(b, origin_map))
+  }) in
+  let init = list.fold(blocks, {}, fn(acc, b) {
+    rec.set(acc, str.from(b.label), {})
+  }) in
+  // 20 iterations for convergence
+  list.fold(list.build(20, fn(i){i}), init, fn(live, _) {
+    list.fold(blocks, live, fn(live2, b) {
+      let lbl = str.from(b.label) in
+      let succs = successors_of(b.term) in
+      let live_out = list.fold(succs, {}, fn(acc, s) {
+        let slbl = str.from(s) in
+        if rec.has(live2, slbl) then
+          let sgk = rec.get(gk_map, slbl) in
+          let s_live_in = union_sets(sgk.gen, diff_sets(rec.get(live2, slbl), sgk.kill)) in
+          union_sets(acc, s_live_in)
+        else acc
+      }) in
+      rec.set(live2, lbl, live_out)
+    })
+  })
+}
+
+fn dse_block_xb(block, origin_map, live_out_map, escaped_origins) {
+  let n = list.len(block.insts) in
+  let lbl = str.from(block.label) in
+  let block_live_out = if rec.has(live_out_map, lbl) then rec.get(live_out_map, lbl) else {} in
+  // Collect local allocs in this block
+  let local_allocs = list.fold(block.insts, {}, fn(acc, inst) {
+    if inst.op == "AllocHeap" || inst.op == "MakeClosure"
+      then rec.set(acc, str.from(inst.dst), true)
+      else acc
+  }) in
+  let result = list.fold(list.build(n, fn(i){ n - 1 - i }), { live: block_live_out, dead: {} }, fn(acc, i) {
+    let inst = list.get(block.insts, i) in
+    let op = inst.op in
+    if op == "StoreHeap" then
+      let ptr = if rec.has(inst,"ptr") then inst.ptr else -1 in
+      let offset = if rec.has(inst,"offset") then inst.offset else 0 in
+      let pk = str.from(ptr) in
+      let origin = if rec.has(origin_map, pk) then rec.get(origin_map, pk) else ptr in
+      let key = store_key(origin, offset) in
+      let is_local = rec.has(local_allocs, str.from(origin)) in
+      let escapes = rec.has(escaped_origins, str.from(origin)) in
+      if !rec.has(acc.live, key) && is_local && !escapes then
+        { live: acc.live, dead: rec.set(acc.dead, str.from(i), true) }
+      else
+        { live: diff_sets(acc.live, rec.set({}, key, true)), dead: acc.dead }
+    else if op == "LoadHeapStaticIdx" then
+      let ptr = if rec.has(inst,"ptr") then inst.ptr else -1 in
+      let field = if rec.has(inst,"field_idx") then inst.field_idx else 0 in
+      let pk = str.from(ptr) in
+      let origin = if rec.has(origin_map, pk) then rec.get(origin_map, pk) else ptr in
+      let key = store_key(origin, field_to_offset(field)) in
+      { live: rec.set(acc.live, key, true), dead: acc.dead }
+    else if op == "LoadHeap" then
+      let ptr = if rec.has(inst,"ptr") then inst.ptr else -1 in
+      let offset = if rec.has(inst,"offset") then inst.offset else 0 in
+      let pk = str.from(ptr) in
+      let origin = if rec.has(origin_map, pk) then rec.get(origin_map, pk) else ptr in
+      let key = store_key(origin, offset) in
+      { live: rec.set(acc.live, key, true), dead: acc.dead }
+    else if op == "CallI64" || op == "CallIndirect" ||
+            op == "StrConcat" || op == "StrLen" || op == "StrGet" ||
+            op == "StrEq" || op == "IntToStr" then
+      // Conservative: all heap keys become live (calls may read anything)
+      { live: union_sets(acc.live, block_live_out), dead: acc.dead }
+    else acc
+  }) in
+  let new_insts = list.filter(
+    list.map(list.build(n, fn(i){ { inst: list.get(block.insts, i), idx: i } }), fn(x){ x }),
+    fn(x){ !rec.has(result.dead, str.from(x.idx)) }
+  ) in
+  { label: block.label, insts: list.map(new_insts, fn(x){ x.inst }), term: block.term }
+}
+
+fn dse_func_xb(f) {
+  let origin_map = build_origin_map_for_dse(f) in
+  let live_out = compute_live_out(f.blocks, origin_map) in
+  let escaped = compute_escaped_origins(f.blocks, origin_map) in
+  let new_blocks = list.map(f.blocks, fn(b){ dse_block_xb(b, origin_map, live_out, escaped) }) in
+  { name: f.name, params: f.params, blocks: new_blocks }
+}
+
+fn dse_module_xb(m) {
+  { entry: m.entry, funcs: list.map(m.funcs, dse_func_xb) }
+}
+
+export { dse_module, dse_func, dse_block, build_origin_map_for_dse, dse_module_xb, dse_func_xb }
