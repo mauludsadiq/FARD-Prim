@@ -42,7 +42,7 @@ All produce the same native binary. Same IR, same backend, same output.
 | Linux x86-64 | ELF64  | 11/11  |
 | Linux ARM64  | ELF64  | 6/6    |
 | macOS ARM64  | Mach-O | structurally correct; blocked by ASP on macOS 15 without provisioning profile |
-| Windows x64  | PE32+  | verified structure; run on Wine/Windows  |
+| Windows x64  | PE32+  | fact=120, fib=55, max=42 via wine64 ✓    |
 
 Linux targets tested via Docker on Ubuntu 22.04.
 
@@ -272,7 +272,7 @@ Achieved via:
 ## Next
 
    Type tags for GC precision (conservative currently safe)
-   Wine/Windows validation of PE exit code
+
 
 ## Repos
 
