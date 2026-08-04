@@ -105,7 +105,7 @@ fn link_module(encoded_module) {
   let sym_table = rec.set(sym_table, "fard_str_get", -502) in
   let sym_table = rec.set(sym_table, "fard_str_concat", -486) in
   let sym_table = rec.set(sym_table, "fard_int_to_str", -326) in
-  let sym_table = rec.set(sym_table, "fard_str_eq", -54) in
+  let sym_table = rec.set(sym_table, "fard_str_eq", -546) in
   let sym_table = rec.set(sym_table, "fard_fs_open", -492) in
   let sym_table = rec.set(sym_table, "fard_fs_read", -416) in
   let sym_table = rec.set(sym_table, "fard_fs_write", -397) in
@@ -152,7 +152,7 @@ fn link_module_with_vmaddr(encoded_module, base_vmaddr) {
   let sym_table = rec.set(sym_table, "fard_str_get", -502) in
   let sym_table = rec.set(sym_table, "fard_str_concat", -486) in
   let sym_table = rec.set(sym_table, "fard_int_to_str", -326) in
-  let sym_table = rec.set(sym_table, "fard_str_eq", -54) in
+  let sym_table = rec.set(sym_table, "fard_str_eq", -546) in
   let sym_table = rec.set(sym_table, "fard_fs_open", -492) in
   let sym_table = rec.set(sym_table, "fard_fs_read", -416) in
   let sym_table = rec.set(sym_table, "fard_fs_write", -397) in

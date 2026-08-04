@@ -325,12 +325,25 @@ fn store_param_enc(arg_idx, slot) {
 }
 
 fn load_arg_enc(arg_idx, slot) {
- if arg_idx == 0 then [72, 139, 125, disp8(slot)]
- else if arg_idx == 1 then [72, 139, 117, disp8(slot)]
- else if arg_idx == 2 then [72, 139, 85,  disp8(slot)]
- else if arg_idx == 3 then [72, 139, 77,  disp8(slot)]
- else if arg_idx == 4 then [73, 139, 69,  disp8(slot)]
- else                      [73, 139, 77,  disp8(slot)]
+  let fits8 = slot >= -128 && slot <= 127 in
+  if arg_idx == 0 then
+    if fits8 then [72, 139, 125, disp8(slot)]
+    else list.concat([[72, 139, 189], le32(slot)])
+  else if arg_idx == 1 then
+    if fits8 then [72, 139, 117, disp8(slot)]
+    else list.concat([[72, 139, 181], le32(slot)])
+  else if arg_idx == 2 then
+    if fits8 then [72, 139, 85, disp8(slot)]
+    else list.concat([[72, 139, 149], le32(slot)])
+  else if arg_idx == 3 then
+    if fits8 then [72, 139, 77, disp8(slot)]
+    else list.concat([[72, 139, 141], le32(slot)])
+  else if arg_idx == 4 then
+    if fits8 then [76, 139, 69, disp8(slot)]
+    else list.concat([[76, 139, 133], le32(slot)])
+  else
+    if fits8 then [76, 139, 77, disp8(slot)]
+    else list.concat([[76, 139, 141], le32(slot)])
 }
 
 fn lea_rdi_rbp_disp8(slot) {
@@ -386,6 +399,41 @@ fn mov_rcx_rbp_disp8(slot) {
 
 fn mov_r8_rbp_disp8(slot) {
   [76, 139, 69, disp8(slot)]
+}
+
+fn lea_rdi_rbp(slot) {
+  if slot >= -128 && slot <= 127 then
+    lea_rdi_rbp_disp8(slot)
+  else
+    list.concat([[72, 141, 189], le32(slot)])
+}
+
+fn mov_rsi_rbp(slot) {
+  if slot >= -128 && slot <= 127 then
+    mov_rsi_rbp_disp8(slot)
+  else
+    list.concat([[72, 139, 181], le32(slot)])
+}
+
+fn mov_rdx_rbp(slot) {
+  if slot >= -128 && slot <= 127 then
+    mov_rdx_rbp_disp8(slot)
+  else
+    list.concat([[72, 139, 149], le32(slot)])
+}
+
+fn mov_rcx_rbp(slot) {
+  if slot >= -128 && slot <= 127 then
+    mov_rcx_rbp_disp8(slot)
+  else
+    list.concat([[72, 139, 141], le32(slot)])
+}
+
+fn mov_r8_rbp(slot) {
+  if slot >= -128 && slot <= 127 then
+    mov_r8_rbp_disp8(slot)
+  else
+    list.concat([[76, 139, 133], le32(slot)])
 }
 
 fn ret() {
@@ -518,15 +566,15 @@ fn encode_inst(inst) {
   else if inst.op == "LoadArg" then
     load_arg_enc(inst.arg_idx, inst.slot)
   else if inst.op == "LeaRdiBrp" then
-    lea_rdi_rbp_disp8(inst.slot)
+    lea_rdi_rbp(inst.slot)
   else if inst.op == "MovRsiRbp" then
-    mov_rsi_rbp_disp8(inst.slot)
+    mov_rsi_rbp(inst.slot)
   else if inst.op == "MovRdxRbp" then
-    mov_rdx_rbp_disp8(inst.slot)
+    mov_rdx_rbp(inst.slot)
   else if inst.op == "MovRcxRbp" then
-    mov_rcx_rbp_disp8(inst.slot)
+    mov_rcx_rbp(inst.slot)
   else if inst.op == "MovR8Rbp" then
-    mov_r8_rbp_disp8(inst.slot)
+    mov_r8_rbp(inst.slot)
   else if inst.op == "Ret" then
     ret()
   else if inst.op == "Label" then

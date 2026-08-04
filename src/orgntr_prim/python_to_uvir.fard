@@ -139,7 +139,11 @@ fn lower_expr(node, env, bb, ctx) {
     }) in
     let dst = alloc_reg(ctx) in
     let fn_name = if node.func.t == "Name" then node.func.id else "__unknown__" in
-    if fn_name == "fs_open" then
+    if fn_name == "dict_get" then
+      { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, "__dict_get__", ar.regs)), extra: ar.extra }
+    else if fn_name == "dict_set" then
+      { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, "__dict_set__", ar.regs)), extra: ar.extra }
+    else if fn_name == "fs_open" then
       { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, "fard_fs_open", ar.regs)), extra: ar.extra }
     else if fn_name == "fs_read" then
       { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, "fard_fs_read", ar.regs)), extra: ar.extra }
@@ -198,8 +202,17 @@ fn lower_expr(node, env, bb, ctx) {
     let ob = lower_expr(node.value, env, bb, ctx) in
     let ix = lower_expr(node.slice, env, ob.bb, ctx) in
     let dst = alloc_reg(ctx) in
-    { reg: dst, bb: bb_emit(ix.bb, uvir.inst_load_dyn(dst, ob.reg, ix.reg)),
-      extra: list.concat([ob.extra, ix.extra]) }
+    // Check if this is a string-keyed dict access
+    let slice_is_str = if node.slice.t == "Constant" then
+      type.of(node.slice.value) == "text" || type.of(node.slice.value) == "string"
+      else false in
+    if slice_is_str then
+      { reg: dst, bb: bb_emit(ix.bb, uvir.inst_call_direct(dst, "__dict_get__",
+          [ob.reg, ix.reg])),
+        extra: list.concat([ob.extra, ix.extra]) }
+    else
+      { reg: dst, bb: bb_emit(ix.bb, uvir.inst_load_dyn(dst, ob.reg, ix.reg)),
+        extra: list.concat([ob.extra, ix.extra]) }
   else if t == "IfExp" then
     // Ternary: a if cond else b
     let cr = lower_expr(rec.get(node, "test"), env, bb, ctx) in
@@ -241,6 +254,31 @@ fn lower_expr(node, env, bb, ctx) {
     else
       // Unknown class or field - emit 0
       { reg: dst, bb: bb_emit(obj.bb, uvir.inst_const(dst, uvir.val_int(0))), extra: obj.extra }
+  else if t == "Dict" then
+    // Dict literal: allocate heap record [n_keys, key0, val0, key1, val1, ...]
+    let n = list.len(node.keys) in
+    let size = (1 + n * 2) * 8 in
+    let dst = alloc_reg(ctx) in
+    let hdr_r = alloc_reg(ctx) in
+    let all_kv = list.build(n, fn(i){i}) in
+    // Lower all keys and values
+    let kv_result = list.fold(all_kv, { regs: [], bb: bb, extra: [] }, fn(acc2, i) {
+      let k = lower_expr(list.get(node.keys, i), env, acc2.bb, ctx) in
+      let v = lower_expr(list.get(node.values, i), env, k.bb, ctx) in
+      { regs: list.append(list.append(acc2.regs, k.reg), v.reg),
+        bb: v.bb, extra: list.concat([acc2.extra, k.extra, v.extra]) }
+    }) in
+    let b0 = bb_emit(kv_result.bb, uvir.inst_alloc(dst, size, "dict")) in
+    let b1 = bb_emit(b0, uvir.inst_const(hdr_r, uvir.val_int(n))) in
+    let b2 = bb_emit(b1, uvir.inst_store(dst, 0, hdr_r)) in
+    // Store key-value pairs
+    let b3 = list.fold(all_kv, b2, fn(bk, i) {
+      let k_reg = list.get(kv_result.regs, i * 2) in
+      let v_reg = list.get(kv_result.regs, i * 2 + 1) in
+      let bk2 = bb_emit(bk, uvir.inst_store(dst, (1 + i * 2) * 8, k_reg)) in
+      bb_emit(bk2, uvir.inst_store(dst, (2 + i * 2) * 8, v_reg))
+    }) in
+    { reg: dst, bb: b3, extra: kv_result.extra }
   else
     let dst = alloc_reg(ctx) in
     { reg: dst, bb: bb_emit(bb, uvir.inst_const(dst, uvir.val_int(0))), extra: [] }
@@ -272,7 +310,17 @@ fn lower_stmts(stmts, env, bb, ctx) {
     else if t == "Assign" then
       let v = lower_expr(stmt.value, acc.env, acc.bb, ctx) in
       let tgt = if list.len(stmt.targets) > 0 then list.get(stmt.targets, 0) else { t: "Name", id: "__anon__" } in
-      if tgt.t == "Attribute" then
+      if tgt.t == "Subscript" then
+        // dict/list assignment: d[key] = val
+        let obj = lower_expr(tgt.value, acc.env, v.bb, ctx) in
+        let key = lower_expr(tgt.slice, acc.env, obj.bb, ctx) in
+        // For now: call dict_set builtin (rdi=dict, rsi=key, rdx=val)
+        let ret_r = alloc_reg(ctx) in
+        let nb = bb_emit(key.bb, uvir.inst_call_direct(ret_r, "__dict_set__",
+          [obj.reg, key.reg, v.reg])) in
+        { bb: nb, extra: list.concat([acc.extra, v.extra, obj.extra, key.extra]),
+          env: acc.env, ret_reg: null }
+      else if tgt.t == "Attribute" then
         // self.field = val
         let obj = lower_expr(tgt.value, acc.env, v.bb, ctx) in
         let class_name = if tgt.value.t == "Name" then tgt.value.id else "" in
@@ -283,11 +331,12 @@ fn lower_stmts(stmts, env, bb, ctx) {
         { bb: nb, extra: list.concat([acc.extra, v.extra, obj.extra]), env: acc.env, ret_reg: null }
       else
         let name = if tgt.t == "Name" then tgt.id else "__anon__" in
-        let class_type = if stmt.value.t == "Call" then
-          if stmt.value.func.t == "Name" then
-            if ctx_get_class(ctx, stmt.value.func.id) != null then stmt.value.func.id else ""
-          else ""
-        else "" in
+        let class_type = if stmt.value.t == "Dict" then "__dict__"
+          else if stmt.value.t == "Call" then
+            if stmt.value.func.t == "Name" then
+              if ctx_get_class(ctx, stmt.value.func.id) != null then stmt.value.func.id else ""
+            else ""
+          else "" in
         let env2 = env_set(acc.env, name, v.reg) in
         let env3 = if class_type != ""
           then env_set(env2, str.concat(["__type__", name]), class_type)
@@ -594,6 +643,85 @@ fn lower_classdef(class_node, all_names, ctx) {
   list.concat([method_fns, [ctor_fn]])
 }
 
+fn build_dict_helpers(fn_names) {
+  // __dict_get__(dict_ptr=reg0, key_str=reg1) -> val or 0
+  // Dict layout: [n(8), k0(8), v0(8), k1(8), v1(8), ...]
+  // LoadHeapDyn(ptr, idx) = ptr[8 + idx*8]
+  // So key[i] = LoadHeapDyn(dict, i*2)  (element index i*2, 0-based)
+  //    val[i] = LoadHeapDyn(dict, i*2+1)
+  // n_entries = LoadHeapDyn(dict, -1)... no, n is at offset 0 = ptr[0]
+  // Actually: use inst_load(dst, ptr, 0) to get n (constant offset 0)
+  let ctx = make_ctx(fn_names) in
+  let _ = alloc_reg(ctx) in  // reg 0: dict_ptr
+  let _ = alloc_reg(ctx) in  // reg 1: key_str
+  let get_params = [uvir.param(0, uvir.ty_any(), "dict"), uvir.param(1, uvir.ty_any(), "key")] in
+
+  let n_r    = alloc_reg(ctx) in
+  let i_cell = alloc_reg(ctx) in
+  let zero_r = alloc_reg(ctx) in
+
+  let ebb = make_bb(0) in
+  let ebb = bb_emit(ebb, uvir.inst_load(n_r, 0, 0)) in
+  let ebb = bb_emit(ebb, uvir.inst_alloc(i_cell, 8, "di")) in
+  let ebb = bb_emit(ebb, uvir.inst_const(zero_r, uvir.val_int(0))) in
+  let ebb = bb_emit(ebb, uvir.inst_store(i_cell, 0, zero_r)) in
+  let lbl_loop = alloc_label(ctx) in
+  let lbl_body = alloc_label(ctx) in
+  let lbl_exit = alloc_label(ctx) in
+  let entry_blk = bb_finish(ebb, uvir.term_br(lbl_loop)) in
+
+  let cur_i  = alloc_reg(ctx) in
+  let cond_r = alloc_reg(ctx) in
+  let lbb = make_bb(lbl_loop) in
+  let lbb = bb_emit(lbb, uvir.inst_load(cur_i, i_cell, 0)) in
+  let lbb = bb_emit(lbb, uvir.inst_int_cmp(cond_r, "<", cur_i, n_r)) in
+  let cond_blk = bb_finish(lbb, uvir.term_br_cond(cond_r, lbl_body, lbl_exit)) in
+
+  // Body: key_elem_idx = i*2, load key via LoadHeapDyn
+  let bbb    = make_bb(lbl_body) in
+  let two_r  = alloc_reg(ctx) in
+  let kidx_r = alloc_reg(ctx) in
+  let vidx_r = alloc_reg(ctx) in
+  let one_r  = alloc_reg(ctx) in
+  let kptr_r = alloc_reg(ctx) in
+  let eq_r   = alloc_reg(ctx) in
+  let bbb = bb_emit(bbb, uvir.inst_const(two_r, uvir.val_int(2))) in
+  let bbb = bb_emit(bbb, uvir.inst_int_mul(kidx_r, cur_i, two_r)) in
+  let bbb = bb_emit(bbb, uvir.inst_const(one_r, uvir.val_int(1))) in
+  let bbb = bb_emit(bbb, uvir.inst_int_add(vidx_r, kidx_r, one_r)) in
+  let bbb = bb_emit(bbb, uvir.inst_load_dyn(kptr_r, 0, kidx_r)) in
+  let bbb = bb_emit(bbb, uvir.inst_call_direct(eq_r, "fard_str_eq", [kptr_r, 1])) in
+  let lbl_found = alloc_label(ctx) in
+  let lbl_inc   = alloc_label(ctx) in
+  let body_blk = bb_finish(bbb, uvir.term_br_cond(eq_r, lbl_found, lbl_inc)) in
+
+  // Found: load val at vidx_r
+  let fbb   = make_bb(lbl_found) in
+  let val_r = alloc_reg(ctx) in
+  let fbb = bb_emit(fbb, uvir.inst_load_dyn(val_r, 0, vidx_r)) in
+  let found_blk = bb_finish(fbb, uvir.term_ret(val_r)) in
+
+  // Inc: i++, store, loop
+  let ibb   = make_bb(lbl_inc) in
+  let one2  = alloc_reg(ctx) in
+  let new_i = alloc_reg(ctx) in
+  let ibb = bb_emit(ibb, uvir.inst_const(one2, uvir.val_int(1))) in
+  let ibb = bb_emit(ibb, uvir.inst_int_add(new_i, cur_i, one2)) in
+  let ibb = bb_emit(ibb, uvir.inst_store(i_cell, 0, new_i)) in
+  let inc_blk = bb_finish(ibb, uvir.term_br(lbl_loop)) in
+
+  // Exit: return 0
+  let xbb = make_bb(lbl_exit) in
+  let z_r = alloc_reg(ctx) in
+  let xbb = bb_emit(xbb, uvir.inst_const(z_r, uvir.val_int(0))) in
+  let exit_blk = bb_finish(xbb, uvir.term_ret(z_r)) in
+
+  let blks = [entry_blk, cond_blk, body_blk, found_blk, inc_blk, exit_blk] in
+  let get_fn = uvir.func("__dict_get__", get_params, uvir.ty_any(), blks, uvir.func_attrs(false, false)) in
+  [get_fn]
+}
+
+
 fn lower_module(py_ast) {
   // Collect all function and class names first
   let fn_names = list.map(
@@ -646,7 +774,8 @@ fn lower_module(py_ast) {
   let bmap = list.fold(all_blocks, {}, fn(acc, b) { rec.set(acc, str.from(b.label), b) }) in
   let ordered = list.map(sorted, fn(l) { rec.get(bmap, str.from(l)) }) in
   let main_fn = uvir.func("__main__", [], uvir.ty_any(), ordered, uvir.func_attrs(false, false)) in
-  uvir.module("python", list.concat([fns, class_fns, [main_fn]]), "__main__", [], [])
+  let dict_helpers = build_dict_helpers(all_names) in
+  uvir.module("python", list.concat([fns, class_fns, dict_helpers, [main_fn]]), "__main__", [], [])
 }
 
 export { lower_module, lower_funcdef, lower_expr }

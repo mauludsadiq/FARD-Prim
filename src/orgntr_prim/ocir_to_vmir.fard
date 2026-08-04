@@ -78,6 +78,9 @@ fn sel_inst(inst) {
     [vi_cmp(inst.dst, inst.lhs, inst.rhs, inst.cmp)]
   else if op == "CallI64" then
     if !rec.has(inst,"callee") then [vi_call(inst.dst, inst.callee, inst.args)]
+    else if inst.callee == "fard_str_eq" then
+      [{ op: "StrCall2", func: "fard_str_eq", dst: vreg(inst.dst),
+         arg: vreg(list.get(inst.args, 0)), arg2: vreg(list.get(inst.args, 1)) }]
     else if inst.callee == "fard_fs_open" || inst.callee == "fard_fs_read" ||
         inst.callee == "fard_fs_write" || inst.callee == "fard_fs_close" ||
         inst.callee == "fard_fs_lseek" || inst.callee == "fard_fs_unlink" ||
