@@ -12,7 +12,44 @@ import("../orgntr_prim/uvir") as uvir
 
 fn make_ctx(fn_names) {
   { next_reg: array.from_list([0]), fn_names: fn_names,
-    lifted_fns: array.from_list([]) }
+    lifted_fns: array.from_list([]),
+    class_defs: array.from_list([{}]) }
+}
+
+fn ctx_register_class(ctx, name, fields, methods) {
+  let cd = array.get(ctx.class_defs, 0) in
+  let _ = array.set(ctx.class_defs, 0, rec.set(cd, name, { fields: fields, methods: methods })) in
+  0
+}
+
+fn ctx_get_class(ctx, name) {
+  let cd = array.get(ctx.class_defs, 0) in
+  if rec.has(cd, name) then rec.get(cd, name) else null
+}
+
+fn class_field_idx(fields, name) {
+  list.fold(list.build(list.len(fields), fn(i){i}), -1, fn(acc, i) {
+    if acc >= 0 then acc
+    else if list.get(fields, i) == name then i
+    else -1
+  })
+}
+
+fn collect_self_fields(stmts) {
+  // Collect field names from self.X = ... assignments in __init__
+  list.fold(stmts, [], fn(acc, stmt) {
+    if stmt.t != "Assign" then acc
+    else
+      let targets = stmt.targets in
+      if list.len(targets) == 0 then acc
+      else
+        let tgt = list.get(targets, 0) in
+        if tgt.t != "Attribute" then acc
+        else if tgt.value.t != "Name" then acc
+        else if tgt.value.id != "self" then acc
+        else if list.any(acc, fn(f){ f == tgt.attr }) then acc
+        else list.append(acc, tgt.attr)
+  })
 }
 fn alloc_reg(ctx) {
   let r = array.get(ctx.next_reg, 0) in
@@ -116,6 +153,27 @@ fn lower_expr(node, env, bb, ctx) {
       { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, "fard_fs_unlink", ar.regs)), extra: ar.extra }
     else if list.any(ctx.fn_names, fn(n) { n == fn_name }) then
       { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, fn_name, ar.regs)), extra: ar.extra }
+    else if ctx_get_class(ctx, fn_name) != null then
+      // Class instantiation: call constructor
+      { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, fn_name, ar.regs)), extra: ar.extra }
+    else if node.func.t == "Attribute" then
+      // Method call: obj.method(args) -> ClassName__method(obj, args)
+      let obj = lower_expr(node.func.value, env, ar.bb, ctx) in
+      let var_name2 = if node.func.value.t == "Name" then node.func.value.id else "" in
+      let type_key2 = str.concat(["__type__", var_name2]) in
+      let tracked2 = env_get(env, type_key2) in
+      let class_name = if tracked2 != null then tracked2
+        else if ctx_get_class(ctx, var_name2) != null then var_name2
+        else "" in
+      let cls = ctx_get_class(ctx, class_name) in
+      let method_fn = if cls != null then
+        if rec.has(cls.methods, node.func.attr)
+          then rec.get(cls.methods, node.func.attr)
+          else "__unknown__"
+        else "__unknown__" in
+      let all_args = list.concat([[obj.reg], ar.regs]) in
+      { reg: dst, bb: bb_emit(obj.bb, uvir.inst_call_direct(dst, method_fn, all_args)),
+        extra: list.concat([ar.extra, obj.extra]) }
     else
       let fr = lower_expr(node.func, env, ar.bb, ctx) in
       { reg: dst, bb: bb_emit(fr.bb, uvir.inst_call_indirect(dst, fr.reg, ar.regs)),
@@ -161,6 +219,28 @@ fn lower_expr(node, env, bb, ctx) {
     let xa = list.concat([cr.extra, [cb, tblk]]) in
     let xb = list.concat([tr.extra, [fblk]]) in
     { reg: jd, bb: jb, extra: list.concat([xa, xb, fr.extra]) }
+  else if t == "Attribute" then
+    // self.field or obj.field load
+    let obj = lower_expr(node.value, env, bb, ctx) in
+    let dst = alloc_reg(ctx) in
+    // Look up field index from class registry via env type tracking
+    // Conservative: use dynamic field name lookup via stored field index
+    // We embed the field name as a compile-time string constant and use
+    // a field_idx helper - for now use a static offset via class registry
+    let var_name = if rec.has(node.value, "id") then node.value.id else "" in
+    let type_key = str.concat(["__type__", var_name]) in
+    let tracked_class = env_get(env, type_key) in
+    let class_name = if tracked_class != null then tracked_class
+      else if ctx_get_class(ctx, var_name) != null then var_name
+      else "" in
+    let cls = ctx_get_class(ctx, class_name) in
+    let field_idx = if cls != null then class_field_idx(cls.fields, node.attr) else -1 in
+    if field_idx >= 0 then
+      { reg: dst, bb: bb_emit(obj.bb, uvir.inst_load(dst, obj.reg, (field_idx + 1) * 8)),
+        extra: obj.extra }
+    else
+      // Unknown class or field - emit 0
+      { reg: dst, bb: bb_emit(obj.bb, uvir.inst_const(dst, uvir.val_int(0))), extra: obj.extra }
   else
     let dst = alloc_reg(ctx) in
     { reg: dst, bb: bb_emit(bb, uvir.inst_const(dst, uvir.val_int(0))), extra: [] }
@@ -179,10 +259,28 @@ fn lower_stmts(stmts, env, bb, ctx) {
       { bb: v.bb, extra: list.concat([acc.extra, v.extra]), env: acc.env, ret_reg: v.reg }
     else if t == "Assign" then
       let v = lower_expr(stmt.value, acc.env, acc.bb, ctx) in
-      let name = if list.len(stmt.targets) > 0 && list.get(stmt.targets, 0).t == "Name"
-        then list.get(stmt.targets, 0).id else "__anon__" in
-      { bb: v.bb, extra: list.concat([acc.extra, v.extra]),
-        env: env_set(acc.env, name, v.reg), ret_reg: null }
+      let tgt = if list.len(stmt.targets) > 0 then list.get(stmt.targets, 0) else { t: "Name", id: "__anon__" } in
+      if tgt.t == "Attribute" then
+        // self.field = val
+        let obj = lower_expr(tgt.value, acc.env, v.bb, ctx) in
+        let class_name = if tgt.value.t == "Name" then tgt.value.id else "" in
+        let cls = ctx_get_class(ctx, class_name) in
+        let field_idx = if cls != null then class_field_idx(cls.fields, tgt.attr) else -1 in
+        let offset = (field_idx + 1) * 8 in
+        let nb = bb_emit(obj.bb, uvir.inst_store(obj.reg, offset, v.reg)) in
+        { bb: nb, extra: list.concat([acc.extra, v.extra, obj.extra]), env: acc.env, ret_reg: null }
+      else
+        let name = if tgt.t == "Name" then tgt.id else "__anon__" in
+        let class_type = if stmt.value.t == "Call" then
+          if stmt.value.func.t == "Name" then
+            if ctx_get_class(ctx, stmt.value.func.id) != null then stmt.value.func.id else ""
+          else ""
+        else "" in
+        let env2 = env_set(acc.env, name, v.reg) in
+        let env3 = if class_type != ""
+          then env_set(env2, str.concat(["__type__", name]), class_type)
+          else env2 in
+        { bb: v.bb, extra: list.concat([acc.extra, v.extra]), env: env3, ret_reg: null }
     else if t == "AugAssign" then
       // x += expr => x = x + expr
       let name = if stmt.target.t == "Name" then stmt.target.id else "__anon__" in
@@ -247,6 +345,21 @@ fn lower_stmts(stmts, env, bb, ctx) {
       // Expression statement -- track result in case it is the last statement
       let v = lower_expr(stmt.value, acc.env, acc.bb, ctx) in
       { bb: v.bb, extra: list.concat([acc.extra, v.extra]), env: acc.env, ret_reg: v.reg }
+    else if t == "ClassDef" then
+      // Register class layout and generate constructor + methods
+      // Find __init__ to collect field names
+      let init_methods = list.filter(stmt.body, fn(m){ m.t == "FunctionDef" && m.name == "__init__" }) in
+      let fields = if list.len(init_methods) > 0
+        then collect_self_fields(list.get(init_methods, 0).body)
+        else [] in
+      let n_fields = list.len(fields) in
+      // Build methods map: method_name -> mangled_name
+      let methods = list.fold(stmt.body, {}, fn(mmap, m) {
+        if m.t != "FunctionDef" then mmap
+        else rec.set(mmap, m.name, str.concat([stmt.name, "__", m.name]))
+      }) in
+      let _ = ctx_register_class(ctx, stmt.name, fields, methods) in
+      acc
     else
       acc
   })
@@ -272,19 +385,146 @@ fn lower_funcdef(node, fn_names) {
   uvir.func(node.name, params, uvir.ty_any(), ordered, uvir.func_attrs(false, false))
 }
 
+fn lower_funcdef_with_class(node, fn_names, parent_ctx, self_class_name, self_fields) {
+  // Like lower_funcdef but pre-registers the class and self type in ctx
+  let ctx = make_ctx(fn_names) in
+  // Copy class registry from parent
+  let parent_cd = array.get(parent_ctx.class_defs, 0) in
+  let _ = array.set(ctx.class_defs, 0, parent_cd) in
+  let param_names = list.map(node.args.args, fn(a) { a.arg }) in
+  let params = list.build(list.len(param_names), fn(i) {
+    uvir.param(i, uvir.ty_any(), list.get(param_names, i))
+  }) in
+  let env = list.fold(list.build(list.len(param_names), fn(i) { i }), env_empty(),
+    fn(e, i) { let _ = alloc_reg(ctx) in env_set(e, list.get(param_names, i), i) }) in
+  // Pre-register self type if first param is "self"
+  let env2 = if list.len(param_names) > 0 && list.get(param_names, 0) == "self"
+    then env_set(env, "__type__self", self_class_name)
+    else env in
+  let ebb = make_bb(0) in
+  let result = lower_stmts(node.body, env2, ebb, ctx) in
+  let ret_reg = if result.ret_reg != null then result.ret_reg else
+    let r = alloc_reg(ctx) in r in
+  let fblk = bb_finish(result.bb, uvir.term_ret(ret_reg)) in
+  let all_blocks = list.concat([result.extra, [fblk]]) in
+  let sorted = list.sort_int(list.map(all_blocks, fn(b) { b.label })) in
+  let bmap = list.fold(all_blocks, {}, fn(acc, b) { rec.set(acc, str.from(b.label), b) }) in
+  let ordered = list.map(sorted, fn(l) { rec.get(bmap, str.from(l)) }) in
+  uvir.func(node.name, params, uvir.ty_any(), ordered, uvir.func_attrs(false, false))
+}
+
+fn lower_classdef(class_node, all_names, ctx) {
+  // Generate constructor ClassName(args...) and methods ClassName__method(self, args...)
+  let class_name = class_node.name in
+  let cls = ctx_get_class(ctx, class_name) in
+  let fields = if cls != null then cls.fields else [] in
+  let n_fields = list.len(fields) in
+
+  // Generate methods as regular functions with mangled names
+  let method_fns = list.map(
+    list.filter(class_node.body, fn(m){ m.t == "FunctionDef" }),
+    fn(m) {
+      let mangled = str.concat([class_name, "__", m.name]) in
+      let renamed = { t: m.t, name: mangled, args: m.args, body: m.body,
+                      decorator_list: [], returns: null, type_comment: null } in
+      lower_funcdef_with_class(renamed, all_names, ctx, class_name, fields)
+    }) in
+
+  // Generate constructor: ClassName__new__(args from __init__ minus self)
+  let init_methods = list.filter(class_node.body, fn(m){ m.t == "FunctionDef" && m.name == "__init__" }) in
+  let ctor_fn = if list.len(init_methods) > 0 then
+    let init = list.get(init_methods, 0) in
+    let ctor_params = list.filter(init.args.args, fn(a){ a.arg != "self" }) in
+    let ctor_node = { t: "FunctionDef", name: class_name,
+                      args: { t: "arguments", args: ctor_params, posonlyargs: [],
+                              vararg: null, kwonlyargs: [], kw_defaults: [],
+                              kwarg: null, defaults: [] },
+                      body: [], decorator_list: [], returns: null, type_comment: null } in
+    // Build constructor body in UVIR directly
+    let ctx2 = make_ctx(all_names) in
+    let n_params = list.len(ctor_params) in
+    let params = list.build(n_params, fn(i) {
+      uvir.param(i, uvir.ty_any(), list.get(ctor_params, i).arg)
+    }) in
+    // Advance ctx2 past param regs
+    let _ = list.build(n_params, fn(i){ alloc_reg(ctx2) }) in
+    let self_reg = n_params in
+    let _ = alloc_reg(ctx2) in  // consume reg for self
+    let ebb = make_bb(0) in
+    let size = (1 + n_fields) * 8 in
+    let hdr_reg = alloc_reg(ctx2) in
+    let b0 = bb_emit(ebb, uvir.inst_alloc(self_reg, size, class_name)) in
+    // Store header (field count)
+    let b1 = bb_emit(b0, uvir.inst_const(hdr_reg, uvir.val_int(n_fields))) in
+    let b2 = bb_emit(b1, uvir.inst_store(self_reg, 0, hdr_reg)) in
+    // Build env with params
+    let env = list.fold(list.build(n_params, fn(i){i}), env_empty(),
+      fn(e, i) { env_set(e, list.get(ctor_params, i).arg, i) }) in
+    let env2 = env_set(env, "self", self_reg) in
+    // Register self type for attribute stores
+    let _ = ctx_register_class(ctx2, "self", fields, {}) in
+    // Lower __init__ body (self.x = val assignments)
+    let init_result = lower_stmts(init.body, env2, b2, ctx2) in
+    let fblk = bb_finish(init_result.bb, uvir.term_ret(self_reg)) in
+    let all_blocks = list.concat([init_result.extra, [fblk]]) in
+    let sorted = list.sort_int(list.map(all_blocks, fn(b){ b.label })) in
+    let bmap = list.fold(all_blocks, {}, fn(acc, b){ rec.set(acc, str.from(b.label), b) }) in
+    let ordered = list.map(sorted, fn(l){ rec.get(bmap, str.from(l)) }) in
+    uvir.func(class_name, params, uvir.ty_any(), ordered, uvir.func_attrs(false, false))
+  else
+    // No __init__: trivial constructor
+    let ctx2 = make_ctx(all_names) in
+    let self_reg = alloc_reg(ctx2) in
+    let hdr_reg = alloc_reg(ctx2) in
+    let ebb = make_bb(0) in
+    let b0 = bb_emit(ebb, uvir.inst_alloc(self_reg, 8, class_name)) in
+    let b1 = bb_emit(b0, uvir.inst_const(hdr_reg, uvir.val_int(0))) in
+    let b2 = bb_emit(b1, uvir.inst_store(self_reg, 0, hdr_reg)) in
+    let fblk = bb_finish(b2, uvir.term_ret(self_reg)) in
+    uvir.func(class_name, [], uvir.ty_any(), [fblk], uvir.func_attrs(false, false))
+  in
+  list.concat([method_fns, [ctor_fn]])
+}
+
 fn lower_module(py_ast) {
-  // Collect all function names first
+  // Collect all function and class names first
   let fn_names = list.map(
     list.filter(py_ast.body, fn(s) { s.t == "FunctionDef" }),
     fn(s) { s.name }) in
-  let all_names = list.append(fn_names, "__main__") in
-  // Lower function defs
+  let class_names = list.map(
+    list.filter(py_ast.body, fn(s) { s.t == "ClassDef" }),
+    fn(s) { s.name }) in
+  let class_method_names = list.flatten(list.map(
+    list.filter(py_ast.body, fn(s) { s.t == "ClassDef" }),
+    fn(s) { list.map(list.filter(s.body, fn(m){ m.t == "FunctionDef" }),
+      fn(m){ str.concat([s.name, "__", m.name]) }) })) in
+  let all_names = list.concat([fn_names, class_names, class_method_names, ["__main__"]]) in
+
+  // Pre-register classes by scanning top-level stmts first
+  let pre_ctx = make_ctx(all_names) in
+  let _ = list.map(list.filter(py_ast.body, fn(s){ s.t == "ClassDef" }), fn(s) {
+    let init_ms = list.filter(s.body, fn(m){ m.t == "FunctionDef" && m.name == "__init__" }) in
+    let fields = if list.len(init_ms) > 0 then collect_self_fields(list.get(init_ms, 0).body) else [] in
+    let methods = list.fold(s.body, {}, fn(mmap, m) {
+      if m.t != "FunctionDef" then mmap
+      else rec.set(mmap, m.name, str.concat([s.name, "__", m.name]))
+    }) in
+    ctx_register_class(pre_ctx, s.name, fields, methods)
+  }) in
+
+  // Lower regular function defs
   let fns = list.map(
     list.filter(py_ast.body, fn(s) { s.t == "FunctionDef" }),
     fn(s) { lower_funcdef(s, all_names) }) in
+
+  // Lower class defs -> constructor + methods
+  let class_fns = list.flatten(list.map(
+    list.filter(py_ast.body, fn(s) { s.t == "ClassDef" }),
+    fn(s) { lower_classdef(s, all_names, pre_ctx) })) in
+
   // Lower top-level statements as __main__
-  let top_stmts = list.filter(py_ast.body, fn(s) { s.t != "FunctionDef" }) in
-  let ctx = make_ctx(all_names) in
+  let top_stmts = list.filter(py_ast.body, fn(s) { s.t != "FunctionDef" && s.t != "ClassDef" }) in
+  let ctx = pre_ctx in  // reuse pre_ctx with class registry
   let ebb = make_bb(0) in
   let result = lower_stmts(top_stmts, env_empty(), ebb, ctx) in
   let ret_reg = if result.ret_reg != null then result.ret_reg
@@ -298,7 +538,7 @@ fn lower_module(py_ast) {
   let bmap = list.fold(all_blocks, {}, fn(acc, b) { rec.set(acc, str.from(b.label), b) }) in
   let ordered = list.map(sorted, fn(l) { rec.get(bmap, str.from(l)) }) in
   let main_fn = uvir.func("__main__", [], uvir.ty_any(), ordered, uvir.func_attrs(false, false)) in
-  uvir.module("python", list.append(fns, main_fn), "__main__", [], [])
+  uvir.module("python", list.concat([fns, class_fns, [main_fn]]), "__main__", [], [])
 }
 
 export { lower_module, lower_funcdef, lower_expr }
