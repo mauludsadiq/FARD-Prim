@@ -12,7 +12,7 @@ verified native backend for major programming languages.
 Any of these inputs:
 
    FARD:       fn add(a,b) { a + b }  add(10,32)
-   Python:     def add(a, b): return a + b  (via py_to_json.py + Python ast)
+   Python:     classes, for loops, dicts, file I/O  (via py_to_json.py + Python ast)
    JavaScript: function add(a, b) { return a + b; }  (via Acorn)
 
 All produce the same native binary. Same IR, same backend, same output.
@@ -31,6 +31,7 @@ All produce the same native binary. Same IR, same backend, same output.
    int_to_str(42)                          = "42"  integer to string
    str_eq(s,s)                             = 1    string equality
    fs.open/close/read/write               = fd   file I/O (FARD, Python, JS)
+   Python classes, for loops, dicts        = ✓    Python subset frontend
    adder(10)(32)                           = 42   closure with captured variable
    while 0 fn(s){s<n} fn(s){s+1} / n=10  = 10   while loop
 
@@ -271,6 +272,7 @@ Achieved via:
 
 ## Next
 
+   Python dicts (in progress)
    Precise GC (ptrmask infrastructure in place; mark_object replacement pending)
 
 
