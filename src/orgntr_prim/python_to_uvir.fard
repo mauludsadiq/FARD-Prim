@@ -248,6 +248,18 @@ fn lower_expr(node, env, bb, ctx) {
 
 // Lower a list of Python statements -> { bb, extra, env, ret_reg }
 // ret_reg: if a return was encountered
+fn collect_assigned_names(stmts) {
+  list.flatten(list.map(stmts, fn(stmt) {
+    if stmt.t == "Assign" then
+      if list.len(stmt.targets) > 0 && list.get(stmt.targets, 0).t == "Name"
+        then [list.get(stmt.targets, 0).id]
+        else []
+    else if stmt.t == "AugAssign" then
+      if stmt.target.t == "Name" then [stmt.target.id] else []
+    else []
+  }))
+}
+
 fn lower_stmts(stmts, env, bb, ctx) {
   list.fold(stmts, { bb: bb, extra: [], env: env, ret_reg: null }, fn(acc, stmt) {
     if acc.ret_reg != null then acc else
@@ -345,6 +357,102 @@ fn lower_stmts(stmts, env, bb, ctx) {
       // Expression statement -- track result in case it is the last statement
       let v = lower_expr(stmt.value, acc.env, acc.bb, ctx) in
       { bb: v.bb, extra: list.concat([acc.extra, v.extra]), env: acc.env, ret_reg: v.reg }
+    else if t == "For" then
+      let target_name = if stmt.target.t == "Name" then stmt.target.id else "__iter__" in
+      let iter_node = stmt.iter in
+      let is_range = if iter_node.t == "Call" then
+        if iter_node.func.t == "Name" then iter_node.func.id == "range" else false
+        else false in
+      let body_mut = collect_assigned_names(stmt.body) in
+      let lifted = list.filter(body_mut, fn(n) { env_get(acc.env, n) != null }) in
+      let stop_v_r = alloc_reg(ctx) in
+      let iter_v_r = alloc_reg(ctx) in
+      let setup_bb = if is_range then
+        let rargs = iter_node.args in
+        if list.len(rargs) == 1 then
+          let sv = lower_expr(list.get(rargs, 0), acc.env, acc.bb, ctx) in
+          bb_emit(sv.bb, uvir.inst_copy(stop_v_r, sv.reg))
+        else
+          let av = lower_expr(list.get(rargs, 0), acc.env, acc.bb, ctx) in
+          let bv = lower_expr(list.get(rargs, 1), acc.env, av.bb, ctx) in
+          bb_emit(bv.bb, uvir.inst_copy(stop_v_r, bv.reg))
+      else
+        let iv = lower_expr(iter_node, acc.env, acc.bb, ctx) in
+        let lr = alloc_reg(ctx) in
+        let b1 = bb_emit(iv.bb, uvir.inst_str_len(lr, iv.reg)) in
+        let b2 = bb_emit(b1, uvir.inst_copy(stop_v_r, lr)) in
+        bb_emit(b2, uvir.inst_copy(iter_v_r, iv.reg))
+      in
+      let idx_cell = alloc_reg(ctx) in
+      let stop_cell = alloc_reg(ctx) in
+      let iter_cell = alloc_reg(ctx) in
+      let zero_r = alloc_reg(ctx) in
+      let b1 = bb_emit(setup_bb, uvir.inst_alloc(idx_cell, 8, "for_idx")) in
+      let b2 = bb_emit(b1, uvir.inst_alloc(stop_cell, 8, "for_stop")) in
+      let b3 = bb_emit(b2, uvir.inst_alloc(iter_cell, 8, "for_iter")) in
+      let b4 = bb_emit(b3, uvir.inst_const(zero_r, uvir.val_int(0))) in
+      let b5 = bb_emit(b4, uvir.inst_store(idx_cell, 0, zero_r)) in
+      let b6 = bb_emit(b5, uvir.inst_store(stop_cell, 0, stop_v_r)) in
+      let b7 = bb_emit(b6, uvir.inst_store(iter_cell, 0, iter_v_r)) in
+      let lifted_cells = list.fold(lifted, { bb: b7, cells: {} }, fn(lc, n) {
+        let cell = alloc_reg(ctx) in
+        let init_r = env_get(acc.env, n) in
+        let b = bb_emit(lc.bb, uvir.inst_alloc(cell, 8, "for_var")) in
+        let b2 = if init_r != null then bb_emit(b, uvir.inst_store(cell, 0, init_r))
+          else let z = alloc_reg(ctx) in
+               let bz = bb_emit(b, uvir.inst_const(z, uvir.val_int(0))) in
+               bb_emit(bz, uvir.inst_store(cell, 0, z)) in
+        { bb: b2, cells: rec.set(lc.cells, n, cell) }
+      }) in
+      let loop_label = alloc_label(ctx) in
+      let body_label = alloc_label(ctx) in
+      let exit_label = alloc_label(ctx) in
+      let entry_blk = bb_finish(lifted_cells.bb, uvir.term_br(loop_label)) in
+      let lbb = make_bb(loop_label) in
+      let cur_idx = alloc_reg(ctx) in
+      let cur_stop = alloc_reg(ctx) in
+      let lbb = bb_emit(lbb, uvir.inst_load(cur_idx, idx_cell, 0)) in
+      let lbb = bb_emit(lbb, uvir.inst_load(cur_stop, stop_cell, 0)) in
+      let cond_r = alloc_reg(ctx) in
+      let lbb = bb_emit(lbb, uvir.inst_int_cmp(cond_r, "<", cur_idx, cur_stop)) in
+      let cond_blk = bb_finish(lbb, uvir.term_br_cond(cond_r, body_label, exit_label)) in
+      let bbb = make_bb(body_label) in
+      let elem_r = alloc_reg(ctx) in
+      let cur_iter = alloc_reg(ctx) in
+      let bbb = if is_range then
+        bb_emit(bbb, uvir.inst_copy(elem_r, cur_idx))
+      else
+        let bi = bb_emit(bbb, uvir.inst_load(cur_iter, iter_cell, 0)) in
+        bb_emit(bi, uvir.inst_load_dyn(elem_r, cur_iter, cur_idx))
+      in
+      let cell_loads = list.fold(lifted, { bb: bbb, env: acc.env }, fn(cl, n) {
+        let cell = rec.get(lifted_cells.cells, n) in
+        let loaded = alloc_reg(ctx) in
+        let b = bb_emit(cl.bb, uvir.inst_load(loaded, cell, 0)) in
+        { bb: b, env: env_set(cl.env, n, loaded) }
+      }) in
+      let body_env = env_set(cell_loads.env, target_name, elem_r) in
+      let br = lower_stmts(stmt.body, body_env, cell_loads.bb, ctx) in
+      let store_back = list.fold(lifted, br.bb, fn(lb, n) {
+        let cell = rec.get(lifted_cells.cells, n) in
+        let new_r = env_get(br.env, n) in
+        if new_r != null then bb_emit(lb, uvir.inst_store(cell, 0, new_r)) else lb
+      }) in
+      let new_idx = alloc_reg(ctx) in
+      let one_r = alloc_reg(ctx) in
+      let ib1 = bb_emit(store_back, uvir.inst_const(one_r, uvir.val_int(1))) in
+      let ib2 = bb_emit(ib1, uvir.inst_int_add(new_idx, cur_idx, one_r)) in
+      let ib3 = bb_emit(ib2, uvir.inst_store(idx_cell, 0, new_idx)) in
+      let body_blk = bb_finish(ib3, uvir.term_br(loop_label)) in
+      let exit_bb = make_bb(exit_label) in
+      let exit_result = list.fold(lifted, { bb: exit_bb, env: acc.env }, fn(el, n) {
+        let cell = rec.get(lifted_cells.cells, n) in
+        let final_r = alloc_reg(ctx) in
+        let b = bb_emit(el.bb, uvir.inst_load(final_r, cell, 0)) in
+        { bb: b, env: env_set(el.env, n, final_r) }
+      }) in
+      let extra = list.concat([acc.extra, [entry_blk, cond_blk, body_blk], br.extra]) in
+      { bb: exit_result.bb, extra: extra, env: exit_result.env, ret_reg: null }
     else if t == "ClassDef" then
       // Register class layout and generate constructor + methods
       // Find __init__ to collect field names
