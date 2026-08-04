@@ -236,7 +236,7 @@ Achieved via:
 
 17,135 lines of FARD across 70 files in src/orgntr_prim/.
 
-   x86_64_encode.fard      x86-64 instruction encoding (775 lines)
+   x86_64_encode.fard      x86-64 instruction encoding (1130 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
    fard_lower.fard         AST to flat IR, closures, while loops, print (589 lines)
    fardparse.fard          FARD parser with while expression (520 lines)
@@ -267,7 +267,7 @@ Achieved via:
    ocir_sr.fard            strength reduction, mul->add + small-k chains (195 lines)
    fard_gc.fard            GC entry stub, mark-sweep infrastructure (94 lines)
    lower_ocir_to_omir.fard OCIR -> OMIR (ARM64/ELF legacy path) (391 lines)
-   python_to_uvir.fard     Python subset frontend (289 lines)
+   python_to_uvir.fard     Python subset frontend (783 lines)
    js_to_uvir.fard         JavaScript subset frontend (270 lines)
 
 ## Next
