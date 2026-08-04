@@ -523,7 +523,10 @@ fn lower_stmts(stmts, env, bb, ctx) {
 }
 
 fn lower_funcdef(node, fn_names) {
-  let ctx = make_ctx(fn_names) in
+  lower_funcdef_with_ctx(node, make_ctx(fn_names))
+}
+
+fn lower_funcdef_with_ctx(node, ctx) {
   let param_names = list.map(node.args.args, fn(a) { a.arg }) in
   let params = list.build(list.len(param_names), fn(i) {
     uvir.param(i, uvir.ty_any(), list.get(param_names, i))
@@ -751,7 +754,7 @@ fn lower_module(py_ast) {
   // Lower regular function defs
   let fns = list.map(
     list.filter(py_ast.body, fn(s) { s.t == "FunctionDef" }),
-    fn(s) { lower_funcdef(s, all_names) }) in
+    fn(s) { lower_funcdef_with_ctx(s, pre_ctx) }) in
 
   // Lower class defs -> constructor + methods
   let class_fns = list.flatten(list.map(
@@ -774,8 +777,7 @@ fn lower_module(py_ast) {
   let bmap = list.fold(all_blocks, {}, fn(acc, b) { rec.set(acc, str.from(b.label), b) }) in
   let ordered = list.map(sorted, fn(l) { rec.get(bmap, str.from(l)) }) in
   let main_fn = uvir.func("__main__", [], uvir.ty_any(), ordered, uvir.func_attrs(false, false)) in
-  let dict_helpers = build_dict_helpers(all_names) in
-  uvir.module("python", list.concat([fns, class_fns, dict_helpers, [main_fn]]), "__main__", [], [])
+  uvir.module("python", list.concat([fns, class_fns, [main_fn]]), "__main__", [], [])
 }
 
 export { lower_module, lower_funcdef, lower_expr }
