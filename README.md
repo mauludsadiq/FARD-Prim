@@ -13,7 +13,7 @@ Any of these inputs:
 
    FARD:       fn add(a,b) { a + b }  add(10,32)
    Python:     classes, for loops, dicts, file I/O  (via py_to_json.py + Python ast)
-   JavaScript: function add(a, b) { return a + b; }  (via Acorn)
+   JavaScript: classes, for loops, objects, dicts  (via Acorn + js_to_uvir.fard)
 
 All produce the same native binary. Same IR, same backend, same output.
 
@@ -32,6 +32,7 @@ All produce the same native binary. Same IR, same backend, same output.
    str_eq(s,s)                             = 1    string equality
    fs.open/close/read/write               = fd   file I/O (FARD, Python, JS)
    Python classes, for loops, dicts        = ✓    Python subset frontend
+   JS classes, for loops, objects, dicts   = ✓    JS subset frontend (Acorn)
    adder(10)(32)                           = 42   closure with captured variable
    while 0 fn(s){s<n} fn(s){s+1} / n=10  = 10   while loop
 
