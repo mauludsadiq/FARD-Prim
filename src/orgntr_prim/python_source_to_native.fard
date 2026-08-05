@@ -39,3 +39,6 @@ fn compile_ast_and_emit(py_ast, out_path) {
 }
 
 export { compile_ast_and_emit }
+//jsfinal
+//jsfinal
+//jsfinal

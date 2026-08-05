@@ -11,7 +11,33 @@ import("../orgntr_prim/uvir") as uvir
 
 fn make_ctx(fn_names) {
   { next_reg: array.from_list([0]), fn_names: fn_names,
-    lifted_fns: array.from_list([]) }
+    lifted_fns: array.from_list([]),
+    class_defs: array.from_list([{}]) }
+}
+
+fn ctx_register_class(ctx, name, fields, methods) {
+  let cd = array.get(ctx.class_defs, 0) in
+  let _ = array.set(ctx.class_defs, 0, rec.set(cd, name, { fields: fields, methods: methods })) in
+  null
+}
+
+fn ctx_get_class(ctx, name) {
+  let cd = array.get(ctx.class_defs, 0) in
+  if rec.has(cd, name) then rec.get(cd, name) else null
+}
+
+fn collect_this_fields(stmts) {
+  list.flatten(list.map(stmts, fn(stmt) {
+    if stmt.type == "ExpressionStatement" then
+      if stmt.expression.type == "AssignmentExpression" then
+        let lhs = stmt.expression.left in
+        if lhs.type == "MemberExpression" then
+          if lhs.object.type == "ThisExpression" then [lhs.property.name]
+          else []
+        else []
+      else []
+    else []
+  }))
 }
 fn alloc_reg(ctx) {
   let r = array.get(ctx.next_reg, 0) in
@@ -110,6 +136,25 @@ fn lower_expr(node, env, bb, ctx) {
       { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, "fard_fs_lseek", ar.regs)), extra: ar.extra }
     else if fn_name == "fs_unlink" then
       { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, "fard_fs_unlink", ar.regs)), extra: ar.extra }
+    else if ctx_get_class(ctx, fn_name) != null then
+      { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, fn_name, ar.regs)), extra: ar.extra }
+    else if node.callee.type == "MemberExpression" then
+      // obj.method(args) -> ClassName__method(obj, args)
+      let obj = lower_expr(node.callee.object, env, ar.bb, ctx) in
+      let var_name = if node.callee.object.type == "Identifier" then node.callee.object.name else "" in
+      let type_key = str.concat(["__type__", var_name]) in
+      let tracked = env_get(env, type_key) in
+      let class_name = if tracked != null then tracked else "" in
+      let cls = ctx_get_class(ctx, class_name) in
+      let method_name = node.callee.property.name in
+      let method_fn = if cls != null then
+        if rec.has(cls.methods, method_name) then rec.get(cls.methods, method_name)
+        else "__unknown__"
+      else if fn_name != "__unknown__" then fn_name
+      else "__unknown__" in
+      let all_args = list.concat([[obj.reg], ar.regs]) in
+      { reg: dst, bb: bb_emit(obj.bb, uvir.inst_call_direct(dst, method_fn, all_args)),
+        extra: list.concat([ar.extra, obj.extra]) }
     else if list.any(ctx.fn_names, fn(n) { n == fn_name }) then
       { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, fn_name, ar.regs)), extra: ar.extra }
     else
@@ -136,14 +181,45 @@ fn lower_expr(node, env, bb, ctx) {
     let ob = lower_expr(node.object, env, bb, ctx) in
     let dst = alloc_reg(ctx) in
     if node.computed then
+      // d[key] -> dict_get if string key, else array index
       let ix = lower_expr(node.property, env, ob.bb, ctx) in
-      { reg: dst, bb: bb_emit(ix.bb, uvir.inst_load_dyn(dst, ob.reg, ix.reg)),
-        extra: list.concat([ob.extra, ix.extra]) }
+      let is_str = node.property.type == "Literal" &&
+        (type.of(node.property.value) == "text" || type.of(node.property.value) == "string") in
+      if is_str then
+        { reg: dst, bb: bb_emit(ix.bb, uvir.inst_call_direct(dst, "__dict_get__", [ob.reg, ix.reg])),
+          extra: list.concat([ob.extra, ix.extra]) }
+      else
+        { reg: dst, bb: bb_emit(ix.bb, uvir.inst_load_dyn(dst, ob.reg, ix.reg)),
+          extra: list.concat([ob.extra, ix.extra]) }
+    else if node.object.type == "ThisExpression" then
+      // this.field -> load from self record
+      let field_name = node.property.name in
+      let self_class = env_get(env, "__type__self") in
+      let cls = if self_class != null then ctx_get_class(ctx, self_class) else null in
+      let field_idx = if cls != null then
+        let fields = cls.fields in
+        let n = list.len(fields) in
+        list.fold(list.build(n, fn(i){i}), 0, fn(found, i) {
+          if list.get(fields, i) == field_name then i + 1 else found
+        })
+      else 1 in
+      { reg: dst, bb: bb_emit(ob.bb, uvir.inst_load(dst, 0, field_idx * 8)), extra: ob.extra }
     else
-      // Static property — treat as field 0 for now
-      let ir = alloc_reg(ctx) in
-      let b1 = bb_emit(ob.bb, uvir.inst_const(ir, uvir.val_int(0))) in
-      { reg: dst, bb: bb_emit(b1, uvir.inst_load_dyn(dst, ob.reg, ir)), extra: ob.extra }
+      // obj.method or obj.field — resolve via class registry
+      let var_name = if node.object.type == "Identifier" then node.object.name else "" in
+      let type_key = str.concat(["__type__", var_name]) in
+      let tracked = env_get(env, type_key) in
+      let class_name = if tracked != null then tracked else "" in
+      let cls = ctx_get_class(ctx, class_name) in
+      let field_name = node.property.name in
+      let field_idx = if cls != null then
+        let fields = cls.fields in
+        let n = list.len(fields) in
+        list.fold(list.build(n, fn(i){i}), 0, fn(found, i) {
+          if list.get(fields, i) == field_name then i + 1 else found
+        })
+      else 0 in
+      { reg: dst, bb: bb_emit(ob.bb, uvir.inst_load(dst, ob.reg, field_idx * 8)), extra: ob.extra }
   else if t == "ConditionalExpression" then
     let cr = lower_expr(rec.get(node, "test"), env, bb, ctx) in
     let lt = alloc_label(ctx) in
@@ -161,6 +237,91 @@ fn lower_expr(node, env, bb, ctx) {
     let jb = bb_emit(make_bb(lj), phi) in
     { reg: jd, bb: jb,
       extra: list.concat([cr.extra, [cb, tblk], tr.extra, [fblk], fr.extra]) }
+  else if t == "ObjectExpression" then
+    // Object literal: [n, k0, v0, k1, v1, ...]
+    let n = list.len(node.properties) in
+    let size = (1 + n * 2) * 8 in
+    let dst = alloc_reg(ctx) in
+    let hdr_r = alloc_reg(ctx) in
+    let all_props = list.build(n, fn(i){i}) in
+    let kv_result = list.fold(all_props, { regs: [], bb: bb, extra: [] }, fn(acc2, i) {
+      let prop = list.get(node.properties, i) in
+      let k = lower_expr(prop.key, env, acc2.bb, ctx) in
+      let v = lower_expr(prop.value, env, k.bb, ctx) in
+      { regs: list.append(list.append(acc2.regs, k.reg), v.reg),
+        bb: v.bb, extra: list.concat([acc2.extra, k.extra, v.extra]) }
+    }) in
+    let b0 = bb_emit(kv_result.bb, uvir.inst_alloc(dst, size, "dict")) in
+    let b1 = bb_emit(b0, uvir.inst_const(hdr_r, uvir.val_int(n))) in
+    let b2 = bb_emit(b1, uvir.inst_store(dst, 0, hdr_r)) in
+    let b3 = list.fold(all_props, b2, fn(bk, i) {
+      let k_reg = list.get(kv_result.regs, i * 2) in
+      let v_reg = list.get(kv_result.regs, i * 2 + 1) in
+      let bk2 = bb_emit(bk, uvir.inst_store(dst, (1 + i * 2) * 8, k_reg)) in
+      bb_emit(bk2, uvir.inst_store(dst, (2 + i * 2) * 8, v_reg))
+    }) in
+    { reg: dst, bb: b3, extra: kv_result.extra }
+  else if t == "NewExpression" then
+    // new ClassName(args) -> call constructor
+    let ar = list.fold(node.arguments, { regs: [], bb: bb, extra: [] }, fn(acc, arg) {
+      let r = lower_expr(arg, env, acc.bb, ctx) in
+      { regs: list.append(acc.regs, r.reg), bb: r.bb, extra: list.concat([acc.extra, r.extra]) }
+    }) in
+    let dst = alloc_reg(ctx) in
+    let class_name = if node.callee.type == "Identifier" then node.callee.name else "__unknown__" in
+    { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, class_name, ar.regs)), extra: ar.extra }
+  else if t == "ThisExpression" then
+    // this -> self register (from env if constructor, else reg 0 for methods)
+    let self_r = env_get(env, "__self__") in
+    let self_src = if self_r != null then self_r else 0 in
+    let dst = alloc_reg(ctx) in
+    { reg: dst, bb: bb_emit(bb, uvir.inst_copy(dst, self_src)), extra: [] }
+  else if t == "AssignmentExpression" then
+    let v = lower_expr(node.right, env, bb, ctx) in
+    let lhs = node.left in
+    if lhs.type == "MemberExpression" then
+      if lhs.object.type == "ThisExpression" then
+        // this.field = val -> store into self record
+        let field_name = lhs.property.name in
+        let self_class = env_get(env, "__type__self") in
+        let cls = if self_class != null then ctx_get_class(ctx, self_class) else null in
+        let field_idx = if cls != null then
+          let fields = cls.fields in
+          let n = list.len(fields) in
+          list.fold(list.build(n, fn(i){i}), 0, fn(found, i) {
+            if list.get(fields, i) == field_name then i + 1 else found
+          })
+        else 1 in
+        let self_r = env_get(env, "__self__") in
+        let self_src = if self_r != null then self_r else 0 in
+        let obj_r = alloc_reg(ctx) in
+        let nb = bb_emit(v.bb, uvir.inst_copy(obj_r, self_src)) in
+        let nb2 = bb_emit(nb, uvir.inst_store(obj_r, field_idx * 8, v.reg)) in
+        { reg: v.reg, bb: nb2, extra: v.extra }
+      else if lhs.computed then
+        // d[key] = val -> dict_set
+        let obj = lower_expr(lhs.object, env, v.bb, ctx) in
+        let key = lower_expr(lhs.property, env, obj.bb, ctx) in
+        let ret_r = alloc_reg(ctx) in
+        let nb = bb_emit(key.bb, uvir.inst_call_direct(ret_r, "__dict_get__", [obj.reg, key.reg])) in
+        { reg: v.reg, bb: nb, extra: list.concat([v.extra, obj.extra, key.extra]) }
+      else
+        { reg: v.reg, bb: v.bb, extra: v.extra }
+    else if lhs.type == "Identifier" then
+      { reg: v.reg, bb: v.bb, extra: v.extra, env: env_set(env, lhs.name, v.reg) }
+    else
+      { reg: v.reg, bb: v.bb, extra: v.extra }
+  else if t == "UpdateExpression" then
+    // i++ or i-- : load current val, compute new val, return result
+    let var_name = if node.argument.type == "Identifier" then node.argument.name else "__anon__" in
+    let src_r = let r = env_get(env, var_name) in if r != null then r else 0 in
+    let one_r = alloc_reg(ctx) in
+    let new_r = alloc_reg(ctx) in
+    let b1 = bb_emit(bb, uvir.inst_const(one_r, uvir.val_int(1))) in
+    let b2 = if node.operator == "++" then bb_emit(b1, uvir.inst_int_add(new_r, src_r, one_r))
+             else bb_emit(b1, uvir.inst_int_sub(new_r, src_r, one_r)) in
+    let result_r = if node.prefix then new_r else src_r in
+    { reg: result_r, bb: b2, extra: [], env: env_set(env, var_name, new_r) }
   else
     let dst = alloc_reg(ctx) in
     { reg: dst, bb: bb_emit(bb, uvir.inst_const(dst, uvir.val_int(0))), extra: [] }
@@ -168,26 +329,39 @@ fn lower_expr(node, env, bb, ctx) {
 
 fn lower_stmts(stmts, env, bb, ctx) {
   list.fold(stmts, { bb: bb, extra: [], env: env, ret_reg: null }, fn(acc, stmt) {
-    if acc.ret_reg != null then acc else
+    if rec.has(acc, "explicit_return") then acc else
     let t = stmt.type in
     if t == "ReturnStatement" then
       let v = if stmt.argument != null
         then lower_expr(stmt.argument, acc.env, acc.bb, ctx)
         else { reg: alloc_reg(ctx), bb: bb_emit(acc.bb, uvir.inst_const(alloc_reg(ctx), uvir.val_null())), extra: [] } in
-      { bb: v.bb, extra: list.concat([acc.extra, v.extra]), env: acc.env, ret_reg: v.reg }
+      { bb: v.bb, extra: list.concat([acc.extra, v.extra]), env: acc.env, ret_reg: v.reg, explicit_return: true }
     else if t == "VariableDeclaration" then
       list.fold(stmt.declarations, acc, fn(a, decl) {
         if a.ret_reg != null then a else
         let v = if decl.init != null
           then lower_expr(decl.init, a.env, a.bb, ctx)
-          else { reg: alloc_reg(ctx), bb: bb_emit(a.bb, uvir.inst_const(alloc_reg(ctx), uvir.val_int(0))), extra: [] } in
+          else let zero_r = alloc_reg(ctx) in
+            { reg: zero_r, bb: bb_emit(a.bb, uvir.inst_const(zero_r, uvir.val_int(0))), extra: [] } in
         let name = if decl.id.type == "Identifier" then decl.id.name else "__anon__" in
+        let class_type = if decl.init != null then
+          if rec.has(decl.init, "type") then
+            if rec.get(decl.init, "type") == "NewExpression" then
+              if decl.init.callee.type == "Identifier" then decl.init.callee.name else ""
+            else ""
+          else ""
+        else "" in
+        let env2 = env_set(a.env, name, v.reg) in
+        let env3 = if class_type != "" then
+          env_set(env2, str.concat(["__type__", name]), class_type)
+          else env2 in
         { bb: v.bb, extra: list.concat([a.extra, v.extra]),
-          env: env_set(a.env, name, v.reg), ret_reg: null }
+          env: env3, ret_reg: null }
       })
     else if t == "ExpressionStatement" then
       let v = lower_expr(stmt.expression, acc.env, acc.bb, ctx) in
-      { bb: v.bb, extra: list.concat([acc.extra, v.extra]), env: acc.env, ret_reg: v.reg }
+      let next_env = if rec.has(v, "env") then v.env else acc.env in
+      { bb: v.bb, extra: list.concat([acc.extra, v.extra]), env: next_env, ret_reg: v.reg }
     else if t == "IfStatement" then
       let cr = lower_expr(rec.get(stmt, "test"), acc.env, acc.bb, ctx) in
       let lt = alloc_label(ctx) in
@@ -233,12 +407,218 @@ fn lower_stmts(stmts, env, bb, ctx) {
     else if t == "BlockStatement" then
       let r = lower_stmts(stmt.body, acc.env, acc.bb, ctx) in
       { bb: r.bb, extra: list.concat([acc.extra, r.extra]), env: r.env, ret_reg: r.ret_reg }
+    else if t == "ForStatement" then
+      // Collect init var names from VariableDeclaration
+      let init_nodes = if rec.has(stmt, "init") then
+        if rec.get(stmt, "init") != null then [rec.get(stmt, "init")] else []
+        else [] in
+      let init_var_names = if list.len(init_nodes) > 0 then
+        let init_node = list.get(init_nodes, 0) in
+        if init_node.type == "VariableDeclaration" then
+          list.map(init_node.declarations, fn(d) {
+            if d.id.type == "Identifier" then d.id.name else "__anon__"
+          })
+        else []
+      else [] in
+      // Collect lifted vars: assigned in body, already in outer env
+      let body_stmts = if stmt.body.type == "BlockStatement" then stmt.body.body else [stmt.body] in
+      let body_assigned = list.flatten(list.map(body_stmts, fn(s) {
+        if s.type == "ExpressionStatement" then
+          if s.expression.type == "AssignmentExpression" then
+            let lhs = s.expression.left in
+            if lhs.type == "Identifier" then [lhs.name] else []
+          else []
+        else []
+      })) in
+      let lifted = list.filter(body_assigned, fn(n) { env_get(acc.env, n) != null }) in
+      // Lower init to get initial values for init vars
+      let init_r = lower_stmts(init_nodes, acc.env, acc.bb, ctx) in
+      // Allocate heap cells for init vars + lifted vars
+      let all_cell_vars = list.concat([init_var_names, lifted]) in
+      let lifted_cells = list.fold(all_cell_vars, { bb: init_r.bb, cells: {} }, fn(lc, n) {
+        let cell = alloc_reg(ctx) in
+        let init_val = let v = env_get(init_r.env, n) in
+          if v != null then v
+          else let v2 = env_get(acc.env, n) in if v2 != null then v2 else 0 in
+        let b = bb_emit(lc.bb, uvir.inst_alloc(cell, 8, "for_cell")) in
+        let b2 = bb_emit(b, uvir.inst_store(cell, 0, init_val)) in
+        { bb: b2, cells: rec.set(lc.cells, n, cell) }
+      }) in
+      let loop_label = alloc_label(ctx) in
+      let body_label = alloc_label(ctx) in
+      let exit_label = alloc_label(ctx) in
+      let entry_blk = bb_finish(lifted_cells.bb, uvir.term_br(loop_label)) in
+      // Loop header: load all cell vars into fresh regs
+      let lbb = make_bb(loop_label) in
+      let loop_load = list.fold(all_cell_vars, { bb: lbb, env: acc.env }, fn(acc2, n) {
+        let cell = rec.get(lifted_cells.cells, n) in
+        let loaded = alloc_reg(ctx) in
+        let nb = bb_emit(acc2.bb, uvir.inst_load(loaded, cell, 0)) in
+        { bb: nb, env: env_set(acc2.env, n, loaded) }
+      }) in
+      let loop_env = loop_load.env in
+      // Condition
+      let cr = if rec.has(stmt, "test") then
+        if rec.get(stmt, "test") != null
+          then lower_expr(rec.get(stmt, "test"), loop_env, loop_load.bb, ctx)
+          else let r = alloc_reg(ctx) in { reg: r, bb: bb_emit(loop_load.bb, uvir.inst_const(r, uvir.val_int(1))), extra: [] }
+        else let r = alloc_reg(ctx) in { reg: r, bb: bb_emit(loop_load.bb, uvir.inst_const(r, uvir.val_int(1))), extra: [] } in
+      let cond_blk = bb_finish(cr.bb, uvir.term_br_cond(cr.reg, body_label, exit_label)) in
+      // Body: run with loop_env
+      let bbb = make_bb(body_label) in
+      let br = lower_stmts(body_stmts, loop_env, bbb, ctx) in
+      // Store lifted vars (body-updated) back to cells
+      let store_lifted = list.fold(lifted, br.bb, fn(b, n) {
+        let cell = rec.get(lifted_cells.cells, n) in
+        let new_val = env_get(br.env, n) in
+        if new_val != null then bb_emit(b, uvir.inst_store(cell, 0, new_val))
+        else b
+      }) in
+      // Update expression: lower, store init vars back to cells
+      let upd_bb = if rec.has(stmt, "update") then
+        if rec.get(stmt, "update") != null then
+          let update_node = rec.get(stmt, "update") in
+          let ur = lower_expr(update_node, br.env, store_lifted, ctx) in
+          // Store only the updated init var (e.g. i) back to its cell
+          let update_name = if update_node.type == "UpdateExpression" then
+            if update_node.argument.type == "Identifier" then update_node.argument.name
+            else null
+          else null in
+          if update_name != null then
+            if rec.has(lifted_cells.cells, update_name) then
+              let cell = rec.get(lifted_cells.cells, update_name) in
+              let uenv = if rec.has(ur, "env") then ur.env else br.env in
+              let new_val = env_get(uenv, update_name) in
+              if new_val != null then bb_emit(ur.bb, uvir.inst_store(cell, 0, new_val))
+              else ur.bb
+            else ur.bb
+          else ur.bb
+        else store_lifted
+      else store_lifted in
+      let body_blk = bb_finish(upd_bb, uvir.term_br(loop_label)) in
+      // Exit: load final values from cells
+      let exit_bb_init = make_bb(exit_label) in
+      let exit_load = list.fold(all_cell_vars, { bb: exit_bb_init, env: acc.env }, fn(acc2, n) {
+        let cell = rec.get(lifted_cells.cells, n) in
+        let final_r = alloc_reg(ctx) in
+        let nb = bb_emit(acc2.bb, uvir.inst_load(final_r, cell, 0)) in
+        { bb: nb, env: env_set(acc2.env, n, final_r) }
+      }) in
+      let extra = list.concat([acc.extra, init_r.extra, [entry_blk, cond_blk, body_blk], br.extra, cr.extra]) in
+      { bb: exit_load.bb, extra: extra, env: exit_load.env, ret_reg: null }
+    else if t == "ForOfStatement" then
+      // for(const x of arr) body — heap cell for index
+      let arr_v = lower_expr(stmt.right, acc.env, acc.bb, ctx) in
+      let var_name = if stmt.left.type == "VariableDeclaration" then
+        if list.len(stmt.left.declarations) > 0 then list.get(stmt.left.declarations, 0).id.name else "__iter__"
+        else "__iter__" in
+      let n_r    = alloc_reg(ctx) in
+      let i_cell = alloc_reg(ctx) in
+      let zero_r = alloc_reg(ctx) in
+      let b1 = bb_emit(arr_v.bb, uvir.inst_load(n_r, arr_v.reg, 0)) in
+      let b2 = bb_emit(b1, uvir.inst_alloc(i_cell, 8, "for_idx")) in
+      let b3 = bb_emit(b2, uvir.inst_const(zero_r, uvir.val_int(0))) in
+      let b4 = bb_emit(b3, uvir.inst_store(i_cell, 0, zero_r)) in
+      let loop_label = alloc_label(ctx) in
+      let body_label = alloc_label(ctx) in
+      let exit_label = alloc_label(ctx) in
+      let entry_blk = bb_finish(b4, uvir.term_br(loop_label)) in
+      let cur_i  = alloc_reg(ctx) in
+      let cond_r = alloc_reg(ctx) in
+      let lbb = make_bb(loop_label) in
+      let lbb = bb_emit(lbb, uvir.inst_load(cur_i, i_cell, 0)) in
+      let lbb = bb_emit(lbb, uvir.inst_int_cmp(cond_r, "<", cur_i, n_r)) in
+      let cond_blk = bb_finish(lbb, uvir.term_br_cond(cond_r, body_label, exit_label)) in
+      let elem_r = alloc_reg(ctx) in
+      let bbb = make_bb(body_label) in
+      let bbb = bb_emit(bbb, uvir.inst_load_dyn(elem_r, arr_v.reg, cur_i)) in
+      let body_env = env_set(acc.env, var_name, elem_r) in
+      let body_stmts = if stmt.body.type == "BlockStatement" then stmt.body.body else [stmt.body] in
+      let br = lower_stmts(body_stmts, body_env, bbb, ctx) in
+      let one_r = alloc_reg(ctx) in
+      let new_i = alloc_reg(ctx) in
+      let ib1 = bb_emit(br.bb, uvir.inst_const(one_r, uvir.val_int(1))) in
+      let ib2 = bb_emit(ib1, uvir.inst_int_add(new_i, cur_i, one_r)) in
+      let ib3 = bb_emit(ib2, uvir.inst_store(i_cell, 0, new_i)) in
+      let body_blk = bb_finish(ib3, uvir.term_br(loop_label)) in
+      let exit_bb = make_bb(exit_label) in
+      let extra = list.concat([acc.extra, arr_v.extra, [entry_blk, cond_blk, body_blk], br.extra]) in
+      { bb: exit_bb, extra: extra, env: acc.env, ret_reg: null }
+    else if t == "ClassDeclaration" then acc
     else acc
   })
 }
 
+fn lower_class_decl(node, all_names, pre_ctx) {
+  let class_name = node.id.name in
+  let methods_list = list.filter(node.body.body, fn(m) { m.type == "MethodDefinition" }) in
+  let ctor_list = list.filter(methods_list, fn(m) { m.kind == "constructor" }) in
+  let ctor = if list.len(ctor_list) > 0 then list.get(ctor_list, 0) else null in
+  let fields = if ctor != null then collect_this_fields(ctor.value.body.body) else [] in
+  let other_methods = list.filter(methods_list, fn(m) { m.kind != "constructor" }) in
+  let methods_map = list.fold(other_methods, {}, fn(mm, m) {
+    rec.set(mm, m.key.name, str.concat([class_name, "__", m.key.name]))
+  }) in
+  let _ = ctx_register_class(pre_ctx, class_name, fields, methods_map) in
+  // Build constructor function — no self param, allocates object internally
+  let ctor_params = if ctor != null then list.map(ctor.value.params, fn(p) { p.name }) else [] in
+  let ctx2 = make_ctx(all_names) in
+  let _ = array.set(ctx2.class_defs, 0, array.get(pre_ctx.class_defs, 0)) in
+  let n_fields = list.len(fields) in
+  // Allocate regs for ctor params first (reg 0, 1, ...)
+  let ctor_param_regs = list.build(list.len(ctor_params), fn(i) { alloc_reg(ctx2) }) in
+  let params = list.build(list.len(ctor_params), fn(i) {
+    uvir.param(i, uvir.ty_any(), list.get(ctor_params, i))
+  }) in
+  let ebb = make_bb(0) in
+  // Allocate object, self_reg holds pointer
+  let alloc_r = alloc_reg(ctx2) in
+  let b0 = bb_emit(ebb, uvir.inst_alloc(alloc_r, (n_fields + 1) * 8, class_name)) in
+  let self_reg = alloc_reg(ctx2) in
+  let b1 = bb_emit(b0, uvir.inst_copy(self_reg, alloc_r)) in
+  let ctor_env = list.fold(list.build(list.len(ctor_params), fn(i){i}),
+    env_set(env_set(env_empty(), "__type__self", class_name), "__self__", self_reg),
+    fn(e, i) { env_set(e, list.get(ctor_params, i), i) }) in
+  let ctor_body = if ctor != null then ctor.value.body.body else [] in
+  let br = lower_stmts(ctor_body, ctor_env, b1, ctx2) in
+  let fblk = bb_finish(br.bb, uvir.term_ret(self_reg)) in
+  let all_blocks = list.concat([br.extra, [fblk]]) in
+  let sorted = list.sort_int(list.map(all_blocks, fn(b) { b.label })) in
+  let bmap = list.fold(all_blocks, {}, fn(acc, b) { rec.set(acc, str.from(b.label), b) }) in
+  let ordered = list.map(sorted, fn(l) { rec.get(bmap, str.from(l)) }) in
+  let ctor_fn = uvir.func(class_name, params, uvir.ty_any(), ordered, uvir.func_attrs(false, false)) in
+  // Build method functions
+  let method_fns = list.map(other_methods, fn(m) {
+    let method_name = str.concat([class_name, "__", m.key.name]) in
+    let mparams_names = list.map(m.value.params, fn(p) { p.name }) in
+    let mctx = make_ctx(all_names) in
+    let _ = array.set(mctx.class_defs, 0, array.get(pre_ctx.class_defs, 0)) in
+    let _ = alloc_reg(mctx) in  // reg 0 = self
+    let mparams = list.concat([
+      [uvir.param(0, uvir.ty_any(), "self")],
+      list.build(list.len(mparams_names), fn(i) { uvir.param(i+1, uvir.ty_any(), list.get(mparams_names, i)) })
+    ]) in
+    let menv = list.fold(list.build(list.len(mparams_names), fn(i){i}),
+      env_set(env_empty(), "__type__self", class_name),
+      fn(e, i) { let _ = alloc_reg(mctx) in env_set(e, list.get(mparams_names, i), i+1) }) in
+    let mebb = make_bb(0) in
+    let mres = lower_stmts(m.value.body.body, menv, mebb, mctx) in
+    let ret_r = if mres.ret_reg != null then mres.ret_reg else 0 in
+    let mfblk = bb_finish(mres.bb, uvir.term_ret(ret_r)) in
+    let mblocks = list.concat([mres.extra, [mfblk]]) in
+    let msorted = list.sort_int(list.map(mblocks, fn(b) { b.label })) in
+    let mbmap = list.fold(mblocks, {}, fn(acc, b) { rec.set(acc, str.from(b.label), b) }) in
+    let mordered = list.map(msorted, fn(l) { rec.get(mbmap, str.from(l)) }) in
+    uvir.func(method_name, mparams, uvir.ty_any(), mordered, uvir.func_attrs(false, false))
+  }) in
+  list.concat([method_fns, [ctor_fn]])
+}
+
 fn lower_func_decl(node, fn_names) {
-  let ctx = make_ctx(fn_names) in
+  lower_func_decl_with_ctx(node, make_ctx(fn_names))
+}
+
+fn lower_func_decl_with_ctx(node, ctx) {
   let param_names = list.map(node.params, fn(p) { p.name }) in
   let params = list.build(list.len(param_names), fn(i) {
     uvir.param(i, uvir.ty_any(), list.get(param_names, i))
@@ -256,16 +636,93 @@ fn lower_func_decl(node, fn_names) {
   uvir.func(node.id.name, params, uvir.ty_any(), ordered, uvir.func_attrs(false, false))
 }
 
+fn build_dict_helpers(fn_names) {
+  let ctx = make_ctx(fn_names) in
+  let _ = alloc_reg(ctx) in
+  let _ = alloc_reg(ctx) in
+  let get_params = [uvir.param(0, uvir.ty_any(), "dict"), uvir.param(1, uvir.ty_any(), "key")] in
+  let n_r    = alloc_reg(ctx) in
+  let i_cell = alloc_reg(ctx) in
+  let zero_r = alloc_reg(ctx) in
+  let ebb = make_bb(0) in
+  let ebb = bb_emit(ebb, uvir.inst_load(n_r, 0, 0)) in
+  let ebb = bb_emit(ebb, uvir.inst_alloc(i_cell, 8, "di")) in
+  let ebb = bb_emit(ebb, uvir.inst_const(zero_r, uvir.val_int(0))) in
+  let ebb = bb_emit(ebb, uvir.inst_store(i_cell, 0, zero_r)) in
+  let lbl_loop = alloc_label(ctx) in
+  let lbl_body = alloc_label(ctx) in
+  let lbl_exit = alloc_label(ctx) in
+  let entry_blk = bb_finish(ebb, uvir.term_br(lbl_loop)) in
+  let cur_i  = alloc_reg(ctx) in
+  let cond_r = alloc_reg(ctx) in
+  let lbb = make_bb(lbl_loop) in
+  let lbb = bb_emit(lbb, uvir.inst_load(cur_i, i_cell, 0)) in
+  let lbb = bb_emit(lbb, uvir.inst_int_cmp(cond_r, "<", cur_i, n_r)) in
+  let cond_blk = bb_finish(lbb, uvir.term_br_cond(cond_r, lbl_body, lbl_exit)) in
+  let bbb    = make_bb(lbl_body) in
+  let two_r  = alloc_reg(ctx) in
+  let kidx_r = alloc_reg(ctx) in
+  let vidx_r = alloc_reg(ctx) in
+  let one_r  = alloc_reg(ctx) in
+  let kptr_r = alloc_reg(ctx) in
+  let eq_r   = alloc_reg(ctx) in
+  let bbb = bb_emit(bbb, uvir.inst_const(two_r, uvir.val_int(2))) in
+  let bbb = bb_emit(bbb, uvir.inst_int_mul(kidx_r, cur_i, two_r)) in
+  let bbb = bb_emit(bbb, uvir.inst_const(one_r, uvir.val_int(1))) in
+  let bbb = bb_emit(bbb, uvir.inst_int_add(vidx_r, kidx_r, one_r)) in
+  let bbb = bb_emit(bbb, uvir.inst_load_dyn(kptr_r, 0, kidx_r)) in
+  let bbb = bb_emit(bbb, uvir.inst_call_direct(eq_r, "fard_str_eq", [kptr_r, 1])) in
+  let lbl_found = alloc_label(ctx) in
+  let lbl_inc   = alloc_label(ctx) in
+  let body_blk = bb_finish(bbb, uvir.term_br_cond(eq_r, lbl_found, lbl_inc)) in
+  let fbb   = make_bb(lbl_found) in
+  let val_r = alloc_reg(ctx) in
+  let fbb = bb_emit(fbb, uvir.inst_load_dyn(val_r, 0, vidx_r)) in
+  let found_blk = bb_finish(fbb, uvir.term_ret(val_r)) in
+  let ibb   = make_bb(lbl_inc) in
+  let one2  = alloc_reg(ctx) in
+  let new_i = alloc_reg(ctx) in
+  let ibb = bb_emit(ibb, uvir.inst_const(one2, uvir.val_int(1))) in
+  let ibb = bb_emit(ibb, uvir.inst_int_add(new_i, cur_i, one2)) in
+  let ibb = bb_emit(ibb, uvir.inst_store(i_cell, 0, new_i)) in
+  let inc_blk = bb_finish(ibb, uvir.term_br(lbl_loop)) in
+  let xbb = make_bb(lbl_exit) in
+  let z_r = alloc_reg(ctx) in
+  let xbb = bb_emit(xbb, uvir.inst_const(z_r, uvir.val_int(0))) in
+  let exit_blk = bb_finish(xbb, uvir.term_ret(z_r)) in
+  let blks = [entry_blk, cond_blk, body_blk, found_blk, inc_blk, exit_blk] in
+  let get_fn = uvir.func("__dict_get__", get_params, uvir.ty_any(), blks, uvir.func_attrs(false, false)) in
+  [get_fn]
+}
+
 fn lower_module(js_ast) {
   let fn_names = list.map(
     list.filter(js_ast.body, fn(s) { s.type == "FunctionDeclaration" }),
     fn(s) { s.id.name }) in
-  let all_names = list.append(fn_names, "__main__") in
+  let class_names = list.map(
+    list.filter(js_ast.body, fn(s) { s.type == "ClassDeclaration" }),
+    fn(s) { s.id.name }) in
+  let all_names = list.concat([fn_names, class_names, ["__main__"]]) in
+  let pre_ctx = make_ctx(all_names) in
+  // Register classes first
+  let _ = list.map(list.filter(js_ast.body, fn(s) { s.type == "ClassDeclaration" }), fn(s) {
+    let ctor_list = list.filter(s.body.body, fn(m) { m.kind == "constructor" }) in
+    let ctor = if list.len(ctor_list) > 0 then list.get(ctor_list, 0) else null in
+    let fields = if ctor != null then collect_this_fields(ctor.value.body.body) else [] in
+    let other_methods = list.filter(s.body.body, fn(m) { m.type == "MethodDefinition" && m.kind != "constructor" }) in
+    let methods_map = list.fold(other_methods, {}, fn(mm, m) {
+      rec.set(mm, m.key.name, str.concat([s.id.name, "__", m.key.name]))
+    }) in
+    ctx_register_class(pre_ctx, s.id.name, fields, methods_map)
+  }) in
   let fns = list.map(
     list.filter(js_ast.body, fn(s) { s.type == "FunctionDeclaration" }),
-    fn(s) { lower_func_decl(s, all_names) }) in
-  let top_stmts = list.filter(js_ast.body, fn(s) { s.type != "FunctionDeclaration" }) in
-  let ctx = make_ctx(all_names) in
+    fn(s) { lower_func_decl_with_ctx(s, pre_ctx) }) in
+  let class_fns = list.flatten(list.map(
+    list.filter(js_ast.body, fn(s) { s.type == "ClassDeclaration" }),
+    fn(s) { lower_class_decl(s, all_names, pre_ctx) })) in
+  let top_stmts = list.filter(js_ast.body, fn(s) { s.type != "FunctionDeclaration" && s.type != "ClassDeclaration" }) in
+  let ctx = pre_ctx in
   let ebb = make_bb(0) in
   let result = lower_stmts(top_stmts, env_empty(), ebb, ctx) in
   let ret_reg = if result.ret_reg != null then result.ret_reg
@@ -276,7 +733,8 @@ fn lower_module(js_ast) {
   let bmap = list.fold(all_blocks, {}, fn(acc, b) { rec.set(acc, str.from(b.label), b) }) in
   let ordered = list.map(sorted, fn(l) { rec.get(bmap, str.from(l)) }) in
   let main_fn = uvir.func("__main__", [], uvir.ty_any(), ordered, uvir.func_attrs(false, false)) in
-  uvir.module("javascript", list.append(fns, main_fn), "__main__", [], [])
+  let dict_helpers = build_dict_helpers(all_names) in
+  uvir.module("javascript", list.concat([fns, class_fns, dict_helpers, [main_fn]]), "__main__", [], [])
 }
 
 export { lower_module, lower_func_decl, lower_expr }
