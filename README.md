@@ -235,7 +235,7 @@ Achieved via:
 
 ## Source
 
-17,611 lines of FARD across 70 files in src/orgntr_prim/.
+17,612 lines of FARD across 70 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (1130 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -250,7 +250,7 @@ Achieved via:
    ocir_opt.fard           copy prop, const fold, DCE, empty block elim (306 lines)
    ocir_gvn.fard           global value numbering (110 lines)
    ocir_gvn_mem.fard       cross-block GVN via MemorySSA (160 lines)
-   ocir_to_vmir.fard       OCIR -> VMIR instruction selection (124 lines)
+   ocir_to_vmir.fard      OCIR -> VMIR instruction selection (175 lines)
    vmir_sched.fard         pre-RA list scheduling, latency hiding (229 lines)
    vmir_to_omir.fard       VMIR -> OMIR register allocation (237 lines)
    ocir_memssa.fard        MemorySSA: MemDef/MemUse/MemPhi + renaming (571 lines)
@@ -268,8 +268,8 @@ Achieved via:
    ocir_sr.fard            strength reduction, mul->add + small-k chains (195 lines)
    fard_gc.fard            GC entry stub, mark-sweep infrastructure (94 lines)
    lower_ocir_to_omir.fard OCIR -> OMIR (ARM64/ELF legacy path) (391 lines)
-   python_to_uvir.fard     Python subset frontend (783 lines)
-   js_to_uvir.fard         JavaScript subset frontend (270 lines)
+   python_to_uvir.fard      Python subset frontend (783 lines)
+   js_to_uvir.fard      JavaScript subset frontend (740 lines)
 
 ## Next
 
