@@ -234,7 +234,7 @@ Achieved via:
 
 ## Source
 
-17,135 lines of FARD across 70 files in src/orgntr_prim/.
+17,611 lines of FARD across 70 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (1130 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
