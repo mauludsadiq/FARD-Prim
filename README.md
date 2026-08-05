@@ -275,7 +275,6 @@ Achieved via:
    Python while loop mutable variable fix (apply heap-cell pattern from for loops)
    Python list methods (append, len, pop)
    Python print() builtin
-   JS objects (similar design to Python dicts)
    Precise GC (ptrmask infrastructure in place; mark_object replacement pending)
 
 
