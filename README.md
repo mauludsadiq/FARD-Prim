@@ -282,3 +282,14 @@ Achieved via:
 
    https://github.com/mauludsadiq/FARD-Prim   (this repo, backend)
    https://github.com/mauludsadiq/FARD         (v0.5 compiler, written in Rust)
+
+## Python List Methods
+
+len(), append(), and pop() are now supported:
+
+xs = [10, 20, 30]
+xs.append(42)
+n = len(xs)   # 4
+v = xs.pop()  # 42
+
+Implemented via UVIR helper functions (__list_append__, __list_pop__) compiled alongside user code. Added StoreDyn/StoreHeapDyn instruction end-to-end through the full pipeline (uvir to ocir to vmir to omir to regalloc to x86_64 encoding).
