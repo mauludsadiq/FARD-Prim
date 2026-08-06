@@ -35,6 +35,7 @@ All produce the same native binary. Same IR, same backend, same output.
    JS classes, for loops, objects, dicts   = ✓    JS subset frontend (Acorn)
    adder(10)(32)                           = 42   closure with captured variable
    while 0 fn(s){s<n} fn(s){s+1} / n=10  = 10   while loop
+   len/append/pop on lists                  = ✓    Python list methods
 
 ## Targets
 
@@ -273,7 +274,6 @@ Achieved via:
 
 ## Next
 
-   Python list methods (append, len, pop)
    Python print() builtin
    Precise GC (ptrmask infrastructure in place; mark_object replacement pending)
 
@@ -282,14 +282,3 @@ Achieved via:
 
    https://github.com/mauludsadiq/FARD-Prim   (this repo, backend)
    https://github.com/mauludsadiq/FARD         (v0.5 compiler, written in Rust)
-
-## Python List Methods
-
-len(), append(), and pop() are now supported:
-
-xs = [10, 20, 30]
-xs.append(42)
-n = len(xs)   # 4
-v = xs.pop()  # 42
-
-Implemented via UVIR helper functions (__list_append__, __list_pop__) compiled alongside user code. Added StoreDyn/StoreHeapDyn instruction end-to-end through the full pipeline (uvir to ocir to vmir to omir to regalloc to x86_64 encoding).
