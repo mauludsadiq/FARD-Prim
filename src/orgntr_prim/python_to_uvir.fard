@@ -139,7 +139,11 @@ fn lower_expr(node, env, bb, ctx) {
     }) in
     let dst = alloc_reg(ctx) in
     let fn_name = if node.func.t == "Name" then node.func.id else "__unknown__" in
-    if fn_name == "dict_get" then
+    if fn_name == "len" then
+      let lst = list.get(ar.regs, 0) in
+      let dst2 = alloc_reg(ctx) in
+      { reg: dst2, bb: bb_emit(ar.bb, uvir.inst_load(dst2, lst, 0)), extra: ar.extra }
+    else if fn_name == "dict_get" then
       { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, "__dict_get__", ar.regs)), extra: ar.extra }
     else if fn_name == "dict_set" then
       { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, "__dict_set__", ar.regs)), extra: ar.extra }
@@ -175,9 +179,18 @@ fn lower_expr(node, env, bb, ctx) {
           then rec.get(cls.methods, node.func.attr)
           else "__unknown__"
         else "__unknown__" in
-      let all_args = list.concat([[obj.reg], ar.regs]) in
-      { reg: dst, bb: bb_emit(obj.bb, uvir.inst_call_direct(dst, method_fn, all_args)),
-        extra: list.concat([ar.extra, obj.extra]) }
+      let attr_name = node.func.attr in
+      if attr_name == "append" then
+        let v_reg = if list.len(ar.regs) > 0 then list.get(ar.regs, 0) else 0 in
+        { reg: dst, bb: bb_emit(obj.bb, uvir.inst_call_direct(dst, "__list_append__", [obj.reg, v_reg])),
+          extra: list.concat([ar.extra, obj.extra]) }
+      else if attr_name == "pop" then
+        { reg: dst, bb: bb_emit(obj.bb, uvir.inst_call_direct(dst, "__list_pop__", [obj.reg])),
+          extra: list.concat([ar.extra, obj.extra]) }
+      else
+        let all_args = list.concat([[obj.reg], ar.regs]) in
+        { reg: dst, bb: bb_emit(obj.bb, uvir.inst_call_direct(dst, method_fn, all_args)),
+          extra: list.concat([ar.extra, obj.extra]) }
     else
       let fr = lower_expr(node.func, env, ar.bb, ctx) in
       { reg: dst, bb: bb_emit(fr.bb, uvir.inst_call_indirect(dst, fr.reg, ar.regs)),
@@ -191,7 +204,7 @@ fn lower_expr(node, env, bb, ctx) {
     let pr = 10000 + dst in
     let n = list.len(node.elts) in
     let lr = 10001 + dst in
-    let b0 = bb_emit(ir.bb, uvir.inst_alloc(pr, (1 + n) * 8, "list")) in
+    let b0 = bb_emit(ir.bb, uvir.inst_alloc(pr, (1 + n + 8) * 8, "list")) in
     let b1 = bb_emit(b0, uvir.inst_const(lr, uvir.val_int(n))) in
     let b2 = bb_emit(b1, uvir.inst_store(pr, 0, lr)) in
     let b3 = list.fold(list.build(n, fn(i) { i }), b2, fn(bk, i) {
@@ -306,7 +319,8 @@ fn lower_stmts(stmts, env, bb, ctx) {
       let v = if stmt.value != null
         then lower_expr(stmt.value, acc.env, acc.bb, ctx)
         else { reg: alloc_reg(ctx), bb: bb_emit(acc.bb, uvir.inst_const(alloc_reg(ctx), uvir.val_null())), extra: [] } in
-      { bb: v.bb, extra: list.concat([acc.extra, v.extra]), env: acc.env, ret_reg: v.reg }
+      { bb: v.bb, extra: list.concat([acc.extra, v.extra]),
+        env: env_set(acc.env, "__last_expr__", v.reg), ret_reg: null }
     else if t == "Assign" then
       let v = lower_expr(stmt.value, acc.env, acc.bb, ctx) in
       let tgt = if list.len(stmt.targets) > 0 then list.get(stmt.targets, 0) else { t: "Name", id: "__anon__" } in
@@ -314,10 +328,14 @@ fn lower_stmts(stmts, env, bb, ctx) {
         // dict/list assignment: d[key] = val
         let obj = lower_expr(tgt.value, acc.env, v.bb, ctx) in
         let key = lower_expr(tgt.slice, acc.env, obj.bb, ctx) in
-        // For now: call dict_set builtin (rdi=dict, rsi=key, rdx=val)
-        let ret_r = alloc_reg(ctx) in
-        let nb = bb_emit(key.bb, uvir.inst_call_direct(ret_r, "__dict_set__",
-          [obj.reg, key.reg, v.reg])) in
+        let obj_name = if tgt.value.t == "Name" then tgt.value.id else "" in
+        let tracked_type = env_get(acc.env, str.concat(["__type__", obj_name])) in
+        let nb = if tracked_type == "__list__" then
+          bb_emit(key.bb, uvir.inst_store_dyn(obj.reg, key.reg, v.reg))
+        else
+          let ret_r = alloc_reg(ctx) in
+          bb_emit(key.bb, uvir.inst_call_direct(ret_r, "__dict_set__",
+            [obj.reg, key.reg, v.reg])) in
         { bb: nb, extra: list.concat([acc.extra, v.extra, obj.extra, key.extra]),
           env: acc.env, ret_reg: null }
       else if tgt.t == "Attribute" then
@@ -332,6 +350,7 @@ fn lower_stmts(stmts, env, bb, ctx) {
       else
         let name = if tgt.t == "Name" then tgt.id else "__anon__" in
         let class_type = if stmt.value.t == "Dict" then "__dict__"
+          else if stmt.value.t == "List" then "__list__"
           else if stmt.value.t == "Call" then
             if stmt.value.func.t == "Name" then
               if ctx_get_class(ctx, stmt.value.func.id) != null then stmt.value.func.id else ""
@@ -440,7 +459,8 @@ fn lower_stmts(stmts, env, bb, ctx) {
     else if t == "Expr" then
       // Expression statement -- track result in case it is the last statement
       let v = lower_expr(stmt.value, acc.env, acc.bb, ctx) in
-      { bb: v.bb, extra: list.concat([acc.extra, v.extra]), env: acc.env, ret_reg: v.reg }
+      { bb: v.bb, extra: list.concat([acc.extra, v.extra]),
+        env: env_set(acc.env, "__last_expr__", v.reg), ret_reg: null }
     else if t == "For" then
       let target_name = if stmt.target.t == "Name" then stmt.target.id else "__iter__" in
       let iter_node = stmt.iter in
@@ -760,6 +780,44 @@ fn build_dict_helpers(fn_names) {
 }
 
 
+fn build_list_helpers(fn_names) {
+  // __list_append__(lst, val) -> 0
+  let ctx = make_ctx(fn_names) in
+  let _ = alloc_reg(ctx) in  // reg 0 = lst
+  let _ = alloc_reg(ctx) in  // reg 1 = val
+  let app_params = [uvir.param(0, uvir.ty_any(), "lst"), uvir.param(1, uvir.ty_any(), "val")] in
+  let len_r   = alloc_reg(ctx) in
+  let one_r   = alloc_reg(ctx) in
+  let new_len = alloc_reg(ctx) in
+  let ret_r   = alloc_reg(ctx) in
+  let ebb = make_bb(0) in
+  let ebb = bb_emit(ebb, uvir.inst_load(len_r, 0, 0)) in
+  let ebb = bb_emit(ebb, uvir.inst_store_dyn(0, len_r, 1)) in
+  let ebb = bb_emit(ebb, uvir.inst_const(one_r, uvir.val_int(1))) in
+  let ebb = bb_emit(ebb, uvir.inst_int_add(new_len, len_r, one_r)) in
+  let ebb = bb_emit(ebb, uvir.inst_store(0, 0, new_len)) in
+  let ebb = bb_emit(ebb, uvir.inst_const(ret_r, uvir.val_int(0))) in
+  let app_fn = uvir.func("__list_append__", app_params, uvir.ty_any(),
+    [bb_finish(ebb, uvir.term_ret(ret_r))], uvir.func_attrs(false, false)) in
+  // __list_pop__(lst) -> last element
+  let ctx2 = make_ctx(fn_names) in
+  let _ = alloc_reg(ctx2) in  // reg 0 = lst
+  let pop_params = [uvir.param(0, uvir.ty_any(), "lst")] in
+  let len2_r   = alloc_reg(ctx2) in
+  let one2_r   = alloc_reg(ctx2) in
+  let new_len2 = alloc_reg(ctx2) in
+  let val2_r   = alloc_reg(ctx2) in
+  let pbb = make_bb(0) in
+  let pbb = bb_emit(pbb, uvir.inst_load(len2_r, 0, 0)) in
+  let pbb = bb_emit(pbb, uvir.inst_const(one2_r, uvir.val_int(1))) in
+  let pbb = bb_emit(pbb, uvir.inst_int_sub(new_len2, len2_r, one2_r)) in
+  let pbb = bb_emit(pbb, uvir.inst_load_dyn(val2_r, 0, new_len2)) in
+  let pbb = bb_emit(pbb, uvir.inst_store(0, 0, new_len2)) in
+  let pop_fn = uvir.func("__list_pop__", pop_params, uvir.ty_any(),
+    [bb_finish(pbb, uvir.term_ret(val2_r))], uvir.func_attrs(false, false)) in
+  [app_fn, pop_fn]
+}
+
 fn lower_module(py_ast) {
   // Collect all function and class names first
   let fn_names = list.map(
@@ -772,7 +830,7 @@ fn lower_module(py_ast) {
     list.filter(py_ast.body, fn(s) { s.t == "ClassDef" }),
     fn(s) { list.map(list.filter(s.body, fn(m){ m.t == "FunctionDef" }),
       fn(m){ str.concat([s.name, "__", m.name]) }) })) in
-  let all_names = list.concat([fn_names, class_names, class_method_names, ["__main__"]]) in
+  let all_names = list.concat([fn_names, class_names, class_method_names, ["__main__", "__dict_get__", "__list_append__", "__list_pop__"]]) in
 
   // Pre-register classes by scanning top-level stmts first
   let pre_ctx = make_ctx(all_names) in
@@ -805,14 +863,18 @@ fn lower_module(py_ast) {
     else
       let r = env_get(result.env, "result") in
       if r != null then r
-      else 0 in
+      else
+        let last = env_get(result.env, "__last_expr__") in
+        if last != null then last else 0 in
   let fblk = bb_finish(result.bb, uvir.term_ret(ret_reg)) in
   let all_blocks = list.concat([result.extra, [fblk]]) in
   let sorted = list.sort_int(list.map(all_blocks, fn(b) { b.label })) in
   let bmap = list.fold(all_blocks, {}, fn(acc, b) { rec.set(acc, str.from(b.label), b) }) in
   let ordered = list.map(sorted, fn(l) { rec.get(bmap, str.from(l)) }) in
   let main_fn = uvir.func("__main__", [], uvir.ty_any(), ordered, uvir.func_attrs(false, false)) in
-  uvir.module("python", list.concat([fns, class_fns, [main_fn]]), "__main__", [], [])
+  let dict_helpers = build_dict_helpers(all_names) in
+  let list_helpers = build_list_helpers(all_names) in
+  uvir.module("python", list.concat([fns, class_fns, dict_helpers, list_helpers, [main_fn]]), "__main__", [], [])
 }
 
 export { lower_module, lower_funcdef, lower_expr }

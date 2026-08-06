@@ -67,6 +67,7 @@ fn inst_alloc(dst, size, tag) { { op: "Alloc", dst: dst, size: size, tag: tag } 
 fn inst_load(dst, ptr, offset) { { op: "Load", dst: dst, ptr: ptr, offset: offset } }
 fn inst_store(ptr, offset, src) { { op: "Store", ptr: ptr, offset: offset, src: src } }
 fn inst_load_dyn(dst, ptr, idx) { { op: "LoadDyn", dst: dst, ptr: ptr, idx: idx } }
+fn inst_store_dyn(ptr, idx, src) { { op: "StoreDyn", ptr: ptr, idx: idx, src: src } }
 
 // String
 fn inst_str_const(dst, s) { { op: "StrConst", dst: dst, s: s } }
@@ -191,7 +192,7 @@ export {
   val_int, val_float, val_bool, val_str, val_null,
   inst_int_add, inst_int_sub, inst_int_mul, inst_int_div, inst_int_mod,
   inst_int_cmp, inst_const, inst_copy,
-  inst_alloc, inst_load, inst_store, inst_load_dyn,
+  inst_alloc, inst_load, inst_store, inst_load_dyn, inst_store_dyn,
   inst_str_const, inst_str_len, inst_str_get,
   inst_make_closure, inst_call_direct, inst_call_indirect, inst_call_foreign,
   inst_type_of, inst_coerce, inst_is_truthy,

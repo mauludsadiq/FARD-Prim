@@ -161,25 +161,34 @@ fn store_from_reg(dst, src_reg) {
 
 fn add_reg_stack(dst, src_stack) {
   let c = reg_code(dst) in
-  [rex_wr_for(dst), 3, modrm_disp8(c, 5), disp8(src_stack.slot)]
+  let s = src_stack.slot in
+  if s >= -128 && s <= 127
+    then [rex_wr_for(dst), 3, modrm_disp8(c, 5), disp8(s)]
+    else list.concat([[rex_wr_for(dst), 3, modrm_disp32(c, 5)], le32(s)])
 }
 
 fn sub_reg_stack(dst, src_stack) {
-  // sub dst_reg, [rbp + src_stack.slot]
   let c = reg_code(dst) in
-  [rex_wr_for(dst), 43, modrm_disp8(c, 5), disp8(src_stack.slot)]
+  let s = src_stack.slot in
+  if s >= -128 && s <= 127
+    then [rex_wr_for(dst), 43, modrm_disp8(c, 5), disp8(s)]
+    else list.concat([[rex_wr_for(dst), 43, modrm_disp32(c, 5)], le32(s)])
 }
 
 fn imul_reg_stack(dst, src_stack) {
-  // imul dst_reg, [rbp + src_stack.slot]
   let c = reg_code(dst) in
-  [rex_wr_for(dst), 15, 175, modrm_disp8(c, 5), disp8(src_stack.slot)]
+  let s = src_stack.slot in
+  if s >= -128 && s <= 127
+    then [rex_wr_for(dst), 15, 175, modrm_disp8(c, 5), disp8(s)]
+    else list.concat([[rex_wr_for(dst), 15, 175, modrm_disp32(c, 5)], le32(s)])
 }
 
 fn cmp_reg_stack(dst, src_stack) {
-  // cmp dst_reg, [rbp + src_stack.slot]
   let c = reg_code(dst) in
-  [rex_wr_for(dst), 59, modrm_disp8(c, 5), disp8(src_stack.slot)]
+  let s = src_stack.slot in
+  if s >= -128 && s <= 127
+    then [rex_wr_for(dst), 59, modrm_disp8(c, 5), disp8(s)]
+    else list.concat([[rex_wr_for(dst), 59, modrm_disp32(c, 5)], le32(s)])
 }
 
 fn cmp_stack_zero(src_stack) {
@@ -627,6 +636,26 @@ fn encode_inst(inst) {
       [72, 1, 200],                  // add rax, rcx
       [72, 139, 64, 8],              // mov rax, [rax+8]
       store_from_reg(inst.dst, rax)
+    ])
+  else if inst.op == "StoreHeapDyn" then
+    // [ptr + 8 + idx*8] = src
+    // Load src first (before rax/rcx are clobbered)
+    // mov rdx, src         -- load src value FIRST
+    // mov rax, [rbp+ptr]   -- load ptr
+    // mov rcx, [rbp+idx]   -- load idx
+    // shl rcx, 3           -- idx * 8
+    // add rax, rcx         -- ptr + idx*8
+    // mov [rax+8], rdx     -- store to [ptr + idx*8 + 8]
+    let rax = { k: "reg", name: "rax" } in
+    let rcx = { k: "reg", name: "rcx" } in
+    let rdx = { k: "reg", name: "rdx" } in
+    list.concat([
+      load_to_reg(rdx, inst.src),
+      load_to_reg(rax, inst.ptr),
+      load_to_reg(rcx, inst.idx),
+      [72, 193, 225, 3],             // shl rcx, 3
+      [72, 1, 200],                  // add rax, rcx
+      [72, 137, 80, 8]               // mov [rax+8], rdx
     ])
   else if inst.op == "StoreFnPtr" then
     // Store function address into [ptr+0]

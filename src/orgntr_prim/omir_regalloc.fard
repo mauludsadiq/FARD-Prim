@@ -55,6 +55,7 @@ fn use_slots(inst) {
     if rec.has(inst,"dst") && inst.dst.k == "stack" then inst.dst.slot else -1
   else if op == "LoadArg"       then [inst.slot]
   else if op == "StoreHeap"     then [inst.ptr.slot, inst.src.slot]
+  else if op == "StoreHeapDyn"  then [inst.ptr.slot, inst.idx.slot, inst.src.slot]
   else if op == "LoadHeap"      then [inst.ptr.slot]
   else if op == "LoadHeapDyn"   then [inst.ptr.slot, inst.idx.slot]
   else if op == "MovStackToStack" then [inst.src.slot]
@@ -114,6 +115,7 @@ fn unrewritable_slots(insts) {
     let op = inst.op in
     let slots =
       if op == "StoreHeap" then list.concat([unsafe_slot(inst.ptr), unsafe_slot(inst.src)])
+      else if op == "StoreHeapDyn" then list.concat([unsafe_slot(inst.ptr), unsafe_slot(inst.idx), unsafe_slot(inst.src)])
       else if op == "LoadHeap" then list.concat([unsafe_slot(inst.ptr), unsafe_slot(inst.dst)])
       else if op == "LoadHeapDyn" then list.concat([unsafe_slot(inst.ptr), unsafe_slot(inst.idx), unsafe_slot(inst.dst)])
       else if op == "LoadHeapStaticIdx" then list.concat([unsafe_slot(inst.ptr), unsafe_slot(inst.dst)])

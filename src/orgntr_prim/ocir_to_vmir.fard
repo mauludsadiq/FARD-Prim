@@ -100,6 +100,8 @@ fn sel_inst(inst) {
     [vi_load_heap(inst.dst, inst.ptr, offset)]
   else if op == "LoadHeapDyn" then
     [vi_load_heap_dyn(inst.dst, inst.ptr, inst.idx)]
+  else if op == "StoreHeapDyn" then
+    [{ op: "StoreHeapDyn", ptr: vreg(inst.ptr), idx: vreg(inst.idx), src: vreg(inst.src) }]
   else if op == "StoreHeap" then
     [vi_store_heap(inst.ptr, inst.offset, inst.src)]
   else if op == "PrintStr" then

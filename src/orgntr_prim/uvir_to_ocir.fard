@@ -35,6 +35,7 @@ fn lower_inst(inst) {
                                   field_idx: inst.offset / 8 - 1 }]
   else if op == "Store"  then [{ op: "StoreHeap", ptr: inst.ptr, offset: inst.offset, src: inst.src }]
   else if op == "LoadDyn" then [{ op: "LoadHeapDyn", dst: inst.dst, ptr: inst.ptr, idx: inst.idx }]
+  else if op == "StoreDyn" then [{ op: "StoreHeapDyn", ptr: inst.ptr, idx: inst.idx, src: inst.src }]
   else if op == "CallDirect" then [ocir.inst_call_i64(inst.dst, inst.callee, inst.args)]
   else if op == "CallIndirect" then [{ op: "CallIndirect", dst: inst.dst,
                                         closure_reg: inst.closure, args: inst.args }]

@@ -168,6 +168,11 @@ fn lower_vmir_inst(inst, slots) {
     let ptr = slot_for(slots, inst.ptr) in
     let idx = slot_for(slots, inst.idx) in
     [{ op: "LoadHeapDyn", dst: dst, ptr: ptr, idx: idx }]
+  else if op == "StoreHeapDyn" then
+    let ptr = slot_for(slots, inst.ptr) in
+    let idx = slot_for(slots, inst.idx) in
+    let src = slot_for(slots, inst.src) in
+    [{ op: "StoreHeapDyn", ptr: ptr, idx: idx, src: src }]
   else if op == "StoreHeap" then
     let ptr = slot_for(slots, inst.ptr) in
     let src = slot_for(slots, inst.src) in
