@@ -108,7 +108,9 @@ def main():
     fard_ast = json_to_fard(ast_dict)
 
     # Write FARD driver
-    driver = f'''import("../src/orgntr_prim/python_source_to_native") as pipeline
+    import time as _t
+    driver = f'''// bust {_t.time()}
+import("../src/orgntr_prim/python_source_to_native") as pipeline
 pipeline.compile_ast_and_emit({fard_ast}, "{output_path}")
 '''
 

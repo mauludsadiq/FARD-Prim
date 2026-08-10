@@ -99,12 +99,12 @@ fn link_module(encoded_module) {
   // (it lives 34 bytes before linked.text, at full-text offset 24)
   let alloc_offset_in_linked_text = 0 - alloc_stub_size() in
   let sym_table = rec.set(sym_table_base, "fard_alloc", alloc_offset_in_linked_text) in
-  let sym_table = rec.set(sym_table, "fard_print", 0 - 803) in
-  let sym_table = rec.set(sym_table, "fard_print_int", 0 - 675) in
-  let sym_table = rec.set(sym_table, "fard_str_len", -518) in
-  let sym_table = rec.set(sym_table, "fard_str_get", -502) in
-  let sym_table = rec.set(sym_table, "fard_str_concat", -486) in
-  let sym_table = rec.set(sym_table, "fard_int_to_str", -326) in
+  let sym_table = rec.set(sym_table, "fard_print", 0 - 1295) in
+  let sym_table = rec.set(sym_table, "fard_print_int", 0 - 1167) in
+  let sym_table = rec.set(sym_table, "fard_str_len", -1010) in
+  let sym_table = rec.set(sym_table, "fard_str_get", -994) in
+  let sym_table = rec.set(sym_table, "fard_str_concat", -978) in
+  let sym_table = rec.set(sym_table, "fard_int_to_str", -830) in
   let sym_table = rec.set(sym_table, "fard_str_eq", -546) in
   let sym_table = rec.set(sym_table, "fard_fs_open", -492) in
   let sym_table = rec.set(sym_table, "fard_fs_read", -416) in
@@ -146,12 +146,12 @@ fn link_module_with_vmaddr(encoded_module, base_vmaddr) {
   let laid_out = layout_funcs(encoded_module.funcs) in
   let sym_table_base = build_symbol_table(laid_out) in
   let sym_table = rec.set(sym_table_base, "fard_alloc", 0 - alloc_stub_size()) in
-  let sym_table = rec.set(sym_table, "fard_print", 0 - 803) in
-  let sym_table = rec.set(sym_table, "fard_print_int", 0 - 675) in
-  let sym_table = rec.set(sym_table, "fard_str_len", -518) in
-  let sym_table = rec.set(sym_table, "fard_str_get", -502) in
-  let sym_table = rec.set(sym_table, "fard_str_concat", -486) in
-  let sym_table = rec.set(sym_table, "fard_int_to_str", -326) in
+  let sym_table = rec.set(sym_table, "fard_print", 0 - 1295) in
+  let sym_table = rec.set(sym_table, "fard_print_int", 0 - 1167) in
+  let sym_table = rec.set(sym_table, "fard_str_len", -1010) in
+  let sym_table = rec.set(sym_table, "fard_str_get", -994) in
+  let sym_table = rec.set(sym_table, "fard_str_concat", -978) in
+  let sym_table = rec.set(sym_table, "fard_int_to_str", -830) in
   let sym_table = rec.set(sym_table, "fard_str_eq", -546) in
   let sym_table = rec.set(sym_table, "fard_fs_open", -492) in
   let sym_table = rec.set(sym_table, "fard_fs_read", -416) in

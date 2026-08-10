@@ -139,7 +139,13 @@ fn lower_expr(node, env, bb, ctx) {
     }) in
     let dst = alloc_reg(ctx) in
     let fn_name = if node.func.t == "Name" then node.func.id else "__unknown__" in
-    if fn_name == "len" then
+    if fn_name == "print" then
+      let arg_reg = if list.len(ar.regs) > 0 then list.get(ar.regs, 0) else 0 in
+      { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, "fard_print", [arg_reg])), extra: ar.extra }
+    else if fn_name == "print_int" then
+      let arg_reg = if list.len(ar.regs) > 0 then list.get(ar.regs, 0) else 0 in
+      { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, "fard_print_int", [arg_reg])), extra: ar.extra }
+    else if fn_name == "len" then
       let lst = list.get(ar.regs, 0) in
       let dst2 = alloc_reg(ctx) in
       { reg: dst2, bb: bb_emit(ar.bb, uvir.inst_load(dst2, lst, 0)), extra: ar.extra }
@@ -830,7 +836,7 @@ fn lower_module(py_ast) {
     list.filter(py_ast.body, fn(s) { s.t == "ClassDef" }),
     fn(s) { list.map(list.filter(s.body, fn(m){ m.t == "FunctionDef" }),
       fn(m){ str.concat([s.name, "__", m.name]) }) })) in
-  let all_names = list.concat([fn_names, class_names, class_method_names, ["__main__", "__dict_get__", "__list_append__", "__list_pop__"]]) in
+  let all_names = list.concat([fn_names, class_names, class_method_names, ["__main__", "__dict_get__", "__list_append__", "__list_pop__", "fard_print", "fard_print_int"]]) in
 
   // Pre-register classes by scanning top-level stmts first
   let pre_ctx = make_ctx(all_names) in
