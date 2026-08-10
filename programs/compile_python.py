@@ -121,6 +121,7 @@ pipeline.compile_ast_and_emit({fard_ast}, "{output_path}")
         driver_path = f.name
 
     print(f"Compiling Python -> {output_path}")
+    if os.path.exists(output_path): os.unlink(output_path)
     result = subprocess.run(
         ["fardrun", "run", "--program", driver_path, "--out", "/tmp/py_compile_out"],
         capture_output=True, text=True

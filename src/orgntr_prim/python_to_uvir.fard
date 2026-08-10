@@ -141,7 +141,7 @@ fn lower_expr(node, env, bb, ctx) {
     let fn_name = if node.func.t == "Name" then node.func.id else "__unknown__" in
     if fn_name == "print" then
       let arg_reg = if list.len(ar.regs) > 0 then list.get(ar.regs, 0) else 0 in
-      { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, "fard_print", [arg_reg])), extra: ar.extra }
+      { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, "__py_print__", [arg_reg])), extra: ar.extra }
     else if fn_name == "print_int" then
       let arg_reg = if list.len(ar.regs) > 0 then list.get(ar.regs, 0) else 0 in
       { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, "fard_print_int", [arg_reg])), extra: ar.extra }
@@ -786,6 +786,26 @@ fn build_dict_helpers(fn_names) {
 }
 
 
+fn build_print_helpers(fn_names) {
+  // __py_print__(s) -> calls fard_print(s)
+  let p0 = uvir.param(0, uvir.ty_any(), "s") in
+  let r0 = 1 in
+  let bb0 = make_bb(0) in
+  let bb0 = bb_emit(bb0, uvir.inst_call_direct(r0, "fard_print", [0])) in
+  let blk0 = bb_finish(bb0, uvir.term_ret(r0)) in
+  let print_fn = uvir.func("__py_print__", [p0], uvir.ty_any(), [blk0], uvir.func_attrs(false, false)) in
+
+  // __py_print_int__(n) -> calls fard_print_int(n)
+  let q0 = uvir.param(0, uvir.ty_any(), "n") in
+  let q1 = 1 in
+  let bb1 = make_bb(0) in
+  let bb1 = bb_emit(bb1, uvir.inst_call_direct(q1, "fard_print_int", [0])) in
+  let blk1 = bb_finish(bb1, uvir.term_ret(q1)) in
+  let print_int_fn = uvir.func("__py_print_int__", [q0], uvir.ty_any(), [blk1], uvir.func_attrs(false, false)) in
+
+  [print_fn, print_int_fn]
+}
+
 fn build_list_helpers(fn_names) {
   // __list_append__(lst, val) -> 0
   let ctx = make_ctx(fn_names) in
@@ -836,7 +856,7 @@ fn lower_module(py_ast) {
     list.filter(py_ast.body, fn(s) { s.t == "ClassDef" }),
     fn(s) { list.map(list.filter(s.body, fn(m){ m.t == "FunctionDef" }),
       fn(m){ str.concat([s.name, "__", m.name]) }) })) in
-  let all_names = list.concat([fn_names, class_names, class_method_names, ["__main__", "__dict_get__", "__list_append__", "__list_pop__", "fard_print", "fard_print_int"]]) in
+  let all_names = list.concat([fn_names, class_names, class_method_names, ["__main__", "__dict_get__", "__list_append__", "__list_pop__", "fard_print", "fard_print_int", "__py_print__", "__py_print_int__"]]) in
 
   // Pre-register classes by scanning top-level stmts first
   let pre_ctx = make_ctx(all_names) in
@@ -880,7 +900,8 @@ fn lower_module(py_ast) {
   let main_fn = uvir.func("__main__", [], uvir.ty_any(), ordered, uvir.func_attrs(false, false)) in
   let dict_helpers = build_dict_helpers(all_names) in
   let list_helpers = build_list_helpers(all_names) in
-  uvir.module("python", list.concat([fns, class_fns, dict_helpers, list_helpers, [main_fn]]), "__main__", [], [])
+  uvir.module("python", let print_helpers = build_print_helpers(all_names) in
+  list.concat([fns, class_fns, dict_helpers, list_helpers, print_helpers, [main_fn]]), "__main__", [], [])
 }
 
 export { lower_module, lower_funcdef, lower_expr }
