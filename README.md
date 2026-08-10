@@ -36,6 +36,7 @@ All produce the same native binary. Same IR, same backend, same output.
    adder(10)(32)                           = 42   closure with captured variable
    while 0 fn(s){s<n} fn(s){s+1} / n=10  = 10   while loop
    len/append/pop on lists                  = ✓    Python list methods
+   print("hello") / print_int(42)            = ✓    Python print builtins
 
 ## Targets
 
@@ -274,7 +275,6 @@ Achieved via:
 
 ## Next
 
-   Python print() builtin
    Precise GC (ptrmask infrastructure in place; mark_object replacement pending)
 
 
