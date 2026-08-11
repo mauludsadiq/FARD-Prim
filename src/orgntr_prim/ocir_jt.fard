@@ -1,0 +1,132 @@
+/// ocir_jt.fard -- Jump Threading
+///
+/// For each BrCond block B with condition register `cond`:
+///   For each predecessor P that ends with Br -> B:
+///     If P defines `cond` as ImmI64(v) (directly or via copy chain):
+///       Redirect P's terminator to then_blk (v!=0) or else_blk (v==0)
+///       Copy B's non-side-effecting insts into P before the redirect
+///
+/// After threading, dead blocks are removed by the caller (DCE/elim_empty).
+///
+/// Conservative: only threads when B contains no calls, no stores,
+/// no heap ops (safe to duplicate). Skips self-loops.
+
+import("std/list") as list
+import("std/rec")  as rec
+import("std/str")  as str
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn is_side_effect(inst) {
+  let op = inst.op in
+  op == "CallI64" || op == "CallIndirect" || op == "StoreHeap" ||
+  op == "StoreHeapDyn" || op == "PrintStr" || op == "PrintInt" ||
+  op == "FsCallV" || op == "IncrCounter"
+}
+
+fn block_safe_to_inline(block) {
+  // Block is safe to copy into predecessor if no side effects
+  // and size is small (avoid code explosion)
+  list.len(block.insts) <= 6 &&
+  !list.any(block.insts, fn(i){ is_side_effect(i) })
+}
+
+fn build_block_map(blocks) {
+  list.fold(blocks, {}, fn(acc, b) {
+    rec.set(acc, str.from(b.label), b)
+  })
+}
+
+fn build_pred_map(blocks) {
+  let init = list.fold(blocks, {}, fn(acc, b) {
+    rec.set(acc, str.from(b.label), [])
+  }) in
+  list.fold(blocks, init, fn(acc, b) {
+    let term = b.term in
+    let succs =
+      if term.op == "Br" then [term.to]
+      else if term.op == "BrCond" then [term.then_blk, term.else_blk]
+      else [] in
+    list.fold(succs, acc, fn(a, s) {
+      let k = str.from(s) in
+      let cur = if rec.has(a, k) then rec.get(a, k) else [] in
+      rec.set(a, k, list.append(cur, b.label))
+    })
+  })
+}
+
+// Trace a register to its constant value within a block's instruction list.
+// Returns the integer value if found, or null if not a known constant.
+fn trace_const_in_block(reg, insts) {
+  // Walk instructions forward, tracking ImmI64 and CopyI64 definitions
+  let result = list.fold(insts, {}, fn(vmap, inst) {
+    if inst.op == "ImmI64" then
+      rec.set(vmap, str.from(inst.dst), inst.val)
+    else if inst.op == "CopyI64" && rec.has(vmap, str.from(inst.src)) then
+      rec.set(vmap, str.from(inst.dst), rec.get(vmap, str.from(inst.src)))
+    else vmap
+  }) in
+  let k = str.from(reg) in
+  if rec.has(result, k) then rec.get(result, k) else null
+}
+
+// ── Per-function threading ────────────────────────────────────────────────────
+
+fn thread_func(f) {
+  if list.len(f.blocks) < 2 then f
+  else
+    let bmap = build_block_map(f.blocks) in
+    let pred_map = build_pred_map(f.blocks) in
+
+    // For each block, attempt to thread predecessors
+    let new_blocks = list.map(f.blocks, fn(pred) {
+      // Only thread predecessors that end with unconditional Br
+      if pred.term.op != "Br" then pred
+      else
+        let target_label = pred.term.to in
+        // Don't thread self-loops
+        if target_label == pred.label then pred
+        else
+          let tk = str.from(target_label) in
+          if !rec.has(bmap, tk) then pred
+          else
+            let target = rec.get(bmap, tk) in
+            // Target must be a BrCond block
+            if target.term.op != "BrCond" then pred
+            else
+              // Target must be safe to inline
+              if !block_safe_to_inline(target) then pred
+              else
+                let cond = target.term.cond in
+                // Check if pred defines cond as a constant
+                let cval = trace_const_in_block(cond, pred.insts) in
+                if cval == null then pred
+                else
+                  // Thread: redirect pred to the known branch
+                  let dest =
+                    if cval != 0 then target.term.then_blk
+                    else target.term.else_blk in
+                  // Copy target's insts into pred (before redirect)
+                  let new_insts = list.concat([pred.insts, target.insts]) in
+                  let new_term = { op: "Br", to: dest } in
+                  { label: pred.label, insts: new_insts, term: new_term }
+    }) in
+
+    // Remove blocks that are now unreachable (no predecessors)
+    // Recompute pred map after threading
+    let new_pred_map = build_pred_map(new_blocks) in
+    let entry_label = list.get(f.blocks, 0).label in
+    let kept = list.filter(new_blocks, fn(b) {
+      b.label == entry_label ||
+      (rec.has(new_pred_map, str.from(b.label)) &&
+       list.len(rec.get(new_pred_map, str.from(b.label))) > 0)
+    }) in
+
+    { name: f.name, params: f.params, blocks: kept }
+}
+
+fn jt_module(m) {
+  { entry: m.entry, funcs: list.map(m.funcs, thread_func) }
+}
+
+export { jt_module }

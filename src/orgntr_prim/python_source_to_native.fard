@@ -9,6 +9,7 @@ import("../orgntr_prim/ocir_inline")     as inl
 import("../orgntr_prim/ocir_dfe")        as dfe
 import("../orgntr_prim/ocir_sr")         as sr
 import("../orgntr_prim/ocir_gvn")        as gvn
+import("../orgntr_prim/ocir_jt")         as jt
 import("../orgntr_prim/ocir_sccp")       as sccp
 import("../orgntr_prim/ocir_to_vmir")    as vmir_sel
 import("../orgntr_prim/vmir_sched")      as sched

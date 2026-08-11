@@ -326,7 +326,7 @@ fn lower_stmts(stmts, env, bb, ctx) {
         then lower_expr(stmt.value, acc.env, acc.bb, ctx)
         else { reg: alloc_reg(ctx), bb: bb_emit(acc.bb, uvir.inst_const(alloc_reg(ctx), uvir.val_null())), extra: [] } in
       { bb: v.bb, extra: list.concat([acc.extra, v.extra]),
-        env: env_set(acc.env, "__last_expr__", v.reg), ret_reg: null }
+        env: env_set(acc.env, "__last_expr__", v.reg), ret_reg: v.reg }
     else if t == "Assign" then
       let v = lower_expr(stmt.value, acc.env, acc.bb, ctx) in
       let tgt = if list.len(stmt.targets) > 0 then list.get(stmt.targets, 0) else { t: "Name", id: "__anon__" } in
@@ -382,37 +382,73 @@ fn lower_stmts(stmts, env, bb, ctx) {
       { bb: nb, extra: list.concat([acc.extra, lv.extra, rv.extra]),
         env: env_set(acc.env, name, dst), ret_reg: null }
     else if t == "If" then
-      let cr = lower_expr(rec.get(stmt, "test"), acc.env, acc.bb, ctx) in
+      let or_stmts = if rec.has(stmt, "orelse") then stmt.orelse else [] in
+      // Collect variables assigned in either branch
+      let then_mut = collect_assigned_names(stmt.body) in
+      let else_mut = collect_assigned_names(or_stmts) in
+      let all_mut = list.fold(else_mut, then_mut, fn(acc2, n) {
+        if list.any(acc2, fn(x){ x == n }) then acc2 else list.append(acc2, n)
+      }) in
+      // Only lift vars that already exist in env (not new declarations)
+      let lifted = list.filter(all_mut, fn(n) { env_get(acc.env, n) != null }) in
+      // Allocate heap cells for lifted vars, store pre-if values
+      let cells = list.fold(lifted, { bb: acc.bb, cells: {} }, fn(lc, n) {
+        let cell = alloc_reg(ctx) in
+        let init_r = env_get(acc.env, n) in
+        let b = bb_emit(lc.bb, uvir.inst_alloc(cell, 8, "if_var")) in
+        let b2 = if init_r != null
+          then bb_emit(b, uvir.inst_store(cell, 0, init_r))
+          else let z = alloc_reg(ctx) in
+               let bz = bb_emit(b, uvir.inst_const(z, uvir.val_int(0))) in
+               bb_emit(bz, uvir.inst_store(cell, 0, z)) in
+        { bb: b2, cells: rec.set(lc.cells, n, cell) }
+      }) in
+      let pre_bb = cells.bb in
+      let cell_map = cells.cells in
+      // Build env with cells for branches
+      let branch_env = list.fold(lifted, acc.env, fn(e, n) {
+        let cell = rec.get(cell_map, n) in
+        let load_r = alloc_reg(ctx) in
+        env_set(e, n, load_r)
+      }) in
+      let cr2 = lower_expr(rec.get(stmt, "test"), branch_env, pre_bb, ctx) in
       let lt = alloc_label(ctx) in
       let lf = alloc_label(ctx) in
       let lj = alloc_label(ctx) in
-      let cb = bb_finish(cr.bb, uvir.term_br_cond(cr.reg, lt, lf)) in
-      // Then branch
+      let cb = bb_finish(cr2.bb, uvir.term_br_cond(cr2.reg, lt, lf)) in
+      // Then branch — use acc.env so assigns update env
       let tb = make_bb(lt) in
       let tr = lower_stmts(stmt.body, acc.env, tb, ctx) in
-      // If then-branch returns, emit Ret; else branch to join
+      // Store updated vars to cells at end of then branch
+      let tr_bb2 = list.fold(lifted, tr.bb, fn(b2, n) {
+        let cell = rec.get(cell_map, n) in
+        let val_r = env_get(tr.env, n) in
+        if val_r != null then bb_emit(b2, uvir.inst_store(cell, 0, val_r)) else b2
+      }) in
       let tblk = if tr.ret_reg != null
         then bb_finish(tr.bb, uvir.term_ret(tr.ret_reg))
-        else bb_finish(tr.bb, uvir.term_br(lj)) in
+        else bb_finish(tr_bb2, uvir.term_br(lj)) in
       // Else branch
       let fb = make_bb(lf) in
-      let or_stmts = if rec.has(stmt, "orelse") then stmt.orelse else [] in
       let fr = lower_stmts(or_stmts, acc.env, fb, ctx) in
-      // If else-branch returns, emit Ret; else branch to join
+      let fr_bb2 = list.fold(lifted, fr.bb, fn(b2, n) {
+        let cell = rec.get(cell_map, n) in
+        let val_r = env_get(fr.env, n) in
+        if val_r != null then bb_emit(b2, uvir.inst_store(cell, 0, val_r)) else b2
+      }) in
       let fblk = if fr.ret_reg != null
         then bb_finish(fr.bb, uvir.term_ret(fr.ret_reg))
-        else bb_finish(fr.bb, uvir.term_br(lj)) in
+        else bb_finish(fr_bb2, uvir.term_br(lj)) in
+      // Join block: load vars from cells, update env
       let jb = make_bb(lj) in
-      let extra = list.concat([acc.extra, cr.extra, [cb, tblk], tr.extra, [fblk], fr.extra]) in
-      // Phi only if NEITHER branch returned (both flow to join)
-      let phi_ret = if tr.ret_reg == null && fr.ret_reg != null
-        then { jb: jb, reg: fr.ret_reg }  // only else returned -- unusual
-        else if tr.ret_reg != null && fr.ret_reg == null
-        then { jb: jb, reg: null }  // only then returned
-        else { jb: jb, reg: null } in
-      let ret = null in
-      let final_jb = phi_ret.jb in
-      { bb: final_jb, extra: extra, env: acc.env, ret_reg: ret }
+      let join = list.fold(lifted, { bb: jb, env: acc.env }, fn(jc, n) {
+        let cell = rec.get(cell_map, n) in
+        let r = alloc_reg(ctx) in
+        let b2 = bb_emit(jc.bb, uvir.inst_load(r, cell, 0)) in
+        { bb: b2, env: env_set(jc.env, n, r) }
+      }) in
+      let extra = list.concat([acc.extra, cr2.extra, [cb, tblk], tr.extra, [fblk], fr.extra]) in
+      { bb: join.bb, extra: extra, env: join.env, ret_reg: null }
     else if t == "While" then
       // Heap-cell pattern for mutable vars — same as For loop
       let body_mut = collect_assigned_names(stmt.body) in
