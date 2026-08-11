@@ -204,7 +204,11 @@ fn lower_vmir_inst(inst, slots) {
     [{ op: "StrCall2Direct", func: inst.func, arg_slot: arg.slot, arg2_slot: arg2.slot, dst_slot: dst.slot }]
   else if op == "Alloc" then
     let dst = slot_for(slots, inst.dst) in
-    [{ op: "MovImm64", dst: rdi(), val: inst.size },
+    let pm = if rec.has(inst, "ptrmask") then inst.ptrmask else 0 in
+    // Pack: rdi = size | (ptrmask << 32)
+    // ptrmask in upper 32 bits, size in lower 32 bits
+    let tagged_size = inst.size + bits.bshl(pm, 32) in
+    [{ op: "MovImm64", dst: rdi(), val: tagged_size },
      { op: "CallReloc", name: "fard_alloc" },
      { op: "StoreRax", slot: dst.slot }]
 

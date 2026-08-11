@@ -40,6 +40,11 @@ fn subst_inst(inst, smap) {
     { op: op, dst: inst.dst, arg: subst_reg(inst.arg, smap), arg2: subst_reg(inst.arg2, smap) }
   else if op == "StoreHeap" then
     { op: op, ptr: subst_reg(inst.ptr, smap), offset: inst.offset, src: subst_reg(inst.src, smap) }
+  else if op == "StoreHeapDyn" then
+    { op: op,
+      ptr: subst_reg(inst.ptr, smap),
+      idx: subst_reg(inst.idx, smap),
+      src: subst_reg(inst.src, smap) }
   else if op == "LoadHeapDyn" then
     { op: op, dst: inst.dst, ptr: subst_reg(inst.ptr, smap), idx: subst_reg(inst.idx, smap) }
   else if op == "LoadHeapStaticIdx" then
@@ -173,6 +178,13 @@ fn collect_uses_inst(inst, uses) {
   let uses = if op == "StoreHeap"
     then rec.set(rec.set(uses, str.from(inst.ptr), true), str.from(inst.src), true)
     else uses in
+  let uses = if op == "StoreHeapDyn"
+    then rec.set(
+      rec.set(
+        rec.set(uses, str.from(inst.ptr), true),
+        str.from(inst.idx), true),
+      str.from(inst.src), true)
+    else uses in
   let uses = if op == "LoadHeapDyn"
     then rec.set(rec.set(uses, str.from(inst.ptr), true), str.from(inst.idx), true)
     else uses in
@@ -202,7 +214,8 @@ fn collect_uses_func(f) {
 
 fn has_side_effects(inst) {
   let op = inst.op in
-  op == "CallI64" || op == "CallIndirect" || op == "StoreHeap" ||
+  op == "CallI64" || op == "CallIndirect" ||
+  op == "StoreHeap" || op == "StoreHeapDyn" ||
   op == "PrintStr" || op == "PrintInt" ||
   op == "StrLen" || op == "StrGet" || op == "StrConcat" ||
   op == "IntToStr" || op == "StrEq"
