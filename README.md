@@ -219,6 +219,9 @@ Achieved via:
   - Loop strength reduction: non-power-of-2 multipliers -> addition chains;
     add_chain_for handles {3,5,6,7,9,10,12,15}; s*3 -> 2 adds;
     verified: MulI64 eliminated from step closure
+  - Typed IR: OCIR instructions annotated with result types (Int/Bool/Ref/Str/Fn/Any);
+    type-directed alias analysis: INT_ORIGIN never aliases AllocHeap;
+    UVIR verifier wired into pipeline, covers all Python-frontend ops
   - Jump threading: path-sensitive BrCond bypass; predecessor with known
     constant condition redirected directly to target, dead blocks removed
   - Dead store elimination: intra-block DSE via alloc-origin tracking;
@@ -240,7 +243,7 @@ Achieved via:
 
 ## Source
 
-17,974 lines of FARD across 71 files in src/orgntr_prim/.
+18,015 lines of FARD across 71 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (1130 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -279,7 +282,6 @@ Achieved via:
 
 ## Next
 
-   Typed IR (UVIR/OCIR type system beyond ty_any())
    Precise GC (ptrmask infrastructure in place; mark_object replacement pending)
 
 
