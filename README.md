@@ -238,12 +238,17 @@ Achieved via:
   - GC Phase 1+2: 4MB mmap heap, conservative mark-sweep GC;
     GC header (ptr-8) stores size+mark bit; loop(300000) allocating
     32-byte records -> GC fires, collects, returns 42 ✓
+  - Precise GC: ptrmask stored in header upper 32 bits (size in lower 32);
+    mark_object iterates only set ptrmask bits as pointer fields;
+    pure data objects (ptrmask=0) skip recursive marking entirely;
+    compute_alloc_ptrmasks wired into Python pipeline;
+    50,000 list allocations under GC pressure -> correct result ✓
   - ARM64 parity: full VMIR pipeline, callee-saved reg handling,
     large literal encoding via bits.bshl (FARD truncates >2^31)
 
 ## Source
 
-18,015 lines of FARD across 71 files in src/orgntr_prim/.
+18,022 lines of FARD across 71 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (1130 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -282,7 +287,7 @@ Achieved via:
 
 ## Next
 
-   Precise GC (ptrmask infrastructure in place; mark_object replacement pending)
+   Loop optimization (fusion, IV widening, vectorization groundwork)
 
 
 ## Repos
