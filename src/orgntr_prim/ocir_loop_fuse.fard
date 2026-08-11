@@ -1,0 +1,233 @@
+/// ocir_loop_fuse.fard -- Loop Fusion
+///
+/// Fuses two adjacent loops with the same constant trip count.
+///
+/// Pattern detected (from Python while lowering):
+///   preheader1 -> header1 <-> body1    (loop1)
+///   exit1(=interblock) -> header2 <-> body2  (loop2)
+///
+/// Fusion: merge body2's insts into body1, redirect header1's exit to loop2's exit.
+/// Interblock insts (j=0 init etc.) are moved to preheader1.
+///
+/// Conditions:
+///   1. loop1.exit leads (via Br) to loop2.header
+///   2. Both have same constant bound value (ImmI64 with same val)
+///   3. loop2.body has no side effects (no calls/stores to external state)
+
+import("std/list") as list
+import("std/rec")  as rec
+import("std/str")  as str
+
+fn block_succs(block) {
+  let op = block.term.op in
+  if op == "BrCond" then [block.term.then_blk, block.term.else_blk]
+  else if op == "Br" then [block.term.to]
+  else []
+}
+
+fn build_pred_map(blocks) {
+  let init = list.fold(blocks, {}, fn(acc, b) {
+    rec.set(acc, str.from(b.label), [])
+  }) in
+  list.fold(blocks, init, fn(acc, b) {
+    list.fold(block_succs(b), acc, fn(a, s) {
+      let k = str.from(s) in
+      let cur = if rec.has(a, k) then rec.get(a, k) else [] in
+      rec.set(a, k, list.append(cur, b.label))
+    })
+  })
+}
+
+fn build_block_map(blocks) {
+  list.fold(blocks, {}, fn(acc, b) {
+    rec.set(acc, str.from(b.label), b)
+  })
+}
+
+// Detect a simple natural loop at header_label
+// Returns {header, body, latch, exit, cond} or null
+fn detect_simple_loop(header_label, bmap, pred_map) {
+  let hk = str.from(header_label) in
+  if !rec.has(bmap, hk) then null
+  else
+    let header = rec.get(bmap, hk) in
+    if header.term.op != "BrCond" then null
+    else
+      let then_blk = header.term.then_blk in
+      let else_blk = header.term.else_blk in
+      let then_k = str.from(then_blk) in
+      let then_succs = if rec.has(bmap, then_k)
+        then block_succs(rec.get(bmap, then_k)) else [] in
+      if list.any(then_succs, fn(s){ s == header_label }) then
+        { header: header_label, body: then_blk, latch: then_blk,
+          exit: else_blk, cond: header.term.cond }
+      else
+        let else_k = str.from(else_blk) in
+        let else_succs = if rec.has(bmap, else_k)
+          then block_succs(rec.get(bmap, else_k)) else [] in
+        if list.any(else_succs, fn(s){ s == header_label }) then
+          { header: header_label, body: else_blk, latch: else_blk,
+            exit: then_blk, cond: header.term.cond }
+        else null
+}
+
+// Find the constant value of a register in a function's blocks
+fn find_imm_val(reg, blocks) {
+  list.fold(blocks, null, fn(acc, b) {
+    if acc != null then acc
+    else list.fold(b.insts, null, fn(a2, inst) {
+      if a2 != null then a2
+      else if inst.op == "ImmI64" && inst.dst == reg then inst.val
+      else a2
+    })
+  })
+}
+
+// Find the bound value of a loop's condition (rhs of CmpI64 that produces cond reg)
+fn find_loop_bound_val(cond_reg, blocks) {
+  list.fold(blocks, null, fn(acc, b) {
+    if acc != null then acc
+    else list.fold(b.insts, null, fn(a2, inst) {
+      if a2 != null then a2
+      else if inst.op == "CmpI64" && inst.dst == cond_reg then
+        find_imm_val(inst.rhs, blocks)
+      else a2
+    })
+  })
+}
+
+// Follow Br chain: given a label, find the ultimate BrCond block reachable via Brs
+fn follow_to_brcond(label, bmap) {
+  list.fold(list.build(8, fn(_){0}), { cur: label, found: null }, fn(acc, _) {
+    if acc.found != null then acc
+    else
+      let k = str.from(acc.cur) in
+      if !rec.has(bmap, k) then acc
+      else
+        let b = rec.get(bmap, k) in
+        if b.term.op == "BrCond" then { cur: acc.cur, found: acc.cur }
+        else if b.term.op == "Br" then { cur: b.term.to, found: null }
+        else acc
+  }).found
+}
+
+// Collect all Br-chain blocks between start and final (exclusive)
+fn collect_interblocks(start, final_label, bmap) {
+  list.fold(list.build(8, fn(_){0}), { cur: start, blocks: [] }, fn(acc, _) {
+    if acc.cur == final_label then acc
+    else
+      let k = str.from(acc.cur) in
+      if !rec.has(bmap, k) then acc
+      else
+        let b = rec.get(bmap, k) in
+        if b.term.op == "Br" then
+          { cur: b.term.to, blocks: list.append(acc.blocks, b) }
+        else acc
+  }).blocks
+}
+
+fn block_has_calls(block) {
+  list.any(block.insts, fn(i) {
+    let op = i.op in
+    op == "CallI64" || op == "CallIndirect"
+  })
+}
+
+// ── Per-function fusion ───────────────────────────────────────────
+
+fn try_fuse_pair(loop1, blocks, bmap, pred_map) {
+  // Find where loop1's exit leads via Br chain
+  let exit2_header = follow_to_brcond(loop1.exit, bmap) in
+  if exit2_header == null then blocks
+  else if exit2_header == loop1.header then blocks  // same loop
+  else
+    let loop2 = detect_simple_loop(exit2_header, bmap, pred_map) in
+    if loop2 == null then blocks
+    else
+      // Check same constant bound
+      let bound1 = find_loop_bound_val(loop1.cond, blocks) in
+      let bound2 = find_loop_bound_val(loop2.cond, blocks) in
+      if bound1 == null || bound2 == null then blocks
+      else if bound1 != bound2 then blocks
+      else
+        // Check loop2 body has no calls
+        let body2_k = str.from(loop2.body) in
+        if !rec.has(bmap, body2_k) then blocks
+        else
+          let body2 = rec.get(bmap, body2_k) in
+          if block_has_calls(body2) then blocks
+          else
+            // Collect interblocks (between loop1.exit and loop2.header)
+            let interblocks = collect_interblocks(loop1.exit, loop2.header, bmap) in
+            let inter_insts = list.flatten(list.map(interblocks, fn(b){ b.insts })) in
+            let inter_labels = list.map(interblocks, fn(b){ b.label }) in
+
+            // Get blocks to modify
+            let header1 = rec.get(bmap, str.from(loop1.header)) in
+            let body1 = rec.get(bmap, str.from(loop1.body)) in
+            let preheader_label = if list.len(blocks) > 0
+              then list.get(blocks, 0).label else -1 in
+
+            // New body1: append body2's insts
+            let new_body1 = { label: body1.label,
+                              insts: list.concat([body1.insts, body2.insts]),
+                              term: body1.term } in
+
+            // New header1: exit points to loop2's exit
+            let new_header1 = { label: header1.label,
+                                insts: header1.insts,
+                                term: if header1.term.else_blk == loop1.exit then
+                                  { op: "BrCond", cond: header1.term.cond,
+                                    then_blk: header1.term.then_blk,
+                                    else_blk: loop2.exit }
+                                else
+                                  { op: "BrCond", cond: header1.term.cond,
+                                    then_blk: loop2.exit,
+                                    else_blk: header1.term.else_blk } } in
+
+            // Move interblock insts to preheader (block 0)
+            let removed = list.concat([inter_labels, [loop2.header, loop2.body]]) in
+
+            list.map(
+              list.filter(blocks, fn(b) {
+                !list.any(removed, fn(r){ r == b.label })
+              }),
+              fn(b) {
+                if b.label == loop1.header then new_header1
+                else if b.label == loop1.body then new_body1
+                else if b.label == preheader_label then
+                  // Append interblock insts to preheader
+                  { label: b.label,
+                    insts: list.concat([b.insts, inter_insts]),
+                    term: b.term }
+                else b
+              }
+            )
+}
+
+fn fuse_func(f) {
+  if list.len(f.blocks) < 4 then f
+  else
+    let bmap = build_block_map(f.blocks) in
+    let pred_map = build_pred_map(f.blocks) in
+    let candidates = list.filter(f.blocks, fn(b){ b.term.op == "BrCond" }) in
+    let loops = list.flatten(list.map(candidates, fn(b) {
+      let lp = detect_simple_loop(b.label, bmap, pred_map) in
+      if lp == null then [] else [lp]
+    })) in
+    let fused = list.fold(loops, f.blocks, fn(blocks, loop1) {
+      let bmap2 = build_block_map(blocks) in
+      let pred_map2 = build_pred_map(blocks) in
+      // Re-detect loop1 in current blocks (may have changed)
+      let lp = detect_simple_loop(loop1.header, bmap2, pred_map2) in
+      if lp == null then blocks
+      else try_fuse_pair(lp, blocks, bmap2, pred_map2)
+    }) in
+    { name: f.name, params: f.params, blocks: fused }
+}
+
+fn fuse_module(m) {
+  { entry: m.entry, funcs: list.map(m.funcs, fuse_func) }
+}
+
+export { fuse_module }
