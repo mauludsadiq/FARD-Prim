@@ -37,6 +37,7 @@ All produce the same native binary. Same IR, same backend, same output.
    while 0 fn(s){s<n} fn(s){s+1} / n=10  = 10   while loop
    len/append/pop on lists                  = ✓    Python list methods
    print("hello") / print_int(42)            = ✓    Python print builtins
+   if/else branch assignments + early return      = ✓    Python if/return fix
 
 ## Targets
 
@@ -218,6 +219,8 @@ Achieved via:
   - Loop strength reduction: non-power-of-2 multipliers -> addition chains;
     add_chain_for handles {3,5,6,7,9,10,12,15}; s*3 -> 2 adds;
     verified: MulI64 eliminated from step closure
+  - Jump threading: path-sensitive BrCond bypass; predecessor with known
+    constant condition redirected directly to target, dead blocks removed
   - Dead store elimination: intra-block DSE via alloc-origin tracking;
     StoreHeap never-read -> eliminated; {a:n, b:n+1} reading only .a
     eliminates 2 of 3 stores (fn_ptr@0 and b@16); 11/11 regression PASS
@@ -237,7 +240,7 @@ Achieved via:
 
 ## Source
 
-17,805 lines of FARD across 70 files in src/orgntr_prim/.
+17,974 lines of FARD across 71 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (1130 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -270,11 +273,13 @@ Achieved via:
    ocir_sr.fard            strength reduction, mul->add + small-k chains (195 lines)
    fard_gc.fard            GC entry stub, mark-sweep infrastructure (94 lines)
    lower_ocir_to_omir.fard OCIR -> OMIR (ARM64/ELF legacy path) (391 lines)
-   python_to_uvir.fard      Python subset frontend (783 lines)
+   ocir_jt.fard             jump threading, path-sensitive BrCond bypass (100 lines)
+   python_to_uvir.fard      Python subset frontend (870 lines)
    js_to_uvir.fard      JavaScript subset frontend (740 lines)
 
 ## Next
 
+   Typed IR (UVIR/OCIR type system beyond ty_any())
    Precise GC (ptrmask infrastructure in place; mark_object replacement pending)
 
 
