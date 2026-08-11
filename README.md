@@ -222,6 +222,9 @@ Achieved via:
   - Typed IR: OCIR instructions annotated with result types (Int/Bool/Ref/Str/Fn/Any);
     type-directed alias analysis: INT_ORIGIN never aliases AllocHeap;
     UVIR verifier wired into pipeline, covers all Python-frontend ops
+  - Loop fusion: adjacent loops with same constant trip count merged into
+    one loop; body2 inlined into body1's latch, interblock inits hoisted
+    to preheader; 7->4 blocks verified on two-loop benchmark
   - Jump threading: path-sensitive BrCond bypass; predecessor with known
     constant condition redirected directly to target, dead blocks removed
   - Dead store elimination: intra-block DSE via alloc-origin tracking;
@@ -248,7 +251,7 @@ Achieved via:
 
 ## Source
 
-18,022 lines of FARD across 71 files in src/orgntr_prim/.
+18,255 lines of FARD across 72 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (1130 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -281,13 +284,15 @@ Achieved via:
    ocir_sr.fard            strength reduction, mul->add + small-k chains (195 lines)
    fard_gc.fard            GC entry stub, mark-sweep infrastructure (94 lines)
    lower_ocir_to_omir.fard OCIR -> OMIR (ARM64/ELF legacy path) (391 lines)
+   ocir_loop_fuse.fard       loop fusion, same-trip-count adjacent loops (230 lines)
    ocir_jt.fard             jump threading, path-sensitive BrCond bypass (100 lines)
    python_to_uvir.fard      Python subset frontend (870 lines)
    js_to_uvir.fard      JavaScript subset frontend (740 lines)
 
 ## Next
 
-   Loop optimization (fusion, IV widening, vectorization groundwork)
+   IV widening and loop-level LICM at OCIR level
+   Vectorization groundwork (SIMD encoding, legality analysis)
 
 
 ## Repos
