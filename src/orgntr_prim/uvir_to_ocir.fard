@@ -13,12 +13,25 @@ fn lower_val(v) {
   else 0
 }
 
+fn ty_int() { "Int" }
+fn ty_bool() { "Bool" }
+fn ty_ref()  { "Ref" }
+fn ty_str()  { "Str" }
+fn ty_fn()   { "Fn" }
+fn ty_any()  { "Any" }
+
 fn lower_inst(inst) {
   let op = inst.op in
-  if op == "Const" then [ocir.inst_imm_i64(inst.dst, lower_val(inst.val))]
-  else if op == "IntAdd" then [ocir.inst_add_i64(inst.dst, inst.a, inst.b)]
-  else if op == "IntSub" then [{ op: "SubI64", dst: inst.dst, lhs: inst.a, rhs: inst.b }]
-  else if op == "IntMul" then [{ op: "MulI64", dst: inst.dst, lhs: inst.a, rhs: inst.b }]
+  if op == "Const" then
+    let v = lower_val(inst.val) in
+    let ty = if inst.val.t == "VInt" then ty_int()
+             else if inst.val.t == "VBool" then ty_bool()
+             else if inst.val.t == "VStr" then ty_str()
+             else ty_any() in
+    [{ op: "ImmI64", dst: inst.dst, val: v, ty: ty }]
+  else if op == "IntAdd" then [{ op: "AddI64", dst: inst.dst, lhs: inst.a, rhs: inst.b, ty: ty_int() }]
+  else if op == "IntSub" then [{ op: "SubI64", dst: inst.dst, lhs: inst.a, rhs: inst.b, ty: ty_int() }]
+  else if op == "IntMul" then [{ op: "MulI64", dst: inst.dst, lhs: inst.a, rhs: inst.b, ty: ty_int() }]
   else if op == "IntCmp" then
     let cmp = if inst.cmp == "==" then "eq"
       else if inst.cmp == "!=" then "ne"
@@ -27,23 +40,23 @@ fn lower_inst(inst) {
       else if inst.cmp == ">"  then "gt"
       else if inst.cmp == ">=" then "ge"
       else inst.cmp in
-    [{ op: "CmpI64", dst: inst.dst, lhs: inst.a, rhs: inst.b, cmp: cmp }]
-  else if op == "Copy"   then [{ op: "CopyI64", dst: inst.dst, src: inst.src }]
-  else if op == "StrConst" then [{ op: "ConstStr", dst: inst.dst, s: inst.s }]
-  else if op == "Alloc"  then [{ op: "AllocHeap", dst: inst.dst, size: inst.size }]
+    [{ op: "CmpI64", dst: inst.dst, lhs: inst.a, rhs: inst.b, cmp: cmp, ty: ty_bool() }]
+  else if op == "Copy"   then [{ op: "CopyI64", dst: inst.dst, src: inst.src, ty: ty_any() }]
+  else if op == "StrConst" then [{ op: "ConstStr", dst: inst.dst, s: inst.s, ty: ty_str() }]
+  else if op == "Alloc"  then [{ op: "AllocHeap", dst: inst.dst, size: inst.size, ty: ty_ref() }]
   else if op == "Load"   then [{ op: "LoadHeapStaticIdx", dst: inst.dst, ptr: inst.ptr,
-                                  field_idx: inst.offset / 8 - 1 }]
+                                  field_idx: inst.offset / 8 - 1, ty: ty_any() }]
   else if op == "Store"  then [{ op: "StoreHeap", ptr: inst.ptr, offset: inst.offset, src: inst.src }]
-  else if op == "LoadDyn" then [{ op: "LoadHeapDyn", dst: inst.dst, ptr: inst.ptr, idx: inst.idx }]
+  else if op == "LoadDyn" then [{ op: "LoadHeapDyn", dst: inst.dst, ptr: inst.ptr, idx: inst.idx, ty: ty_any() }]
   else if op == "StoreDyn" then [{ op: "StoreHeapDyn", ptr: inst.ptr, idx: inst.idx, src: inst.src }]
-  else if op == "CallDirect" then [ocir.inst_call_i64(inst.dst, inst.callee, inst.args)]
+  else if op == "CallDirect" then [{ op: "CallI64", dst: inst.dst, callee: inst.callee, args: inst.args, ty: ty_any() }]
   else if op == "CallIndirect" then [{ op: "CallIndirect", dst: inst.dst,
-                                        closure_reg: inst.closure, args: inst.args }]
+                                        closure_reg: inst.closure, args: inst.args, ty: ty_any() }]
   else if op == "MakeClosure" then [{ op: "MakeClosure", dst: inst.dst,
                                        ptr_reg: 30000 + inst.dst,
-                                       fn_name: inst.fn_name, captures: inst.caps }]
+                                       fn_name: inst.fn_name, captures: inst.caps, ty: ty_fn() }]
   else if op == "Phi" then []  // phi handled by predecessor copy insertion
-  else if op == "ImmBool" then [{ op: "ImmBool", dst: inst.dst, val: inst.val }]
+  else if op == "ImmBool" then [{ op: "ImmBool", dst: inst.dst, val: inst.val, ty: ty_bool() }]
   else []
 }
 

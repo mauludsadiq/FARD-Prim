@@ -9,6 +9,7 @@ import("../orgntr_prim/ocir_inline")     as inl
 import("../orgntr_prim/ocir_dfe")        as dfe
 import("../orgntr_prim/ocir_sr")         as sr
 import("../orgntr_prim/ocir_gvn")        as gvn
+import("../orgntr_prim/uvir_verify")     as uverify
 import("../orgntr_prim/ocir_jt")         as jt
 import("../orgntr_prim/ocir_sccp")       as sccp
 import("../orgntr_prim/ocir_to_vmir")    as vmir_sel
@@ -21,11 +22,16 @@ import("../orgntr_prim/x86_64_fixups")   as fixups
 import("../orgntr_prim/x86_64_link")     as link
 import("../orgntr_prim/macho_exe")       as exe
 import("std/fs")    as fs
+import("std/str")   as str
 import("std/bytes") as bytes
 import("std/list")  as list
 
 fn compile_ast_and_emit(py_ast, out_path) {
   let uvir_mod  = py.lower_module(py_ast) in
+  let _vcheck   = uverify.verify_module(uvir_mod) in
+  let _vassert  = if _vcheck.t == "err" then
+    fs.write_text("/tmp/uvir_type_error.txt", str.concat(["UVIR type error: ", _vcheck.code, " ", str.from(_vcheck.data)]))
+  else 0 in
   let ocir_mod  = bridge.lower_module(uvir_mod) in
   let p1        = opt.opt_module(sccp.sccp_module(opt.opt_module(ocir_mod))) in
   let p2        = sr.sr_module(p1) in

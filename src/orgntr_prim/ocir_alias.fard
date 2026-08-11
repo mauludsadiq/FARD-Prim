@@ -25,6 +25,7 @@ import("std/str")  as str
 
 fn UNKNOWN_ORIGIN() { -1 }   // parameter or unknown
 fn EXTERNAL_ORIGIN() { -2 }  // comes from outside this function
+fn INT_ORIGIN()      { -3 }  // integer value, provably not a heap pointer
 
 fn build_alloc_origin_block(insts, origin) {
   list.fold(insts, origin, fn(acc, inst) {
@@ -49,6 +50,10 @@ fn build_alloc_origin_block(insts, origin) {
     else if op == "CallI64" || op == "CallIndirect" then
       // Return value from call: treat as external (conservative)
       rec.set(acc, str.from(inst.dst), EXTERNAL_ORIGIN())
+    else if rec.has(inst, "dst") && rec.has(inst, "ty") &&
+            (inst.ty == "Int" || inst.ty == "Bool") then
+      // Integer/bool: provably not a heap pointer, cannot alias any AllocHeap
+      rec.set(acc, str.from(inst.dst), INT_ORIGIN())
     else acc
   })
 }
@@ -79,8 +84,10 @@ fn is_known_alloc(origin) {
 fn must_not_alias(ptr_a, ptr_b, origin_map) {
   let oa = origin_of(ptr_a, origin_map) in
   let ob = origin_of(ptr_b, origin_map) in
+  // Must not alias if either is an integer (never a valid heap pointer)
+  if oa == INT_ORIGIN() || ob == INT_ORIGIN() then true
   // Must not alias iff both have known alloc origins and they differ
-  is_known_alloc(oa) && is_known_alloc(ob) && oa != ob
+  else is_known_alloc(oa) && is_known_alloc(ob) && oa != ob
 }
 
 fn may_alias(ptr_a, ptr_b, origin_map) {
