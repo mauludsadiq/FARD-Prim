@@ -41,6 +41,8 @@ fn lower_inst(inst) {
       else if inst.cmp == ">=" then "ge"
       else inst.cmp in
     [{ op: "CmpI64", dst: inst.dst, lhs: inst.a, rhs: inst.b, cmp: cmp, ty: ty_bool() }]
+  else if op == "IntDiv" then [{ op: "DivI64", dst: inst.dst, lhs: inst.a, rhs: inst.b, ty: ty_int() }]
+  else if op == "IntMod" then [{ op: "ModI64", dst: inst.dst, lhs: inst.a, rhs: inst.b, ty: ty_int() }]
   else if op == "Copy"   then [{ op: "CopyI64", dst: inst.dst, src: inst.src, ty: ty_any() }]
   else if op == "StrConst" then [{ op: "ConstStr", dst: inst.dst, s: inst.s, ty: ty_str() }]
   else if op == "Alloc"  then [{ op: "AllocHeap", dst: inst.dst, size: inst.size, ty: ty_ref() }]

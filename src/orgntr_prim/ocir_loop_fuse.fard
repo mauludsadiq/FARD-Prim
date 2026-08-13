@@ -162,6 +162,10 @@ fn try_fuse_pair(loop1, blocks, bmap, pred_map) {
             let inter_insts = list.flatten(list.map(interblocks, fn(b){ b.insts })) in
             let inter_labels = list.map(interblocks, fn(b){ b.label }) in
 
+            // Only fuse when interblock has no instructions (safe adjacency)
+            if list.len(inter_insts) > 0 then blocks
+            else
+
             // Get blocks to modify
             let header1 = rec.get(bmap, str.from(loop1.header)) in
             let body1 = rec.get(bmap, str.from(loop1.body)) in

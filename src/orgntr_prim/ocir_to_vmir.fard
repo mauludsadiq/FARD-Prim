@@ -74,6 +74,10 @@ fn sel_inst(inst) {
     [vi_sub(inst.dst, inst.lhs, inst.rhs)]
   else if op == "MulI64" then
     [vi_mul(inst.dst, inst.lhs, inst.rhs)]
+  else if op == "DivI64" then
+    [{ op: "DivI64", dst: vreg(inst.dst), lhs: vreg(inst.lhs), rhs: vreg(inst.rhs) }]
+  else if op == "ModI64" then
+    [{ op: "ModI64", dst: vreg(inst.dst), lhs: vreg(inst.lhs), rhs: vreg(inst.rhs) }]
   else if op == "CmpI64" then
     [vi_cmp(inst.dst, inst.lhs, inst.rhs, inst.cmp)]
   else if op == "CallI64" then

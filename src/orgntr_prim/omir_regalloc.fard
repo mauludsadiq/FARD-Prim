@@ -130,6 +130,7 @@ fn unrewritable_slots(insts) {
         (inst.dst.name == "rsi" || inst.dst.name == "rdx") then
         [inst.src.slot]
       else if op == "StoreRax" then [inst.slot]
+      else if op == "DivI64" || op == "ModI64" then [inst.dst.slot, inst.lhs.slot, inst.rhs.slot]
       else if op == "PrintStr" || op == "PrintInt" then
         if rec.has(inst,"arg") && rec.has(inst.arg,"slot") then [inst.arg.slot] else []
       else if op == "FsCallDirect" then

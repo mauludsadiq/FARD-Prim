@@ -155,7 +155,7 @@ fn const_prop_block(block) {
 fn collect_uses_inst(inst, uses) {
   let op = inst.op in
   let uses = if op == "CopyI64" then rec.set(uses, str.from(inst.src), true) else uses in
-  let uses = if op == "AddI64" || op == "SubI64" || op == "MulI64"
+  let uses = if op == "AddI64" || op == "SubI64" || op == "MulI64" || op == "DivI64" || op == "ModI64"
     then rec.set(rec.set(uses, str.from(inst.lhs), true), str.from(inst.rhs), true)
     else uses in
   let uses = if op == "CmpI64"

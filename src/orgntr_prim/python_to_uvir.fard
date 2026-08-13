@@ -70,12 +70,20 @@ fn make_bb(label) { { label: label, insts: [] } }
 fn bb_emit(bb, inst) { { label: bb.label, insts: list.append(bb.insts, inst) } }
 fn bb_finish(bb, term) { uvir.block(bb.label, bb.insts, term) }
 
+fn env_keys(env) {
+  // Collect all variable names from linked-list env
+  list.fold(list.build(200, fn(_){0}), { cur: env, keys: [] }, fn(acc, _) {
+    if acc.cur == null then acc
+    else { cur: acc.cur.next, keys: list.append(acc.keys, acc.cur.name) }
+  }).keys
+}
+
 fn py_op_to_uvir(op) {
   let t = op.t in
   if t == "Add"      then "+"
   else if t == "Sub" then "-"
   else if t == "Mult" then "*"
-  else if t == "FloorDiv" then "/"
+  else if t == "FloorDiv" || t == "Div" then "/"
   else if t == "Mod"  then "%"
   else if t == "Eq"   then "=="
   else if t == "NotEq" then "!="
@@ -313,6 +321,12 @@ fn collect_assigned_names(stmts) {
         else []
     else if stmt.t == "AugAssign" then
       if stmt.target.t == "Name" then [stmt.target.id] else []
+    else if stmt.t == "While" then
+      collect_assigned_names(stmt.body)
+    else if stmt.t == "If" then
+      let then_names = collect_assigned_names(stmt.body) in
+      let else_names = if rec.has(stmt, "orelse") then collect_assigned_names(stmt.orelse) else [] in
+      list.concat([then_names, else_names])
     else []
   }))
 }
@@ -599,6 +613,63 @@ fn lower_stmts(stmts, env, bb, ctx) {
       }) in
       let extra = list.concat([acc.extra, [entry_blk, cond_blk, body_blk], br.extra]) in
       { bb: exit_result.bb, extra: extra, env: exit_result.env, ret_reg: null }
+    else if t == "FunctionDef" then
+      // Nested function definition -- emit as closure
+      // 1. Find free variables: names used in body that are in outer env
+      let inner_params = list.map(stmt.args.args, fn(a){ a.arg }) in
+      let free_vars = list.filter(
+        list.filter(env_keys(acc.env), fn(k){
+          k != "__last_expr__" && !list.any(inner_params, fn(p){ p == k })
+        }),
+        fn(k){ env_get(acc.env, k) != null }
+      ) in
+      // 2. Build inner function with __env__ param + declared params
+      let inner_name = str.concat(["__closure__", stmt.name, "__", str.from(alloc_label(ctx))]) in
+      let inner_ctx = make_ctx([inner_name]) in
+      // Inner env: __env__ param=0, then declared params
+      let n_caps = list.len(free_vars) in
+      let inner_env0 = list.fold(list.build(n_caps, fn(i){i}), env_empty(),
+        fn(e, i) { env_set(e, list.get(free_vars, i), i+1) }) in
+      let _ = alloc_reg(inner_ctx) in  // reserve reg 0 for __env__
+      // Allocate cap regs first (regs 1..n_caps), then param regs (n_caps+1..)
+      let cap_reg_ids = list.build(n_caps, fn(i){ let r = alloc_reg(inner_ctx) in r }) in
+      let inner_params_regs = list.build(list.len(inner_params), fn(i){
+        let _ = alloc_reg(inner_ctx) in 1 + n_caps + i
+      }) in
+      let inner_env = list.fold(list.build(list.len(inner_params), fn(i){i}), inner_env0,
+        fn(e, i) { env_set(e, list.get(inner_params, i), 1 + n_caps + i) }) in
+      let inner_ebb = make_bb(0) in
+      // Load captures from __env__ closure object
+      let cap_load = list.fold(list.build(n_caps, fn(i){i}), { bb: inner_ebb, env: inner_env },
+        fn(lc, i) {
+          let cap_reg = list.get(cap_reg_ids, i) in
+          let b = bb_emit(lc.bb, uvir.inst_load(cap_reg, 0, (1+i)*8)) in
+          { bb: b, env: env_set(lc.env, list.get(free_vars, i), cap_reg) }
+        }) in
+      let inner_result = lower_stmts(stmt.body, cap_load.env, cap_load.bb, inner_ctx) in
+      let inner_ret = if inner_result.ret_reg != null then inner_result.ret_reg
+        else alloc_reg(inner_ctx) in
+      let inner_fblk = bb_finish(inner_result.bb, uvir.term_ret(inner_ret)) in
+      let inner_all = list.concat([inner_result.extra, [inner_fblk]]) in
+      let inner_sorted = list.sort_int(list.map(inner_all, fn(b){ b.label })) in
+      let inner_bmap = list.fold(inner_all, {}, fn(a,b){ rec.set(a, str.from(b.label), b) }) in
+      let inner_ordered = list.map(inner_sorted, fn(l){ rec.get(inner_bmap, str.from(l)) }) in
+      let all_inner_params = list.concat([
+        [uvir.param(0, uvir.ty_any(), "__env__")],
+        list.build(list.len(inner_params), fn(i){
+          uvir.param(1+n_caps+i, uvir.ty_any(), list.get(inner_params, i))
+        })
+      ]) in
+      let inner_fn = uvir.func(inner_name, all_inner_params, uvir.ty_any(), inner_ordered, uvir.func_attrs(true, false)) in
+      // 3. Emit MakeClosure in current bb
+      let dst = alloc_reg(ctx) in
+      let cap_regs = list.map(free_vars, fn(n){ env_get(acc.env, n) }) in
+      let new_bb = bb_emit(acc.bb, uvir.inst_make_closure(dst, inner_name, cap_regs)) in
+      let _ = array.push(ctx.lifted_fns, inner_fn) in  // ctx is outer ctx
+      { bb: new_bb,
+        extra: list.concat([acc.extra, inner_result.extra]),
+        env: env_set(acc.env, stmt.name, dst),
+        ret_reg: null }
     else if t == "ClassDef" then
       // Register class layout and generate constructor + methods
       // Find __init__ to collect field names
@@ -936,8 +1007,9 @@ fn lower_module(py_ast) {
   let main_fn = uvir.func("__main__", [], uvir.ty_any(), ordered, uvir.func_attrs(false, false)) in
   let dict_helpers = build_dict_helpers(all_names) in
   let list_helpers = build_list_helpers(all_names) in
+  let lifted_fns = array.to_list(ctx.lifted_fns) in
   uvir.module("python", let print_helpers = build_print_helpers(all_names) in
-  list.concat([fns, class_fns, dict_helpers, list_helpers, print_helpers, [main_fn]]), "__main__", [], [])
+  list.concat([fns, class_fns, dict_helpers, list_helpers, print_helpers, lifted_fns, [main_fn]]), "__main__", [], [])
 }
 
 export { lower_module, lower_funcdef, lower_expr }

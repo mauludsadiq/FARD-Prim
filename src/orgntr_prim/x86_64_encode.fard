@@ -601,6 +601,27 @@ fn encode_inst(inst) {
     ret()
   else if inst.op == "Label" then
     []
+  else if inst.op == "DivI64" then
+    let rax = { k: "reg", name: "rax" } in
+    let rcx = { k: "reg", name: "rcx" } in
+    list.concat([
+      load_to_reg(rax, inst.lhs),
+      [72, 153],
+      load_to_reg(rcx, inst.rhs),
+      [72, 247, 249],
+      store_from_reg(inst.dst, rax)
+    ])
+  else if inst.op == "ModI64" then
+    let rax = { k: "reg", name: "rax" } in
+    let rcx = { k: "reg", name: "rcx" } in
+    let rdx = { k: "reg", name: "rdx" } in
+    list.concat([
+      load_to_reg(rax, inst.lhs),
+      [72, 153],
+      load_to_reg(rcx, inst.rhs),
+      [72, 247, 249],
+      store_from_reg(inst.dst, rdx)
+    ])
   else if inst.op == "StoreHeap" then
     let rax = { k: "reg", name: "rax" } in
     let rcx = { k: "reg", name: "rcx" } in

@@ -37,7 +37,8 @@ fn is_leaf_block(block) {
 fn is_inline_candidate(f) {
   let total_insts = list.fold(f.blocks, 0, fn(acc,b){ acc + list.len(b.insts) }) in
   let all_safe = list.len(list.filter(f.blocks, fn(b){ !is_leaf_block(b) })) == 0 in
-  total_insts <= INLINE_THRESHOLD && all_safe
+  let is_closure = rec.has(f, "attrs") && rec.has(f.attrs, "is_closure") && f.attrs.is_closure in
+  total_insts <= INLINE_THRESHOLD && all_safe && !is_closure
 }
 
 fn build_inline_map(funcs) {
