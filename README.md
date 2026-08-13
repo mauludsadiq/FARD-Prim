@@ -38,6 +38,10 @@ All produce the same native binary. Same IR, same backend, same output.
    len/append/pop on lists                  = ✓    Python list methods
    print("hello") / print_int(42)            = ✓    Python print builtins
    if/else branch assignments + early return      = ✓    Python if/return fix
+   nested while loops                            = ✓    collect_assigned_names fix
+   closures with captures (Python)              = ✓    nested FunctionDef lowering
+   mod/div operators                             = ✓    DivI64/ModI64 end-to-end
+   31/31 Python regression suite                = ✓    programs/regression_python.py
 
 ## Targets
 
@@ -251,7 +255,7 @@ Achieved via:
 
 ## Source
 
-18,255 lines of FARD across 72 files in src/orgntr_prim/.
+18,373 lines of FARD across 72 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (1130 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
@@ -291,8 +295,8 @@ Achieved via:
 
 ## Next
 
+   CI across platforms (GitHub Actions, pinned fardrun version)
    IV widening and loop-level LICM at OCIR level
-   Vectorization groundwork (SIMD encoding, legality analysis)
 
 
 ## Repos
