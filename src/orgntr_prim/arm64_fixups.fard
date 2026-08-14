@@ -108,7 +108,7 @@ fn scan_labels_and_patches(insts) {
       let encoded = enc.encode_inst(inst, 256) in
       let sz = list.len(encoded) in
       let extra = if (op == "AllocHeap" || op == "MakeClosure") && sz >= 4
-        then [{ kind: "BL", at: acc.pc + sz - 4, next_ip: acc.pc + sz, symbol: "fard_alloc" }]
+        then [{ kind: "BL", at: acc.pc + sz - 8, next_ip: acc.pc + sz - 4, symbol: "fard_alloc" }]
         else [] in
       { pc: acc.pc + sz, labels: acc.labels,
         patches: list.concat([acc.patches, extra]) }
