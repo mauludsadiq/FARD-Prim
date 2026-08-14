@@ -43,3 +43,12 @@ jobs:
         with:
           name: regression-output
           path: out/
+
+      - name: Debug while loop binary
+        if: always()
+        run: |
+          python3 programs/compile_python.py 'def f():\n  i = 0\n  while i < 3:\n    i = i + 1\n  return i\nf()' out/debug_while || true
+          if [ -f out/debug_while ]; then
+            file out/debug_while
+            timeout 2 out/debug_while; echo "exit=$?"
+          fi
