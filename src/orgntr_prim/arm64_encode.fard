@@ -445,6 +445,12 @@ fn encode_inst(inst, frame_size) {
       ldur_fp(x10(), slot_of(inst.src)),
       str_imm(x10(), x9(), inst.offset)
     ])
+  else if op == "LoadHeap" then
+    list.concat([
+      ldur_fp(x9(), slot_of(inst.ptr)),
+      ldr_imm(x9(), x9(), inst.offset),
+      stur_fp(x9(), slot_of(inst.dst))
+    ])
   else if op == "LoadHeapDyn" then
     list.concat([
       ldur_fp(x9(), slot_of(inst.ptr)),
