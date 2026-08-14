@@ -109,8 +109,11 @@ def main():
 
     # Write FARD driver
     import time as _t
+    import platform as _pl
+    _is_arm64_linux = _pl.system() == "Linux" and _pl.machine() == "aarch64"
+    pipeline_module = "python_source_to_native_arm64" if _is_arm64_linux else "python_source_to_native"
     driver = f'''// bust {_t.time()}
-import("../src/orgntr_prim/python_source_to_native") as pipeline
+import("../src/orgntr_prim/{pipeline_module}") as pipeline
 pipeline.compile_ast_and_emit({fard_ast}, "{output_path}")
 '''
 
