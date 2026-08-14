@@ -511,6 +511,8 @@ fn encode_inst(inst, frame_size) {
     let dr = x86_to_arm64(inst.dst.name) in
     let ar = arg_reg(inst.arg_idx) in
     if dr == ar then [] else mov_reg(dr, ar)
+  else if op == "StoreRax" then
+    stur_fp(x0(), inst.slot)
   else if op == "LeaRdiBrp" then
     // ARM64: load address of stack slot into x0
     list.concat([
