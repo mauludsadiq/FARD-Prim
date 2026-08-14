@@ -52,3 +52,9 @@ jobs:
             file out/debug_while
             timeout 2 out/debug_while; echo "exit=$?"
           fi
+
+      - name: Debug while disasm
+        if: always()
+        run: |
+          python3 programs/compile_python.py 'def f():\n  i = 0\n  while i < 3:\n    i = i + 1\n  return i\nf()' out/debug_while2 || true
+          objdump -d out/debug_while2 2>/dev/null | head -100 || true
