@@ -28,9 +28,9 @@ jobs:
       - name: Create output directory
         run: mkdir -p out
 
-      - name: Run FARD regression suite
+      - name: Run FARD regression suite (ARM64)
         run: |
-          fardrun run --program programs/regression.fard --out /tmp/reg
+          fardrun run --program programs/regression_arm64.fard --out /tmp/reg
           chmod +x out/r_* 2>/dev/null || true
           python3 programs/regression_run.py /tmp/reg/result.json
 
