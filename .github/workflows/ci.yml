@@ -8,19 +8,15 @@ on:
 
 jobs:
   regression:
-    name: Regression (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-22.04]
+    name: Regression (Linux ARM64)
+    runs-on: ubuntu-24.04-arm
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Install fardrun
         run: |
-          curl -L https://github.com/mauludsadiq/FARD/releases/download/v1.6.1/fardrun-linux-x86_64 \
-            -o /usr/local/bin/fardrun
+          cp ci/fardrun-linux-arm64 /usr/local/bin/fardrun
           chmod +x /usr/local/bin/fardrun
           fardrun --version
 
@@ -28,11 +24,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: Install Node.js (for Acorn JS parser)
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
 
       - name: Create output directory
         run: mkdir -p out
@@ -46,11 +37,9 @@ jobs:
       - name: Run Python regression suite
         run: python3 programs/regression_python.py
 
-      - name: Upload regression artifacts on failure
+      - name: Upload artifacts on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: regression-output
-          path: |
-            /tmp/reg/
-            out/
+          path: out/
