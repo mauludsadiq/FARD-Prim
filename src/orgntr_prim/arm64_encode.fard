@@ -166,8 +166,9 @@ fn mul_reg(rd, rn, rm) {
 
 // SDIV rd, rn, rm
 fn sdiv(rd, rn, rm) {
+  // SDIV Xd, Xn, Xm = 0x9AC00C00 | (rm<<16) | (rn<<5) | rd
   let enc = bits.bor(bits.bor(bits.bor(bits.bor(
-    bits.bshl(39424, 16),
+    bits.bshl(39616, 16),
     bits.bshl(bits.band(rm, 31), 16)),
     bits.bshl(3, 10)),
     bits.bshl(bits.band(rn, 31), 5)),
@@ -391,10 +392,10 @@ fn encode_inst(inst, frame_size) {
     mov_imm64(dr, inst.val)
   else if op == "MovStackToReg" then
     let r = if inst.dst.k == "reg" then x86_to_arm64(inst.dst.name) else x9() in
-    ldur_fp(r, slot_of(inst.src))
+    load_op(inst.src, r, frame_size)
   else if op == "MovRegToStack" then
     let r = if inst.src.k == "reg" then x86_to_arm64(inst.src.name) else x9() in
-    stur_fp(r, slot_of(inst.dst))
+    store_op(inst.dst, r)
   else if op == "AddRegStack" then
     let dr = if inst.dst.k == "reg" then x86_to_arm64(inst.dst.name) else x9() in
     list.concat([
