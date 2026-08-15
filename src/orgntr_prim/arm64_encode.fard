@@ -403,9 +403,8 @@ fn encode_inst(inst, frame_size) {
       add_reg(dr, dr, x10())
     ])
   else if op == "CmpStackZero" then
-    let sv = if inst.src.k == "stack" then slot_of(inst.src) else 0 in
     list.concat([
-      ldur_fp(x9(), sv),
+      load_op(inst.src, x9(), frame_size),
       cmp_zero(x9())
     ])
   else if op == "Jne" then bne_placeholder()
@@ -661,7 +660,7 @@ fn save_callee_saved_in_frame(regs, frame_size) {
   let n = list.len(regs) in
   list.flatten(list.map(list.build(n, fn(i){i}), fn(i) {
     let r = x86_callee_to_arm64(list.get(regs, i)) in
-    let off = 0 - frame_size + i * 8 in
+    let off = 0 - frame_size - (i + 1) * 8 in
     stur_fp(r, off)
   }))
 }
@@ -670,7 +669,7 @@ fn restore_callee_saved_from_frame(regs, frame_size) {
   let n = list.len(regs) in
   list.flatten(list.map(list.build(n, fn(i){i}), fn(i) {
     let r = x86_callee_to_arm64(list.get(regs, i)) in
-    let off = 0 - frame_size + i * 8 in
+    let off = 0 - frame_size - (i + 1) * 8 in
     ldur_fp(r, off)
   }))
 }
