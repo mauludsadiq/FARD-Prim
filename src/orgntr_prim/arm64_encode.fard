@@ -398,7 +398,7 @@ fn encode_inst(inst, frame_size) {
   else if op == "AddRegStack" then
     let dr = if inst.dst.k == "reg" then x86_to_arm64(inst.dst.name) else x9() in
     list.concat([
-      ldur_fp(x10(), slot_of(inst.src)),
+      load_op(inst.src, x10(), frame_size),
       add_reg(dr, dr, x10())
     ])
   else if op == "CmpStackZero" then
@@ -421,8 +421,8 @@ fn encode_inst(inst, frame_size) {
   else if op == "Label" then []
   else if op == "MovStackToStack" then
     list.concat([
-      ldur_fp(x9(), slot_of(inst.src)),
-      stur_fp(x9(), slot_of(inst.dst))
+      load_op(inst.src, x9(), frame_size),
+      store_op(inst.dst, x9())
     ])
   else if op == "CopyI64" then
     list.concat([load_op(inst.src, x9(), frame_size), store_op(inst.dst, x9())])
@@ -430,15 +430,15 @@ fn encode_inst(inst, frame_size) {
     list.concat([load_op(inst.lhs, x9(), frame_size), load_op(inst.rhs, x10(), frame_size), sub_reg(x9(), x9(), x10()), store_op(inst.dst, x9())])
   else if op == "DivI64" then
     list.concat([
-      ldur_fp(x9(), slot_of(inst.lhs)),
-      ldur_fp(x10(), slot_of(inst.rhs)),
+      load_op(inst.lhs, x9(), frame_size),
+      load_op(inst.rhs, x10(), frame_size),
       sdiv(x9(), x9(), x10()),
       store_op(inst.dst, x9())
     ])
   else if op == "ModI64" then
     list.concat([
-      ldur_fp(x9(), slot_of(inst.lhs)),
-      ldur_fp(x10(), slot_of(inst.rhs)),
+      load_op(inst.lhs, x9(), frame_size),
+      load_op(inst.rhs, x10(), frame_size),
       sdiv(x11(), x9(), x10()),
       msub(x9(), x11(), x10(), x9()),
       store_op(inst.dst, x9())
@@ -448,7 +448,7 @@ fn encode_inst(inst, frame_size) {
   else if op == "ImmI64" then
     list.concat([
       mov_imm64(x9(), inst.val),
-      stur_fp(x9(), slot_of(inst.dst))
+      store_op(inst.dst, x9())
     ])
   else if op == "AddI64" then
     list.concat([load_op(inst.lhs, x9(), frame_size), load_op(inst.rhs, x10(), frame_size), add_reg(x9(), x9(), x10()), store_op(inst.dst, x9())])
@@ -460,8 +460,8 @@ fn encode_inst(inst, frame_size) {
       else if inst.cmp == "gt" then cond_gt()
       else cond_ge() in
     list.concat([
-      ldur_fp(x9(), slot_of(inst.lhs)),
-      ldur_fp(x10(), slot_of(inst.rhs)),
+      load_op(inst.lhs, x9(), frame_size),
+      load_op(inst.rhs, x10(), frame_size),
       cmp_reg(x9(), x10()),
       cset(x9(), cond),
       store_op(inst.dst, x9())
@@ -469,31 +469,31 @@ fn encode_inst(inst, frame_size) {
   else if op == "ImmBool" then
     list.concat([
       mov_imm64(x9(), if inst.val then 1 else 0),
-      stur_fp(x9(), slot_of(inst.dst))
+      store_op(inst.dst, x9())
     ])
   else if op == "AllocHeap" then
     list.concat([
       mov_imm64(x0(), inst.size),
       bl_placeholder(),   // call fard_alloc
-      stur_fp(x0(), slot_of(inst.dst))
+      store_op(inst.dst, x0())
     ])
   else if op == "StoreHeap" then
     list.concat([
-      ldur_fp(x9(), slot_of(inst.ptr)),
-      ldur_fp(x10(), slot_of(inst.src)),
+      load_op(inst.ptr, x9(), frame_size),
+      load_op(inst.src, x10(), frame_size),
       str_imm(x10(), x9(), inst.offset)
     ])
   else if op == "LoadHeap" then
     list.concat([
-      ldur_fp(x9(), slot_of(inst.ptr)),
+      load_op(inst.ptr, x9(), frame_size),
       ldr_imm(x9(), x9(), inst.offset),
-      stur_fp(x9(), slot_of(inst.dst))
+      store_op(inst.dst, x9())
     ])
   else if op == "StoreHeapDyn" then
     list.concat([
-      ldur_fp(x9(), slot_of(inst.ptr)),
-      ldur_fp(x10(), slot_of(inst.idx)),
-      ldur_fp(x11(), slot_of(inst.src)),
+      load_op(inst.ptr, x9(), frame_size),
+      load_op(inst.idx, x10(), frame_size),
+      load_op(inst.src, x11(), frame_size),
       mov_imm64(x8(), 8),
       mul_reg(x10(), x10(), x8()),
       add_reg(x9(), x9(), x10()),
@@ -501,20 +501,20 @@ fn encode_inst(inst, frame_size) {
     ])
   else if op == "LoadHeapDyn" then
     list.concat([
-      ldur_fp(x9(), slot_of(inst.ptr)),
-      ldur_fp(x10(), slot_of(inst.idx)),
+      load_op(inst.ptr, x9(), frame_size),
+      load_op(inst.idx, x10(), frame_size),
       // x9 = x9 + x10*8 + 8
       mov_imm64(x8(), 8),
       mul_reg(x10(), x10(), x8()),
       add_reg(x9(), x9(), x10()),
       ldr_imm(x9(), x9(), 8),
-      stur_fp(x9(), slot_of(inst.dst))
+      store_op(inst.dst, x9())
     ])
   else if op == "LoadHeapStaticIdx" then
     list.concat([
-      ldur_fp(x9(), slot_of(inst.ptr)),
+      load_op(inst.ptr, x9(), frame_size),
       ldr_imm(x9(), x9(), 8 + inst.field_idx * 8),
-      stur_fp(x9(), slot_of(inst.dst))
+      store_op(inst.dst, x9())
     ])
   else if op == "StoreFnPtr" then
     // Always emit 4 instructions (16 bytes) for fn_ptr placeholder + ldur + str = 24 bytes
@@ -523,13 +523,13 @@ fn encode_inst(inst, frame_size) {
       movk(x9(), 0, 16),     // placeholder word 1
       movk(x9(), 0, 32),     // placeholder word 2
       movk(x9(), 0, 48),     // placeholder word 3
-      ldur_fp(x10(), slot_of(inst.ptr)),
+      load_op(inst.ptr, x10(), frame_size),
       str_imm(x9(), x10(), 0)
     ])
   else if op == "CallIndirect" then
     // Load closure ptr, load fn_ptr from slot 0, call it
     list.concat([
-      ldur_fp(x0(), slot_of(inst.closure)),   // x0 = closure ptr (first arg)
+      load_op(inst.closure, x0(), frame_size),   // x0 = closure ptr (first arg)
       ldr_imm(x9(), x0(), 0),                  // x9 = fn_ptr
       blr(x9())                                 // call
     ])
@@ -537,7 +537,7 @@ fn encode_inst(inst, frame_size) {
     list.concat([
       mov_imm64(x0(), inst.size),
       bl_placeholder(),                         // call fard_alloc -> x0 = ptr
-      stur_fp(x0(), slot_of(inst.ptr))
+      store_op(inst.ptr, x0())
     ])
   else if op == "MovRegToReg" then
     let dst = x86_to_arm64(inst.dst.name) in
