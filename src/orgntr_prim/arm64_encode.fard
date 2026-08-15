@@ -225,8 +225,8 @@ fn cset(rd, cond) {
 }
 
 fn cond_eq() { 0 } fn cond_ne() { 1 }
-fn cond_lt() { 10 } fn cond_le() { 13 }
-fn cond_gt() { 12 } fn cond_ge() { 11 }
+fn cond_lt() { 11 } fn cond_le() { 13 }
+fn cond_gt() { 12 } fn cond_ge() { 10 }
 
 // ADRP + ADD for large addresses (page-relative)
 // For heap ptr: we use absolute addresses via mov_imm64
