@@ -490,23 +490,28 @@ fn encode_inst(inst, frame_size) {
       store_op(inst.dst, x9())
     ])
   else if op == "StoreHeapDyn" then
+    // Load all operands before any arithmetic to avoid scratch reg conflicts
+    let ptr_r = if inst.ptr.k == "reg" then x86_to_arm64(inst.ptr.name) else x9() in
+    let idx_r = if inst.idx.k == "reg" then x86_to_arm64(inst.idx.name) else x10() in
+    let src_r = if inst.src.k == "reg" then x86_to_arm64(inst.src.name) else x11() in
     list.concat([
-      load_op(inst.ptr, x9(), frame_size),
-      load_op(inst.idx, x10(), frame_size),
-      load_op(inst.src, x11(), frame_size),
+      if inst.ptr.k == "stack" then ldur_fp(x9(), inst.ptr.slot) else [],
+      if inst.idx.k == "stack" then ldur_fp(x10(), inst.idx.slot) else [],
+      if inst.src.k == "stack" then ldur_fp(x11(), inst.src.slot) else [],
       mov_imm64(x8(), 8),
-      mul_reg(x10(), x10(), x8()),
-      add_reg(x9(), x9(), x10()),
-      str_imm(x11(), x9(), 8)
+      mul_reg(x10(), idx_r, x8()),
+      add_reg(x9(), ptr_r, x10()),
+      str_imm(src_r, x9(), 8)
     ])
   else if op == "LoadHeapDyn" then
+    let ptr_r = if inst.ptr.k == "reg" then x86_to_arm64(inst.ptr.name) else x9() in
+    let idx_r = if inst.idx.k == "reg" then x86_to_arm64(inst.idx.name) else x10() in
     list.concat([
-      load_op(inst.ptr, x9(), frame_size),
-      load_op(inst.idx, x10(), frame_size),
-      // x9 = x9 + x10*8 + 8
+      if inst.ptr.k == "stack" then ldur_fp(x9(), inst.ptr.slot) else [],
+      if inst.idx.k == "stack" then ldur_fp(x10(), inst.idx.slot) else [],
       mov_imm64(x8(), 8),
-      mul_reg(x10(), x10(), x8()),
-      add_reg(x9(), x9(), x10()),
+      mul_reg(x10(), idx_r, x8()),
+      add_reg(x9(), ptr_r, x10()),
       ldr_imm(x9(), x9(), 8),
       store_op(inst.dst, x9())
     ])
