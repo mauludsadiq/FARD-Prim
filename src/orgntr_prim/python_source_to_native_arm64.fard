@@ -42,7 +42,7 @@ fn compile_ast_and_emit(py_ast, out_path) {
   let omir_mod  = peep.peephole_module(igra.igra_module(tco.tco_module(vmir_lower.lower_module(vmir_mod)))) in
   let encoded   = fixups.encode_module_with_fixups(omir_mod) in
   let linked    = link.link_module_elf_arm64(encoded) in
-  let binary    = exe.emit_exe(linked, "python") in
+  let binary    = exe.emit_exe(linked, "__main__") in
   fs.write_bytes(out_path, bytes.of_list(binary))
 }
 
