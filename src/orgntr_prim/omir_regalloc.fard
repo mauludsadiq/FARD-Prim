@@ -34,9 +34,15 @@ fn def_slot(inst) {
   else if op == "SubI64"   then inst.dst.slot
   else if op == "AddI64"   then inst.dst.slot
   else if op == "MulI64"   then inst.dst.slot
+  else if op == "DivI64"   then inst.dst.slot
+  else if op == "ModI64"   then inst.dst.slot
   else if op == "CmpI64"   then inst.dst.slot
+  else if op == "ImmI64"   then if rec.has(inst,"dst") && inst.dst.k == "stack" then inst.dst.slot else -999999
+  else if op == "ImmBool"  then if rec.has(inst,"dst") && inst.dst.k == "stack" then inst.dst.slot else -999999
+  else if op == "StoreRax" then inst.slot
   else if op == "LoadHeap" then inst.dst.slot
   else if op == "LoadHeapDyn" then inst.dst.slot
+  else if op == "LoadHeapStaticIdx" then if rec.has(inst,"dst") && inst.dst.k == "stack" then inst.dst.slot else -999999
   else if op == "StrCall1Omir" then
     if inst.dst.k == "stack" then inst.dst.slot else -999999
   else if op == "StrCall2Omir" then
@@ -60,6 +66,12 @@ fn use_slots(inst) {
   else if op == "LoadHeapDyn"   then [inst.ptr.slot, inst.idx.slot]
   else if op == "MovStackToStack" then [inst.src.slot]
   else if op == "AddRegStack" then [inst.src.slot]
+  else if op == "DivI64" || op == "ModI64" then
+    list.map(list.filter([inst.lhs, inst.rhs], fn(o){o.k == "stack"}), fn(o){o.slot})
+  else if op == "ImmI64" || op == "ImmBool" then []
+  else if op == "StoreRax" then []
+  else if op == "LoadHeapStaticIdx" then
+    list.map(list.filter([inst.ptr, inst.dst], fn(o){rec.has(o,"slot")}), fn(o){o.slot})
   else if op == "CallIndirect" then
     if inst.closure.k == "stack" then [inst.closure.slot] else []
   else if op == "StrCall1Omir" then
