@@ -37,9 +37,9 @@ jobs:
       - name: Debug binaries
         run: |
           python3 programs/compile_python.py 'def fact(n):\n  if n == 0:\n    return 1\n  return n * fact(n - 1)\nfact(5)' out/debug_fact || true
-          objdump -d out/debug_fact > out/debug_fact.asm 2>&1 || true
+          objdump -d out/debug_fact 2>&1 | head -80 || true
           python3 programs/compile_python.py 'def f():\n  xs = []\n  xs.append(1)\n  return len(xs)\nf()' out/debug_list || true
-          objdump -d out/debug_list > out/debug_list.asm 2>&1 || true
+          objdump -d out/debug_list 2>&1 | head -60 || true
 
       - name: Run Python regression suite
         run: python3 programs/regression_python.py
