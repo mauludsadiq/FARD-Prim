@@ -33,7 +33,7 @@ fn latency(op) {
 fn is_barrier(op) {
   op == "Call" || op == "CallIndirect" ||
   op == "StrCall1" || op == "StrCall2" || op == "FsCallV" || op == "FsCallV" ||
-  op == "Alloc" || op == "StoreHeap" || op == "MakeClosure"
+  op == "Alloc" || op == "StoreHeap" || op == "StoreHeapDyn" || op == "MakeClosure"
 }
 
 // Collect defined vreg for an instruction (null if none)
@@ -78,7 +78,7 @@ fn uses_of(inst) {
 
 // Schedule a single basic block (list of non-Label instructions)
 fn is_store_like(op) {
-  op == "StoreHeap" || op == "Alloc" || op == "MakeClosure"
+  op == "StoreHeap" || op == "StoreHeapDyn" || op == "Alloc" || op == "MakeClosure"
 }
 
 fn is_call_like(op) {
@@ -117,9 +117,11 @@ fn schedule_block(insts) {
     let mem_deps = list.map(list.build(n, fn(i){i}), fn(i) {
       let op_i = list.get(insts, i).op in
       if is_call_like(op_i) then
-        // Call depends on all preceding stores
+        // Preserve call order and ensure prior stores complete first.
         list.filter(list.build(i, fn(j){j}), fn(j){
-          is_store_like(list.get(insts, j).op)
+          is_store_like(list.get(insts, j).op) ||
+          is_load_like(list.get(insts, j).op) ||
+          is_call_like(list.get(insts, j).op)
         })
       else if is_load_like(op_i) then
         // Load depends on all preceding calls and stores
@@ -127,9 +129,9 @@ fn schedule_block(insts) {
           is_call_like(list.get(insts, j).op) || is_store_like(list.get(insts, j).op)
         })
       else if is_store_like(op_i) then
-        // Store depends on all preceding calls
+        // Store depends on all preceding calls and loads
         list.filter(list.build(i, fn(j){j}), fn(j){
-          is_call_like(list.get(insts, j).op)
+          is_call_like(list.get(insts, j).op) || is_load_like(list.get(insts, j).op)
         })
       else []
     }) in
