@@ -34,11 +34,12 @@ jobs:
           chmod +x out/r_* 2>/dev/null || true
           python3 programs/regression_run.py /tmp/reg/result.json
 
-      - name: Debug while loop
+      - name: Debug binaries
         run: |
-          python3 programs/compile_python.py 'def f():\n  i = 0\n  while i < 3:\n    i = i + 1\n  return i\nf()' out/debug_while || true
-          objdump -d out/debug_while > out/debug_while.asm 2>&1 || true
-          echo "=== DISASM ===" && cat out/debug_while.asm || true
+          python3 programs/compile_python.py 'def fact(n):\n  if n == 0:\n    return 1\n  return n * fact(n - 1)\nfact(5)' out/debug_fact || true
+          objdump -d out/debug_fact > out/debug_fact.asm 2>&1 || true
+          python3 programs/compile_python.py 'def f():\n  xs = []\n  xs.append(1)\n  return len(xs)\nf()' out/debug_list || true
+          objdump -d out/debug_list > out/debug_list.asm 2>&1 || true
 
       - name: Run Python regression suite
         run: python3 programs/regression_python.py
