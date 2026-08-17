@@ -11,6 +11,7 @@ import("../orgntr_prim/arm64_encode") as enc
 fn text_vmaddr()      { 4294971392 }  // placeholder, overridden by link_with_vmaddr
 fn entry_stub_size()  { 60 }          // bytes: mmap(9)+mov_x19+stp+mov+bl+movz+svc = 15 insts * 4
 fn alloc_stub_size()  { enc.alloc_stub_size() }
+fn ret_stub_size()    { 4 }  // single RET instruction
 
 fn layout_funcs(encoded_funcs) {
   let r = list.fold(encoded_funcs, { offset: 0, funcs: [] }, fn(acc, f) {
@@ -53,7 +54,7 @@ fn patch_abs64(text, at, vmaddr) {
 }
 
 fn fn_vmaddr_with_base(base_in_linked, base_vmaddr) {
-  base_vmaddr + entry_stub_size() + alloc_stub_size() + base_in_linked
+  base_vmaddr + entry_stub_size() + ret_stub_size() + alloc_stub_size() + base_in_linked
 }
 
 fn resolve_func_relocs(entry, sym_table, base_vmaddr) {
@@ -80,7 +81,15 @@ fn link_module_with_vmaddr(encoded_module, base_vmaddr) {
   let laid_out = layout_funcs(encoded_module.funcs) in
   let sym_table_base = build_symbol_table(laid_out) in
   let alloc_offset = 0 - alloc_stub_size() in
+  let ret_offset = 0 - alloc_stub_size() - ret_stub_size() in
   let sym_table = rec.set(sym_table_base, "fard_alloc", alloc_offset) in
+  let sym_table = rec.set(sym_table, "fard_print_int", ret_offset) in
+  let sym_table = rec.set(sym_table, "fard_print", ret_offset) in
+  let sym_table = rec.set(sym_table, "fard_str_len", ret_offset) in
+  let sym_table = rec.set(sym_table, "fard_str_get", ret_offset) in
+  let sym_table = rec.set(sym_table, "fard_str_concat", ret_offset) in
+  let sym_table = rec.set(sym_table, "fard_int_to_str", ret_offset) in
+  let sym_table = rec.set(sym_table, "fard_str_eq", ret_offset) in
   let linked_funcs = list.map(laid_out, fn(entry) {
     resolve_func_relocs(entry, sym_table, base_vmaddr)
   }) in

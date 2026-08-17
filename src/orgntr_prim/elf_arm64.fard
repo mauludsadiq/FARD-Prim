@@ -53,6 +53,7 @@ fn fard_alloc_stub() {
 
 fn entry_stub_size() { 15 * 4 }  // 60 bytes
 fn alloc_stub_size()  {  4 * 4 }  // 16 bytes
+fn ret_stub_size()    {  1 * 4 }  //  4 bytes (single RET for no-op stubs)
 
 fn entry_stub_linux_arm64(fn_offset) {
   // mmap(0, 64MB, PROT_RW, MAP_PRIVATE|MAP_ANON, -1, 0) -> x0 = heap ptr
@@ -86,8 +87,8 @@ fn find_func_offset(funcs, name) {
 
 fn build_text(linked, entry_func) {
   let fn_offset = entry_stub_size() + alloc_stub_size() +
-    find_func_offset(linked.funcs, entry_func) in
-  list.concat([entry_stub_linux_arm64(fn_offset), fard_alloc_stub(), linked.text])
+    find_func_offset(linked.funcs, entry_func) + ret_stub_size() in
+  list.concat([entry_stub_linux_arm64(fn_offset), enc.ret_inst(), fard_alloc_stub(), linked.text])
 }
 
 fn pad_to(bytes, target) {
