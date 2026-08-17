@@ -1,5 +1,7 @@
 # FARD Prim
 
+[![CI](https://github.com/mauludsadiq/FARD-Prim/actions/workflows/ci.yml/badge.svg)](https://github.com/mauludsadiq/FARD-Prim/actions/workflows/ci.yml)
+
 A verifiable compilation substrate that takes FARD, Python, and JavaScript source
 to native x86-64 and ARM64 binaries — written entirely in FARD.
 
