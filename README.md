@@ -297,8 +297,9 @@ Achieved via:
 
 ## Next
 
-   CI across platforms (GitHub Actions, pinned fardrun version)
    IV widening and loop-level LICM at OCIR level
+   Real fard_print_int stub for ARM64 Linux (currently no-op)
+   x86-64 Linux ELF target
 
 
 ## Repos
