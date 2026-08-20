@@ -5,6 +5,7 @@ import("../orgntr_prim/fardlex")   as lex
 import("../orgntr_prim/fardparse") as par
 import("../orgntr_prim/fard_lower") as lower
 import("../orgntr_prim/ast_licm")   as licm
+import("../orgntr_prim/ocir_licm")   as ocir_licm
 import("../orgntr_prim/ast_unroll") as unroll
 import("../orgntr_prim/fard_ir_to_ocir") as bridge
 import("../orgntr_prim/ocir")            as ocir

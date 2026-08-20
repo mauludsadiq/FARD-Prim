@@ -1,0 +1,150 @@
+/// ocir_licm.fard -- Loop Invariant Code Motion at OCIR level
+///
+/// For each natural loop:
+///   1. Find the preheader block (single predecessor of header outside loop)
+///   2. Identify loop-invariant instructions: all operands defined outside loop
+///   3. Hoist them to preheader in dependency order
+///
+/// Safe to hoist: pure instructions (no side effects, no calls, no stores)
+/// Not hoisted: AllocHeap, StoreHeap, Call*, MakeClosure, StoreFnPtr
+
+import("std/list") as list
+import("std/rec")  as rec
+import("std/str")  as str
+import("../orgntr_prim/ocir_loop_ir") as loop_ir
+
+fn block_succs(block) {
+  let op = block.term.op in
+  if op == "BrCond" then [block.term.then_blk, block.term.else_blk]
+  else if op == "Br" then [block.term.to]
+  else []
+}
+
+fn build_pred_map(blocks) {
+  list.fold(blocks, {}, fn(acc, b) {
+    let succs = block_succs(b) in
+    list.fold(succs, acc, fn(a, s) {
+      let k = str.from(s) in
+      let prev = if rec.has(a, k) then rec.get(a, k) else [] in
+      rec.set(a, k, list.append(prev, b.label))
+    })
+  })
+}
+
+fn build_idom(blocks) {
+  // Simple idom: for each block, predecessor with lowest label
+  // (approximation sufficient for natural loop detection)
+  let pred_map = build_pred_map(blocks) in
+  list.fold(blocks, {}, fn(acc, b) {
+    let k = str.from(b.label) in
+    let preds = if rec.has(pred_map, k) then rec.get(pred_map, k) else [] in
+    if list.len(preds) == 0 then acc
+    else
+      let min_pred = list.fold(preds, list.get(preds, 0), fn(m, p) {
+        if p < m then p else m
+      }) in
+      rec.set(acc, k, min_pred)
+  })
+}
+
+// Is this instruction safe to hoist? (pure, no side effects)
+fn is_hoistable(inst) {
+  let op = inst.op in
+  // Only hoist arithmetic on values provably not modified in loop
+  // Conservative: ImmI64/ImmBool are always safe
+  // Arithmetic safe only if operands are themselves invariant constants
+  op == "ImmI64" || op == "ImmBool" ||
+  op == "AddI64" || op == "SubI64" || op == "MulI64" ||
+  op == "DivI64" || op == "ModI64"
+  // LoadHeap/LoadHeapStaticIdx excluded: may alias with loop body stores
+}
+
+
+// Collect all regs defined inside the loop body blocks
+fn collect_loop_defs(body_labels, blocks) {
+  let body_set = list.fold(body_labels, {}, fn(acc, l) {
+    rec.set(acc, str.from(l), true)
+  }) in
+  list.fold(blocks, {}, fn(acc, b) {
+    if !rec.has(body_set, str.from(b.label)) then acc
+    else list.fold(b.insts, acc, fn(a, inst) {
+      if rec.has(inst, "dst") then rec.set(a, str.from(inst.dst), true)
+      else a
+    })
+  })
+}
+
+// Check if all operands of inst are defined outside the loop
+fn is_invariant(inst, loop_defs) {
+  let op = inst.op in
+  if op == "ImmI64" || op == "ImmBool" then true
+  else if op == "CopyI64" then !rec.has(loop_defs, str.from(inst.src))
+  else if op == "AddI64" || op == "SubI64" || op == "MulI64" ||
+          op == "DivI64" || op == "ModI64" || op == "CmpI64" then
+    !rec.has(loop_defs, str.from(inst.lhs)) &&
+    !rec.has(loop_defs, str.from(inst.rhs))
+  else false
+}
+
+fn licm_func(f) {
+  if list.len(f.blocks) == 0 then f else
+  let blocks = f.blocks in
+  let idom = build_idom(blocks) in
+  let pred_map = build_pred_map(blocks) in
+  let succ_map = list.fold(blocks, {}, fn(acc, b) {
+    rec.set(acc, str.from(b.label), block_succs(b))
+  }) in
+  let cfg = { idom: idom, pred_map: pred_map, succ_map: succ_map,
+              dom_frontiers: {}, rpo: [] } in
+  let loops = loop_ir.detect_loops_func(f, cfg) in
+
+  // For each loop, collect invariant insts and hoist to preheader
+  let result = list.fold(loops, blocks, fn(cur_blocks, lp) {
+    let body_labels = lp.body in
+    let preheader = lp.preheader in
+    if preheader == null then cur_blocks else
+    let loop_defs = collect_loop_defs(body_labels, cur_blocks) in
+    let body_set = list.fold(body_labels, {}, fn(acc, l) {
+      rec.set(acc, str.from(l), true)
+    }) in
+
+    // Find invariant instructions in all body blocks
+    let hoistable = list.flatten(list.map(cur_blocks, fn(b) {
+      if !rec.has(body_set, str.from(b.label)) then []
+      else list.filter(b.insts, fn(inst) {
+        is_hoistable(inst) && is_invariant(inst, loop_defs)
+      })
+    })) in
+
+    if list.len(hoistable) == 0 then cur_blocks else
+
+    // Remove hoisted insts from body blocks, add to preheader
+    let hoisted_set = list.fold(hoistable, {}, fn(acc, inst) {
+      if rec.has(inst, "dst") then rec.set(acc, str.from(inst.dst), true)
+      else acc
+    }) in
+
+    list.map(cur_blocks, fn(b) {
+      if b.label == preheader then
+        // Insert hoisted insts before preheader's existing insts
+        { label: b.label, insts: list.concat([hoistable, b.insts]), term: b.term }
+      else if rec.has(body_set, str.from(b.label)) then
+        // Remove hoisted insts from body
+        { label: b.label,
+          insts: list.filter(b.insts, fn(inst) {
+            if rec.has(inst, "dst") then !rec.has(hoisted_set, str.from(inst.dst))
+            else true
+          }),
+          term: b.term }
+      else b
+    })
+  }) in
+
+  { name: f.name, params: f.params, blocks: result }
+}
+
+fn licm_module(m) {
+  { entry: m.entry, funcs: list.map(m.funcs, fn(f) { licm_func(f) }) }
+}
+
+export { licm_module }

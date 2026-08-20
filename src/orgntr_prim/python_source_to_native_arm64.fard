@@ -12,6 +12,8 @@ import("../orgntr_prim/ocir_gvn")        as gvn
 import("../orgntr_prim/uvir_verify")     as uverify
 import("../orgntr_prim/ocir_jt")         as jt
 import("../orgntr_prim/ocir_loop_fuse")  as fuse
+import("../orgntr_prim/ocir_licm")       as ocir_licm
+import("../orgntr_prim/ocir_licm")       as ocir_licm
 import("../orgntr_prim/ocir_sccp")       as sccp
 import("../orgntr_prim/ocir_to_vmir")    as vmir_sel
 import("../orgntr_prim/vmir_sched")      as sched
