@@ -88,6 +88,7 @@ fn load_is_mem_invariant(inst, inst_block_label, inst_idx_in_block,
 }
 
 fn is_pure_arithmetic(op) {
+  op == "ImmI64" || op == "ImmBool" ||
   op == "AddI64" || op == "SubI64" || op == "MulI64" ||
   op == "DivI64" || op == "ModI64" || op == "CmpI64" ||
   op == "ImmI64" || op == "ImmBool" || op == "CopyI64"
@@ -116,6 +117,12 @@ fn licm_func(f) {
   let mem_info = memssa.build_memssa_func(f) in
   let mem_nodes = mem_info.mem_nodes in
 
+  // DEBUG: print loop structure
+  let _ = list.map(loops, fn(lp) {
+    str.concat(["loop header=", str.from(lp.header), 
+                " preheader=", str.from(lp.preheader),
+                " body=", str.from(list.len(lp.body)), "blocks"])
+  }) in
   // Collect defs from ALL loop bodies -- a reg defined in any loop is
   // not invariant for any nested loop (it may change across outer iterations)
   let all_body_labels = list.flatten(list.map(loops, fn(lp){ lp.body })) in
@@ -125,7 +132,9 @@ fn licm_func(f) {
   let result = list.fold(loops, blocks, fn(cur_blocks, lp) {
     let body_labels = lp.body in
     let preheader = lp.preheader in
-    if preheader == null then cur_blocks else
+    // Skip self-loops, degenerate loops, and loops without valid preheader
+    if preheader == null || preheader == -1 then cur_blocks else
+    if lp.header == lp.latch then cur_blocks else
 
     let body_set = list.fold(body_labels, {}, fn(acc, l) {
       rec.set(acc, str.from(l), true)
@@ -142,9 +151,11 @@ fn licm_func(f) {
     // Use all_loop_defs: regs defined in ANY loop body are not invariant
     let loop_defs = all_loop_defs in
 
-    // Find invariant instructions in all body blocks
+    // Find invariant instructions in body blocks (excluding header - it may
+    // contain loop-varying initialization code for inner loops)
     let hoistable = list.flatten(list.map(cur_blocks, fn(b) {
       if !rec.has(body_set, str.from(b.label)) then []
+      else if b.label == lp.header then []  // never hoist from header
       else list.filter(b.insts, fn(inst) {
         let op = inst.op in
         if is_pure_arithmetic(op) then
@@ -158,6 +169,7 @@ fn licm_func(f) {
 
     if list.len(hoistable) == 0 then cur_blocks else
 
+    // Track hoistable dsts per body block for safe removal
     let hoisted_dsts = list.fold(hoistable, {}, fn(acc, inst) {
       if rec.has(inst, "dst") then rec.set(acc, str.from(inst.dst), true)
       else acc
@@ -165,8 +177,11 @@ fn licm_func(f) {
 
     list.map(cur_blocks, fn(b) {
       if b.label == preheader then
-        { label: b.label, insts: list.concat([hoistable, b.insts]), term: b.term }
+        // Append after existing preheader insts so operands are available
+        { label: b.label, insts: list.concat([b.insts, hoistable]), term: b.term }
       else if rec.has(body_set, str.from(b.label)) then
+        // Remove hoisted insts from this body block by dst identity
+        // Safe: OCIR at this stage has unique dsts (SSA form preserved by opts)
         { label: b.label,
           insts: list.filter(b.insts, fn(inst) {
             if rec.has(inst, "dst") then !rec.has(hoisted_dsts, str.from(inst.dst))
@@ -177,7 +192,7 @@ fn licm_func(f) {
     })
   }) in
 
-  { name: f.name, params: f.params, blocks: result }
+  if list.len(loops) == 0 then f else rec.set(f, "blocks", result)
 }
 
 fn licm_module(m) {

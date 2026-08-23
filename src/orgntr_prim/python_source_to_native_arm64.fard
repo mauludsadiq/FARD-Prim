@@ -40,6 +40,7 @@ fn compile_ast_and_emit(py_ast, out_path) {
   let p4        = opt.compute_alloc_ptrmasks(p4) in
   let p5        = opt.opt_module(jt.jt_module(p4)) in
   let p5        = opt.opt_module(fuse.fuse_module(p5)) in
+  let p5        = ocir_licm.licm_module(p5) in
   let vmir_mod  = sched.schedule_module(vmir_sel.sel_module(p5)) in
   let omir_mod  = peep.peephole_module(igra.igra_module(tco.tco_module(vmir_lower.lower_module(vmir_mod)))) in
   let encoded   = fixups.encode_module_with_fixups(omir_mod) in
