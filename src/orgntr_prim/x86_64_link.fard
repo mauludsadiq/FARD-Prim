@@ -192,6 +192,8 @@ fn link_module_elf_x86(encoded_module, base_vmaddr) {
   let laid_out = layout_funcs(encoded_module.funcs) in
   let sym_table_base = build_symbol_table(laid_out) in
   let sym_table = rec.set(sym_table_base, "fard_alloc", 0 - elf_alloc_stub_size()) in
+  let sym_table = rec.set(sym_table, "fard_print", 0 - elf_alloc_stub_size() - 285) in
+  let sym_table = rec.set(sym_table, "fard_print_int", 0 - elf_alloc_stub_size() - 285 + 128) in
   let linked_funcs = list.map(laid_out, fn(entry) {
     let base = entry.base in
     let f = entry.func in
