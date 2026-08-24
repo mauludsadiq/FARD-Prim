@@ -13,6 +13,7 @@ import("../orgntr_prim/uvir_verify")     as uverify
 import("../orgntr_prim/ocir_jt")         as jt
 import("../orgntr_prim/ocir_loop_fuse")  as fuse
 import("../orgntr_prim/ocir_licm")       as ocir_licm
+import("../orgntr_prim/ocir_iv_sr")      as ocir_iv_sr
 import("../orgntr_prim/ocir_sccp")       as sccp
 import("../orgntr_prim/ocir_to_vmir")    as vmir_sel
 import("../orgntr_prim/vmir_sched")      as sched
@@ -41,6 +42,7 @@ fn compile_ast_and_emit(py_ast, out_path) {
   let p5        = opt.opt_module(jt.jt_module(p4)) in
   let p5        = opt.opt_module(fuse.fuse_module(p5)) in
   let p5        = ocir_licm.licm_module(p5) in
+  let p5        = ocir_iv_sr.iv_sr_module(p5) in
   let vmir_mod  = sched.schedule_module(vmir_sel.sel_module(p5)) in
   let omir_mod  = peep.peephole_module(igra.igra_module(tco.tco_module(vmir_lower.lower_module(vmir_mod)))) in
   let encoded   = fixups.encode_module_with_fixups(omir_mod) in

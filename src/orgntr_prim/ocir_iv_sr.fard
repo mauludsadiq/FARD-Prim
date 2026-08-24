@@ -1,0 +1,191 @@
+/// ocir_iv_sr.fard -- Induction Variable Strength Reduction
+///
+/// Detects MulI64(iv, const) inside loop bodies where iv is a linear
+/// induction variable, and replaces the multiply with a secondary IV
+/// that accumulates the stride.
+///
+/// Transform:
+///   // Primary IV: iv starts at init, steps by step in latch
+///   // Body contains: dst = MulI64(iv, k)
+///
+///   ->  preheader: sec_iv_init = init * k
+///       header:    (sec_iv phi from preheader=sec_iv_init, from latch=sec_iv_next)
+///       body:      dst = CopyI64(sec_iv)          [was MulI64(iv, k)]
+///       latch:     sec_iv_next = AddI64(sec_iv, k) [new]
+///
+/// At OCIR level we don't have explicit phi nodes, so we implement this
+/// by adding sec_iv to the preheader and updating the latch's IV update.
+///
+/// Simplified approach (no phi insertion): use the existing heap-cell
+/// pattern that Python lowering already uses for mutable loop vars.
+/// For FARD native loops, the IV update is in the latch block directly.
+
+import("std/list") as list
+import("std/rec")  as rec
+import("std/str")  as str
+import("../orgntr_prim/ocir_loop_ir")  as loop_ir
+import("../orgntr_prim/ocir_domtree")  as domtree
+
+fn block_succs(block) {
+  let op = block.term.op in
+  if op == "BrCond" then [block.term.then_blk, block.term.else_blk]
+  else if op == "Br" then [block.term.to]
+  else []
+}
+
+// Find the constant value of a register, if it was defined by ImmI64
+fn find_const(reg, blocks) {
+  list.fold(blocks, null, fn(acc, b) {
+    if acc != null then acc
+    else list.fold(b.insts, null, fn(a, inst) {
+      if a != null then a
+      else if inst.op == "ImmI64" && inst.dst == reg then inst.val
+      else null
+    })
+  })
+}
+
+// Find IVs in a loop: look for AddI64 in latch where one operand is
+// the register defined at the header and updated in the latch
+fn find_primary_ivs(lp, blocks) {
+  let latch_blk = list.find(blocks, fn(b){ b.label == lp.latch }) in
+  if !rec.has(latch_blk, "some") then [] else
+  let latch = latch_blk.some in
+  // Find AddI64/SubI64 in latch: dst = lhs + rhs where rhs is a constant
+  list.flatten(list.map(latch.insts, fn(inst) {
+    if inst.op != "AddI64" && inst.op != "SubI64" then []
+    else
+      let step_const = find_const(inst.rhs, blocks) in
+      if step_const == null then []
+      else [{ reg: inst.lhs, dst: inst.dst, step: step_const, op: inst.op }]
+  }))
+}
+
+// Find MulI64(iv_reg, const) in loop body blocks (excluding header/latch)
+fn find_iv_muls(iv_regs, body_labels, header, latch, blocks) {
+  let iv_set = list.fold(iv_regs, {}, fn(acc, iv) {
+    rec.set(acc, str.from(iv.reg), iv)
+  }) in
+  let body_set = list.fold(body_labels, {}, fn(acc, l) {
+    rec.set(acc, str.from(l), true)
+  }) in
+  list.flatten(list.map(blocks, fn(b) {
+    if !rec.has(body_set, str.from(b.label)) then []
+    else if b.label == header || b.label == latch then []
+    else list.flatten(list.map(b.insts, fn(inst) {
+      if inst.op != "MulI64" then []
+      else
+        // Check if lhs is an IV reg
+        let lhs_iv = if rec.has(iv_set, str.from(inst.lhs)) 
+                     then rec.get(iv_set, str.from(inst.lhs)) else null in
+        let rhs_const = find_const(inst.rhs, blocks) in
+        if lhs_iv == null || rhs_const == null then
+          // Also check rhs as IV
+          let rhs_iv = if rec.has(iv_set, str.from(inst.rhs))
+                       then rec.get(iv_set, str.from(inst.rhs)) else null in
+          let lhs_const = find_const(inst.lhs, blocks) in
+          if rhs_iv == null || lhs_const == null then []
+          else [{ dst: inst.dst, iv: rhs_iv, k: lhs_const, block: b.label }]
+        else [{ dst: inst.dst, iv: lhs_iv, k: rhs_const, block: b.label }]
+    }))
+  }))
+}
+
+// Allocate new register IDs starting above existing max
+fn max_reg(blocks) {
+  list.fold(blocks, 0, fn(acc, b) {
+    list.fold(b.insts, acc, fn(a, inst) {
+      let d = if rec.has(inst, "dst") then inst.dst else 0 in
+      let l = if rec.has(inst, "lhs") then inst.lhs else 0 in
+      let r = if rec.has(inst, "rhs") then inst.rhs else 0 in
+      let m1 = if d > a then d else a in
+      let m2 = if l > m1 then l else m1 in
+      if r > m2 then r else m2
+    })
+  })
+}
+
+fn iv_sr_func(f) {
+  if list.len(f.blocks) == 0 then f else
+  let blocks = f.blocks in
+  let entry_label = list.get(blocks, 0).label in
+  let cfg = domtree.analyze_cfg(blocks, entry_label) in
+  let loops = loop_ir.detect_loops_func(f, cfg) in
+  if list.len(loops) == 0 then f else
+
+  let next_reg_base = max_reg(blocks) + 1 in
+
+  let result = list.fold(loops, { blocks: blocks, next_reg: next_reg_base },
+    fn(acc, lp) {
+      if lp.preheader == null || lp.preheader == -1 then acc else
+      if lp.header == lp.latch then acc else
+
+      let cur_blocks = acc.blocks in
+      let next_reg = acc.next_reg in
+
+      // Find primary IVs in this loop
+      let ivs = find_primary_ivs(lp, cur_blocks) in
+      if list.len(ivs) == 0 then acc else
+
+      // Find MulI64(iv, const) candidates in body
+      let iv_muls = find_iv_muls(ivs, lp.body, lp.header, lp.latch, cur_blocks) in
+      if list.len(iv_muls) == 0 then acc else
+
+      // For each candidate, create a secondary IV
+      // sec_iv starts at (iv.init * k) in preheader, increments by (iv.step * k) in latch
+      let transforms = list.build(list.len(iv_muls), fn(i) {
+        let m = list.get(iv_muls, i) in
+        let sec_reg = next_reg + i in
+        let init_reg = next_reg + list.len(iv_muls) + i in
+        let step_val = m.iv.step * m.k in
+        { mul: m, sec_reg: sec_reg, init_reg: init_reg, step_val: step_val }
+      }) in
+      let new_next = next_reg + list.len(iv_muls) * 2 in
+
+      // Apply transforms to blocks
+      let new_blocks = list.map(cur_blocks, fn(b) {
+        if b.label == lp.preheader then
+          // Add sec_iv initialization: init_reg = ImmI64(iv.init * k)
+          let init_insts = list.flatten(list.map(transforms, fn(t) {
+            let init_val = t.mul.iv.step * t.mul.k in
+            [{ op: "ImmI64", dst: t.init_reg, val: 0 },
+             { op: "CopyI64", dst: t.sec_reg, src: t.init_reg }]
+          })) in
+          { label: b.label, insts: list.concat([b.insts, init_insts]), term: b.term }
+        else if b.label == lp.latch then
+          // Add sec_iv update: sec_reg = AddI64(sec_reg, step_val)
+          let update_insts = list.flatten(list.map(transforms, fn(t) {
+            let step_reg = new_next + list.len(transforms) in
+            [{ op: "ImmI64", dst: step_reg, val: t.step_val },
+             { op: "AddI64", dst: t.sec_reg, lhs: t.sec_reg, rhs: step_reg }]
+          })) in
+          { label: b.label, insts: list.concat([b.insts, update_insts]), term: b.term }
+        else if rec.has(list.fold(transforms, {}, fn(a, t) {
+            rec.set(a, str.from(t.mul.block), true) }), str.from(b.label)) then
+          // Replace MulI64 with CopyI64(sec_reg) in this body block
+          let mul_to_sec = list.fold(transforms, {}, fn(a, t) {
+            rec.set(a, str.from(t.mul.dst), t.sec_reg)
+          }) in
+          { label: b.label,
+            insts: list.map(b.insts, fn(inst) {
+              if inst.op == "MulI64" && rec.has(mul_to_sec, str.from(inst.dst))
+                then { op: "CopyI64", dst: inst.dst,
+                       src: rec.get(mul_to_sec, str.from(inst.dst)) }
+                else inst
+            }),
+            term: b.term }
+        else b
+      }) in
+
+      { blocks: new_blocks, next_reg: new_next + list.len(transforms) + 1 }
+    }
+  ) in
+
+  rec.set(f, "blocks", result.blocks)
+}
+
+fn iv_sr_module(m) {
+  { entry: m.entry, funcs: list.map(m.funcs, fn(f) { iv_sr_func(f) }) }
+}
+
+export { iv_sr_module }
