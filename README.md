@@ -257,11 +257,11 @@ Achieved via:
 
 ## Source
 
-18,373 lines of FARD across 72 files in src/orgntr_prim/.
+18,914 lines of FARD across 73 files in src/orgntr_prim/.
 
-   x86_64_encode.fard      x86-64 instruction encoding (1130 lines)
-   fard_ir_to_ocir.fard    flat IR to OCIR block structure (586 lines)
-   fard_lower.fard         AST to flat IR, closures, while loops, print (589 lines)
+   x86_64_encode.fard      x86-64 instruction encoding (1184 lines)
+   fard_ir_to_ocir.fard    flat IR to OCIR block structure (619 lines)
+   fard_lower.fard         AST to flat IR, closures, while loops, print (676 lines)
    fardparse.fard          FARD parser with while expression (520 lines)
    macho_exe.fard          Mach-O x86-64 emitter (343 lines)
    omir_peephole.fard      copy prop + DSE + fusion + const fold (521 lines)
