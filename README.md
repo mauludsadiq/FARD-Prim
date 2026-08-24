@@ -297,7 +297,6 @@ Achieved via:
 
 ## Next
 
-   fard_print_int stub for ARM64 Linux (real: int→decimal, write syscall)
    x86-64 Linux ELF target
    Vectorization legality analysis
 
