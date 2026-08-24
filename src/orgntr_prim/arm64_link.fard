@@ -11,7 +11,7 @@ import("../orgntr_prim/arm64_encode") as enc
 fn text_vmaddr()      { 4294971392 }  // placeholder, overridden by link_with_vmaddr
 fn entry_stub_size()  { 60 }          // bytes: mmap(9)+mov_x19+stp+mov+bl+movz+svc = 15 insts * 4
 fn alloc_stub_size()  { enc.alloc_stub_size() }
-fn ret_stub_size()    { 4 }  // single RET instruction
+fn ret_stub_size()    { 268 }  // fard_print_int stub
 
 fn layout_funcs(encoded_funcs) {
   let r = list.fold(encoded_funcs, { offset: 0, funcs: [] }, fn(acc, f) {
