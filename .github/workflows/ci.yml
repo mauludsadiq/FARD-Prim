@@ -43,3 +43,40 @@ jobs:
         with:
           name: regression-output
           path: out/
+
+  regression-x86:
+    name: Regression (Linux x86-64)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install fardrun
+        run: |
+          sudo cp ci/fardrun-linux-x86_64 /usr/local/bin/fardrun
+          sudo chmod +x /usr/local/bin/fardrun
+          fardrun --version
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Create output directory
+        run: mkdir -p out
+
+      - name: Run FARD regression suite (x86-64 ELF)
+        run: |
+          fardrun run --program programs/regression_elf.fard --out /tmp/reg_elf
+          chmod +x out/r_* 2>/dev/null || true
+          python3 programs/regression_run.py /tmp/reg_elf/result.json
+
+      - name: Run Python regression suite (x86-64)
+        run: python3 programs/regression_python.py
+
+      - name: Upload artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-output-x86
+          path: out/
