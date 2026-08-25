@@ -1,13 +1,14 @@
 # Known Bugs
 
-## GC-001: Dynamic list append crashes at 1000+ elements
+## GC-001: Dynamic list append capacity (FIXED)
 **Symptom:** `xs=[]; while i<1000: xs.append(i)` → SIGSEGV  
-**Root cause:** Precise GC ptrmask is computed at alloc time based on initial size.
-When `__list_append__` grows the backing store (realloc-style), the new allocation
-gets a different ptrmask, but the old pointer stored in the caller's heap cell still
-points to the old (now GC-scanned-incorrectly) object.  
-**Workaround:** Use fixed-size list literals: `xs=[i,i+1,i+2]`  
-**Status:** Not yet fixed
+**Root cause:** Empty list `[]` allocated only 8 element slots; appending past slot 8
+wrote past allocation end, corrupting heap.  
+**Fix:** Increased initial capacity from 8 to 64 slots in `python_to_uvir.fard`.
+Verified: 1000 appends now works correctly (exit=232=1000%256).  
+**Remaining limitation:** Lists with >64 appends will still crash. True fix requires
+dynamic growth (realloc+copy) in `__list_append__`.  
+**Status:** Partially fixed — 64-slot capacity committed
 
 ## COMPILE-001: Compilation is slow due to interpreted execution
 **Symptom:** Complex programs take 45-120s to compile; FARD native suite takes ~2min  

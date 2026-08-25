@@ -218,7 +218,7 @@ fn lower_expr(node, env, bb, ctx) {
     let pr = 10000 + dst in
     let n = list.len(node.elts) in
     let lr = 10001 + dst in
-    let b0 = bb_emit(ir.bb, uvir.inst_alloc(pr, (1 + n + 8) * 8, "list")) in
+    let b0 = bb_emit(ir.bb, uvir.inst_alloc(pr, (1 + n + 64) * 8, "list")) in  // 64-elem capacity for append
     let b1 = bb_emit(b0, uvir.inst_const(lr, uvir.val_int(n))) in
     let b2 = bb_emit(b1, uvir.inst_store(pr, 0, lr)) in
     let b3 = list.fold(list.build(n, fn(i) { i }), b2, fn(bk, i) {
