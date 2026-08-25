@@ -257,7 +257,7 @@ Achieved via:
 
 ## Source
 
-18,914 lines of FARD across 73 files in src/orgntr_prim/.
+19,087 lines of FARD across 75 files in src/orgntr_prim/.
 
    x86_64_encode.fard      x86-64 instruction encoding (1184 lines)
    fard_ir_to_ocir.fard    flat IR to OCIR block structure (619 lines)
@@ -297,7 +297,6 @@ Achieved via:
 
 ## Next
 
-   x86-64 Linux ELF target
    Vectorization legality analysis
 
 
