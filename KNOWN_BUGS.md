@@ -9,9 +9,11 @@ points to the old (now GC-scanned-incorrectly) object.
 **Workaround:** Use fixed-size list literals: `xs=[i,i+1,i+2]`  
 **Status:** Not yet fixed
 
-## COMPILE-001: Nested while loops take >60s to compile
-**Symptom:** `while i<5: while j<i: ...` takes >60s in compile_python.py  
-**Root cause:** Unknown — likely exponential behavior in one of the optimization
-passes (LICM or loop fusion) when processing nested loop CFG structure.  
-**Workaround:** Use 120s timeout  
-**Status:** Not yet investigated
+## COMPILE-001: Compilation is slow due to interpreted execution
+**Symptom:** Complex programs take 45-120s to compile; FARD native suite takes ~2min  
+**Root cause:** fardrun is an interpreter running ~19k lines of FARD compiler source.
+The compiler itself is correct and fast; interpretation overhead is O(program_complexity).
+Nested while programs generate larger OCIR (more blocks/instructions) → more interpreter work.  
+**Fix:** Self-hosting — compile FARD Prim with itself to get native-speed compilation  
+**Workaround:** Use 120s timeout in test harness  
+**Status:** By design until self-hosting milestone
