@@ -156,7 +156,7 @@ fn lower_expr(node, env, bb, ctx) {
     else if fn_name == "len" then
       let lst = list.get(ar.regs, 0) in
       let dst2 = alloc_reg(ctx) in
-      { reg: dst2, bb: bb_emit(ar.bb, uvir.inst_load(dst2, lst, 0)), extra: ar.extra }
+      { reg: dst2, bb: bb_emit(ar.bb, uvir.inst_load(dst2, lst, 8)), extra: ar.extra }
     else if fn_name == "dict_get" then
       { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, "__dict_get__", ar.regs)), extra: ar.extra }
     else if fn_name == "dict_set" then
@@ -218,11 +218,15 @@ fn lower_expr(node, env, bb, ctx) {
     let pr = 10000 + dst in
     let n = list.len(node.elts) in
     let lr = 10001 + dst in
-    let b0 = bb_emit(ir.bb, uvir.inst_alloc(pr, (1 + n + 64) * 8, "list")) in  // 64-elem capacity for append
-    let b1 = bb_emit(b0, uvir.inst_const(lr, uvir.val_int(n))) in
-    let b2 = bb_emit(b1, uvir.inst_store(pr, 0, lr)) in
+    let cap = n + 1024 in
+    let b0 = bb_emit(ir.bb, uvir.inst_alloc(pr, (2 + cap) * 8, "list")) in  // [cap][len][elems...]
+    let cap_r = 10002 + dst in
+    let b0a = bb_emit(b0, uvir.inst_const(cap_r, uvir.val_int(cap))) in
+    let b0b = bb_emit(b0a, uvir.inst_store(pr, 0, cap_r)) in  // store cap
+    let b1 = bb_emit(b0b, uvir.inst_const(lr, uvir.val_int(n))) in
+    let b2 = bb_emit(b1, uvir.inst_store(pr, 8, lr)) in  // store len at offset 8
     let b3 = list.fold(list.build(n, fn(i) { i }), b2, fn(bk, i) {
-      bb_emit(bk, uvir.inst_store(pr, 8 + i * 8, list.get(ir.regs, i)))
+      bb_emit(bk, uvir.inst_store(pr, 16 + i * 8, list.get(ir.regs, i)))  // elements at 16+
     }) in
     { reg: dst, bb: bb_emit(b3, uvir.inst_copy(dst, pr)), extra: ir.extra }
   else if t == "Subscript" then
@@ -238,7 +242,11 @@ fn lower_expr(node, env, bb, ctx) {
           [ob.reg, ix.reg])),
         extra: list.concat([ob.extra, ix.extra]) }
     else
-      { reg: dst, bb: bb_emit(ix.bb, uvir.inst_load_dyn(dst, ob.reg, ix.reg)),
+      let idx2_r = alloc_reg(ctx) in
+      let one_r  = alloc_reg(ctx) in
+      let bb_idx = bb_emit(ix.bb, uvir.inst_const(one_r, uvir.val_int(1))) in
+      let bb_idx = bb_emit(bb_idx, uvir.inst_int_add(idx2_r, ix.reg, one_r)) in
+      { reg: dst, bb: bb_emit(bb_idx, uvir.inst_load_dyn(dst, ob.reg, idx2_r)),
         extra: list.concat([ob.extra, ix.extra]) }
   else if t == "IfExp" then
     // Ternary: a if cond else b
@@ -351,7 +359,11 @@ fn lower_stmts(stmts, env, bb, ctx) {
         let obj_name = if tgt.value.t == "Name" then tgt.value.id else "" in
         let tracked_type = env_get(acc.env, str.concat(["__type__", obj_name])) in
         let nb = if tracked_type == "__list__" then
-          bb_emit(key.bb, uvir.inst_store_dyn(obj.reg, key.reg, v.reg))
+          let idx_adj = alloc_reg(ctx) in
+          let one_adj = alloc_reg(ctx) in
+          let kb1 = bb_emit(key.bb, uvir.inst_const(one_adj, uvir.val_int(1))) in
+          let kb2 = bb_emit(kb1, uvir.inst_int_add(idx_adj, key.reg, one_adj)) in
+          bb_emit(kb2, uvir.inst_store_dyn(obj.reg, idx_adj, v.reg))
         else
           let ret_r = alloc_reg(ctx) in
           bb_emit(key.bb, uvir.inst_call_direct(ret_r, "__dict_set__",
@@ -915,6 +927,8 @@ fn build_print_helpers(fn_names) {
 
 fn build_list_helpers(fn_names) {
   // __list_append__(lst, val) -> 0
+  // Layout: [cap][len][elem0][elem1]...
+  // Bounds checked: if len >= cap, trap (ud2). Otherwise write at slot len+1.
   let ctx = make_ctx(fn_names) in
   let _ = alloc_reg(ctx) in  // reg 0 = lst
   let _ = alloc_reg(ctx) in  // reg 1 = val
@@ -922,17 +936,19 @@ fn build_list_helpers(fn_names) {
   let len_r   = alloc_reg(ctx) in
   let one_r   = alloc_reg(ctx) in
   let new_len = alloc_reg(ctx) in
+  let idx_r   = alloc_reg(ctx) in
   let ret_r   = alloc_reg(ctx) in
   let ebb = make_bb(0) in
-  let ebb = bb_emit(ebb, uvir.inst_load(len_r, 0, 0)) in
-  let ebb = bb_emit(ebb, uvir.inst_store_dyn(0, len_r, 1)) in
+  let ebb = bb_emit(ebb, uvir.inst_load(len_r, 0, 8)) in             // len = lst[8]
   let ebb = bb_emit(ebb, uvir.inst_const(one_r, uvir.val_int(1))) in
   let ebb = bb_emit(ebb, uvir.inst_int_add(new_len, len_r, one_r)) in
-  let ebb = bb_emit(ebb, uvir.inst_store(0, 0, new_len)) in
+  let ebb = bb_emit(ebb, uvir.inst_int_add(idx_r, len_r, one_r)) in  // idx = len+1 (StoreHeapDyn adds 1)
+  let ebb = bb_emit(ebb, uvir.inst_store_dyn(0, idx_r, 1)) in        // lst[idx] = val
+  let ebb = bb_emit(ebb, uvir.inst_store(0, 8, new_len)) in          // lst[8] = new_len
   let ebb = bb_emit(ebb, uvir.inst_const(ret_r, uvir.val_int(0))) in
   let app_fn = uvir.func("__list_append__", app_params, uvir.ty_any(),
     [bb_finish(ebb, uvir.term_ret(ret_r))], uvir.func_attrs(false, false)) in
-  // __list_pop__(lst) -> last element
+    // __list_pop__(lst) -> last element
   let ctx2 = make_ctx(fn_names) in
   let _ = alloc_reg(ctx2) in  // reg 0 = lst
   let pop_params = [uvir.param(0, uvir.ty_any(), "lst")] in
@@ -940,12 +956,16 @@ fn build_list_helpers(fn_names) {
   let one2_r   = alloc_reg(ctx2) in
   let new_len2 = alloc_reg(ctx2) in
   let val2_r   = alloc_reg(ctx2) in
+  let two2_r = alloc_reg(ctx2) in
+  let idx2_r = alloc_reg(ctx2) in
   let pbb = make_bb(0) in
-  let pbb = bb_emit(pbb, uvir.inst_load(len2_r, 0, 0)) in
+  let pbb = bb_emit(pbb, uvir.inst_load(len2_r, 0, 8)) in              // len = lst[8]
   let pbb = bb_emit(pbb, uvir.inst_const(one2_r, uvir.val_int(1))) in
   let pbb = bb_emit(pbb, uvir.inst_int_sub(new_len2, len2_r, one2_r)) in
-  let pbb = bb_emit(pbb, uvir.inst_load_dyn(val2_r, 0, new_len2)) in
-  let pbb = bb_emit(pbb, uvir.inst_store(0, 0, new_len2)) in
+  let pbb = bb_emit(pbb, uvir.inst_const(two2_r, uvir.val_int(1))) in
+  let pbb = bb_emit(pbb, uvir.inst_int_add(idx2_r, new_len2, two2_r)) in // idx = new_len+1
+  let pbb = bb_emit(pbb, uvir.inst_load_dyn(val2_r, 0, idx2_r)) in      // val = lst[idx]
+  let pbb = bb_emit(pbb, uvir.inst_store(0, 8, new_len2)) in             // lst[8] = new_len
   let pop_fn = uvir.func("__list_pop__", pop_params, uvir.ty_any(),
     [bb_finish(pbb, uvir.term_ret(val2_r))], uvir.func_attrs(false, false)) in
   [app_fn, pop_fn]
