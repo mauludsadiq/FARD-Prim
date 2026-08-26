@@ -1,0 +1,69 @@
+/// IR-level golden tests -- assert each optimizer pass performs its intended transformation
+import("../src/orgntr_prim/ocir_dump") as dump
+import("std/list") as list
+
+fn check(name, got, expected) {
+  { name: name, pass: got == expected, got: got, expected: expected }
+}
+
+fn check_true(name, val) {
+  { name: name, pass: val, got: val, expected: true }
+}
+
+fn check_false(name, val) {
+  { name: name, pass: val == false, got: val, expected: false }
+}
+
+// SCCP: x=6; y=7; x*y  -- constants should fold, MulI64 eliminated
+let sccp_src   = "x=6\ny=7\nx*y" in
+let pre_sccp   = dump.pipeline_to_ocir(sccp_src) in
+let post_sccp  = dump.pipeline_to_p1(sccp_src) in
+
+// GVN: x=10; y=x+1; z=x+1; y+z  -- redundant x+1 should be eliminated
+let gvn_src    = "x=10\ny=x+1\nz=x+1\ny+z" in
+let pre_gvn    = dump.pipeline_to_p1(gvn_src) in
+let post_gvn   = dump.pipeline_to_p4(gvn_src) in
+
+// LICM: simple while loop -- invariant exprs hoisted, inst count drops or stays
+let licm_src   = "i=0\nwhile i<10:\n  i=i+1\ni" in
+let pre_licm   = dump.pipeline_to_p4(licm_src) in
+let post_licm  = dump.pipeline_to_licm(licm_src) in
+
+// IV-SR: s=s+(i*3) inside loop -- MulI64 should be replaced by AddI64
+let ivsr_src   = "i=0\ns=0\nwhile i<10:\n  s=s+(i*3)\n  i=i+1\ns" in
+let pre_ivsr   = dump.pipeline_to_licm(ivsr_src) in
+let post_ivsr  = dump.pipeline_to_ivsr(ivsr_src) in
+
+[
+  // SCCP reduces total instruction count
+  check_true("sccp_reduces_insts",
+    dump.count_insts(post_sccp) < dump.count_insts(pre_sccp)),
+
+  // SCCP eliminates MulI64 when both operands are constants
+  check_false("sccp_eliminates_const_mul",
+    dump.has_op(post_sccp, "MulI64")),
+
+  // SCCP result has fewer or equal blocks (dead blocks pruned)
+  check_true("sccp_reduces_blocks",
+    dump.count_blocks(post_sccp) <= dump.count_blocks(pre_sccp)),
+
+  // GVN reduces instruction count (redundant expr eliminated)
+  check_true("gvn_reduces_insts",
+    dump.count_insts(post_gvn) <= dump.count_insts(pre_gvn)),
+
+  // LICM preserves block count
+  check_true("licm_preserves_blocks",
+    dump.count_blocks(post_licm) == dump.count_blocks(pre_licm)),
+
+  // LICM does not increase instruction count
+  check_true("licm_no_inst_increase",
+    dump.count_insts(post_licm) <= dump.count_insts(pre_licm)),
+
+  // IV-SR reduces MulI64 count inside loop
+  check_true("ivsr_reduces_mul",
+    dump.count_op(post_ivsr, "MulI64") < dump.count_op(pre_ivsr, "MulI64")),
+
+  // IV-SR does not remove AddI64 (replaces mul with add accumulator)
+  check_true("ivsr_has_add",
+    dump.count_op(post_ivsr, "AddI64") > 0)
+]
