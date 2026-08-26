@@ -86,6 +86,8 @@ export {
   pipeline_to_ocir,
   metrics,
   pass_metrics,
+  count_insts_in_block,
+  block_op_counts,
   pipeline_to_p1,
   pipeline_to_p3,
   pipeline_to_p4,
@@ -127,4 +129,22 @@ fn pass_metrics(py_ast) {
     licm:   metrics(ml),
     ivsr:   metrics(mi)
   }
+}
+
+fn count_insts_in_block(m, fname, blabel) {
+  list.fold(m.funcs, 0, fn(acc, f) {
+    if f.name == fname then
+      list.fold(f.blocks, acc, fn(acc2, b) {
+        if b.label == blabel then list.len(b.insts) else acc2
+      })
+    else acc
+  })
+}
+
+fn block_op_counts(m, fname) {
+  list.fold(m.funcs, [], fn(acc, f) {
+    if f.name == fname then
+      list.map(f.blocks, fn(b) { { label: b.label, insts: list.len(b.insts) } })
+    else acc
+  })
 }

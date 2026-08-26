@@ -131,7 +131,50 @@ for name, src, desc in BENCHMARKS:
 
 print('-' * 90)
 
+# Loop-body metrics -- LICM moves insts out of loop body, total stays same
+LOOP_BENCHMARKS = [
+    ("while_simple",  "i=0\nwhile i<10:\n  i=i+1\ni",               "__main__"),
+    ("while_ivsr",    "i=0\ns=0\nwhile i<10:\n  s=s+(i*3)\n  i=i+1\ns", "__main__"),
+    ("while_sum",     "i=0\ns=0\nwhile i<100:\n  s=s+i\n  i=i+1\ns%256", "__main__"),
+]
+
+print("\nLoop-body instruction counts (max non-entry block = loop body):")
+print(f"  {chr(10).join([])}  "); print("%-20s %10s %10s %8s" % ("Benchmark", "pre-LICM", "post-LICM", "hoisted"))
+print('-' * 52)
+
+for name, lsrc, fn_name in LOOP_BENCHMARKS:
+    fard_ast = py_to_fard_ast(lsrc)
+    lines = [
+        'import("src/orgntr_prim/ocir_dump") as dump',
+        'import("std/list") as list',
+        'let ast = ' + fard_ast + ' in',
+        '{',
+        '  pre_blocks:  dump.block_op_counts(dump.pipeline_to_p4(ast),   "' + fn_name + '"),',
+        '  post_blocks: dump.block_op_counts(dump.pipeline_to_licm(ast), "' + fn_name + '")',
+        '}',
+    ]
+    fard_src = '\n'.join(lines) + '\n'
+    with tempfile.NamedTemporaryFile(suffix='.fard', mode='w', delete=False, dir='.') as fh:
+        fh.write(fard_src)
+        tmp_path = fh.name
+    outdir = f'/tmp/bench_loop_{name}'
+    os.makedirs(outdir, exist_ok=True)
+    r = subprocess.run(['fardrun','run','--program',tmp_path,'--out',outdir],
+                      capture_output=True, text=True, timeout=180)
+    os.unlink(tmp_path)
+    if r.returncode != 0:
+        print(f"{name:<20}  ERROR: {r.stderr[:80]}")
+        continue
+    result = json.load(open(f'{outdir}/result.json')).get('result', {})
+    pre_blocks  = result.get('pre_blocks',  [])
+    post_blocks = result.get('post_blocks', [])
+    pre_body  = max((b['insts'] for b in pre_blocks  if b['label'] != 0), default=0)
+    post_body = max((b['insts'] for b in post_blocks if b['label'] != 0), default=0)
+    hoisted = pre_body - post_body
+    print(f"{name:<20} {pre_body:>10} {post_body:>10} {hoisted:>8}")
+
 # Save report
+
 report_path = f'benchmarks/{timestamp}_{commit}.json'
 with open(report_path, 'w') as f:
     json.dump(report, f, indent=2)
