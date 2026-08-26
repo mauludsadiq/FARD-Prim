@@ -23,3 +23,5 @@ programs/test_closure_42.fard
 programs/test_fact120.fard
 ci/fardrun
 ci/fardrun-macos-arm64
+benchmarks/latest.json
+benchmarks/*.json

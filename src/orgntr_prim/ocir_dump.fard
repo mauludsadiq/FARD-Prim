@@ -84,6 +84,8 @@ fn pipeline_to_ivsr(py_ast) {
 
 export {
   pipeline_to_ocir,
+  metrics,
+  pass_metrics,
   pipeline_to_p1,
   pipeline_to_p3,
   pipeline_to_p4,
@@ -94,4 +96,35 @@ export {
   count_insts,
   has_op,
   ops_in_func,
+}
+
+fn metrics(m) {
+  {
+    insts:  count_insts(m),
+    blocks: count_blocks(m),
+    mul:    count_op(m, "MulI64"),
+    add:    count_op(m, "AddI64"),
+    imm:    count_op(m, "ImmI64"),
+    cmp:    count_op(m, "CmpI64"),
+    load:   count_op(m, "LoadHeap"),
+    store:  count_op(m, "StoreHeap"),
+    call:   count_op(m, "CallDirect")
+  }
+}
+
+fn pass_metrics(py_ast) {
+  let m0 = pipeline_to_ocir(py_ast) in
+  let m1 = pipeline_to_p1(py_ast) in
+  let m3 = pipeline_to_p3(py_ast) in
+  let m4 = pipeline_to_p4(py_ast) in
+  let ml = pipeline_to_licm(py_ast) in
+  let mi = pipeline_to_ivsr(py_ast) in
+  {
+    ocir:   metrics(m0),
+    sccp:   metrics(m1),
+    inline: metrics(m3),
+    gvn:    metrics(m4),
+    licm:   metrics(ml),
+    ivsr:   metrics(mi)
+  }
 }
