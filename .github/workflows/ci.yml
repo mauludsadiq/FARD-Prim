@@ -71,6 +71,9 @@ jobs:
           chmod +x out/r_* 2>/dev/null || true
           python3 programs/regression_run.py /tmp/reg_elf/result.json
 
+      - name: Run IR golden tests
+        run: python3 programs/ir_golden_run.py
+
       - name: Run optimizer differential tests
         run: python3 programs/regression_opt_differential.py
 
