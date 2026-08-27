@@ -116,7 +116,14 @@ fn lower_expr(node, env, bb, ctx) {
     let rv = lower_expr(node.right, env, lv.bb, ctx) in
     let dst = alloc_reg(ctx) in
     let op = py_op_to_uvir(node.op) in
-    let ins = if op == "+" then uvir.inst_int_add(dst, lv.reg, rv.reg)
+    let left_is_str = if node.left.t == "Name" then
+      env_get(env, str.concat(["__type__", node.left.id])) == "__str__"
+      else if node.left.t == "Constant" then
+        type.of(node.left.value) == "string" || type.of(node.left.value) == "text"
+      else false in
+    let ins = if op == "+" && left_is_str then
+        uvir.inst_str_concat(dst, lv.reg, rv.reg)
+      else if op == "+" then uvir.inst_int_add(dst, lv.reg, rv.reg)
       else if op == "-" then uvir.inst_int_sub(dst, lv.reg, rv.reg)
       else if op == "*" then uvir.inst_int_mul(dst, lv.reg, rv.reg)
       else if op == "/" then uvir.inst_int_div(dst, lv.reg, rv.reg)
@@ -125,13 +132,20 @@ fn lower_expr(node, env, bb, ctx) {
     { reg: dst, bb: bb_emit(rv.bb, ins), extra: list.concat([lv.extra, rv.extra]) }
   else if t == "Compare" then
     let lv = lower_expr(node.left, env, bb, ctx) in
-    // Single comparator for subset
     let op = if list.len(node.ops) > 0 then py_op_to_uvir(list.get(node.ops, 0)) else "==" in
     let cv = if list.len(node.comparators) > 0
       then lower_expr(list.get(node.comparators, 0), env, lv.bb, ctx)
       else { reg: lv.reg, bb: lv.bb, extra: [] } in
     let dst = alloc_reg(ctx) in
-    { reg: dst, bb: bb_emit(cv.bb, uvir.inst_int_cmp(dst, op, lv.reg, cv.reg)),
+    let left_is_str = if node.left.t == "Name" then
+      env_get(env, str.concat(["__type__", node.left.id])) == "__str__"
+      else if node.left.t == "Constant" then
+        type.of(node.left.value) == "string" || type.of(node.left.value) == "text"
+      else false in
+    let ins = if op == "==" && left_is_str then
+        uvir.inst_call_direct(dst, "fard_str_eq", [lv.reg, cv.reg])
+      else uvir.inst_int_cmp(dst, op, lv.reg, cv.reg) in
+    { reg: dst, bb: bb_emit(cv.bb, ins),
       extra: list.concat([lv.extra, cv.extra]) }
   else if t == "UnaryOp" then
     let v = lower_expr(node.operand, env, bb, ctx) in
@@ -156,9 +170,21 @@ fn lower_expr(node, env, bb, ctx) {
     else if fn_name == "len" then
       let lst = list.get(ar.regs, 0) in
       let dst2 = alloc_reg(ctx) in
-      { reg: dst2, bb: bb_emit(ar.bb, uvir.inst_load(dst2, lst, 8)), extra: ar.extra }
+      let arg_node = if list.len(node.args) > 0 then list.get(node.args, 0) else { t: "" } in
+      let arg_is_str = if arg_node.t == "Name" then
+        env_get(env, str.concat(["__type__", arg_node.id])) == "__str__"
+        else if arg_node.t == "Constant" then
+          type.of(arg_node.value) == "string" || type.of(arg_node.value) == "text"
+        else false in
+      if arg_is_str then
+        { reg: dst2, bb: bb_emit(ar.bb, uvir.inst_str_len(dst2, lst)), extra: ar.extra }
+      else
+        { reg: dst2, bb: bb_emit(ar.bb, uvir.inst_load(dst2, lst, 8)), extra: ar.extra }
     else if fn_name == "sum" then
       { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, "__list_sum__", ar.regs)), extra: ar.extra }
+    else if fn_name == "str" then
+      let arg0 = list.get(ar.regs, 0) in
+      { reg: dst, bb: bb_emit(ar.bb, uvir.inst_int_to_str(dst, arg0)), extra: ar.extra }
     else if fn_name == "dict_get" then
       { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, "__dict_get__", ar.regs)), extra: ar.extra }
     else if fn_name == "dict_set" then
@@ -385,9 +411,19 @@ fn lower_stmts(stmts, env, bb, ctx) {
         let name = if tgt.t == "Name" then tgt.id else "__anon__" in
         let class_type = if stmt.value.t == "Dict" then "__dict__"
           else if stmt.value.t == "List" then "__list__"
+          else if stmt.value.t == "Constant" then
+            if type.of(stmt.value.value) == "string" || type.of(stmt.value.value) == "text" then "__str__" else ""
+          else if stmt.value.t == "BinOp" then
+            let lname = if stmt.value.left.t == "Name" then stmt.value.left.id else "" in
+            let ltype = if lname != "" then env_get(acc.env, str.concat(["__type__", lname])) else "" in
+            let l_is_str = ltype == "__str__" ||
+              (stmt.value.left.t == "Constant" &&
+               (type.of(stmt.value.left.value) == "string" || type.of(stmt.value.left.value) == "text")) in
+            if l_is_str then "__str__" else ""
           else if stmt.value.t == "Call" then
             if stmt.value.func.t == "Name" then
-              if ctx_get_class(ctx, stmt.value.func.id) != null then stmt.value.func.id else ""
+              if stmt.value.func.id == "str" then "__str__"
+              else if ctx_get_class(ctx, stmt.value.func.id) != null then stmt.value.func.id else ""
             else ""
           else "" in
         let env2 = env_set(acc.env, name, v.reg) in

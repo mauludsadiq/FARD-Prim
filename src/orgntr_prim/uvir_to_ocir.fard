@@ -45,6 +45,9 @@ fn lower_inst(inst) {
   else if op == "IntMod" then [{ op: "ModI64", dst: inst.dst, lhs: inst.a, rhs: inst.b, ty: ty_int() }]
   else if op == "Copy"   then [{ op: "CopyI64", dst: inst.dst, src: inst.src, ty: ty_any() }]
   else if op == "StrConst" then [{ op: "ConstStr", dst: inst.dst, s: inst.s, ty: ty_str() }]
+  else if op == "StrLen"   then [{ op: "StrLen",   dst: inst.dst, arg: inst.s, ty: ty_int() }]
+  else if op == "StrConcat" then [{ op: "StrConcat", dst: inst.dst, arg: inst.a, arg2: inst.b, ty: ty_str() }]
+  else if op == "IntToStr"  then [{ op: "IntToStr",  dst: inst.dst, arg: inst.n, ty: ty_str() }]
   else if op == "Alloc"  then [{ op: "AllocHeap", dst: inst.dst, size: inst.size, ty: ty_ref() }]
   else if op == "Load"   then [{ op: "LoadHeapStaticIdx", dst: inst.dst, ptr: inst.ptr,
                                   field_idx: inst.offset / 8 - 1, ty: ty_any() }]

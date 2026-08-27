@@ -72,6 +72,8 @@ fn inst_store_dyn(ptr, idx, src) { { op: "StoreDyn", ptr: ptr, idx: idx, src: sr
 // String
 fn inst_str_const(dst, s) { { op: "StrConst", dst: dst, s: s } }
 fn inst_str_len(dst, s)   { { op: "StrLen",   dst: dst, s: s } }
+fn inst_str_concat(dst, a, b) { { op: "StrConcat", dst: dst, a: a, b: b } }
+fn inst_int_to_str(dst, n) { { op: "IntToStr", dst: dst, n: n } }
 fn inst_str_get(dst, s, i) { { op: "StrGet",  dst: dst, s: s, i: i } }
 
 // Closures
@@ -193,7 +195,7 @@ export {
   inst_int_add, inst_int_sub, inst_int_mul, inst_int_div, inst_int_mod,
   inst_int_cmp, inst_const, inst_copy,
   inst_alloc, inst_load, inst_store, inst_load_dyn, inst_store_dyn,
-  inst_str_const, inst_str_len, inst_str_get,
+  inst_str_const, inst_str_len, inst_str_concat, inst_int_to_str, inst_str_get,
   inst_make_closure, inst_call_direct, inst_call_indirect, inst_call_foreign,
   inst_type_of, inst_coerce, inst_is_truthy,
   inst_phi,
