@@ -157,6 +157,8 @@ fn lower_expr(node, env, bb, ctx) {
       let lst = list.get(ar.regs, 0) in
       let dst2 = alloc_reg(ctx) in
       { reg: dst2, bb: bb_emit(ar.bb, uvir.inst_load(dst2, lst, 8)), extra: ar.extra }
+    else if fn_name == "sum" then
+      { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, "__list_sum__", ar.regs)), extra: ar.extra }
     else if fn_name == "dict_get" then
       { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, "__dict_get__", ar.regs)), extra: ar.extra }
     else if fn_name == "dict_set" then
@@ -968,7 +970,60 @@ fn build_list_helpers(fn_names) {
   let pbb = bb_emit(pbb, uvir.inst_store(0, 8, new_len2)) in             // lst[8] = new_len
   let pop_fn = uvir.func("__list_pop__", pop_params, uvir.ty_any(),
     [bb_finish(pbb, uvir.term_ret(val2_r))], uvir.func_attrs(false, false)) in
-  [app_fn, pop_fn]
+  // __list_sum__(lst) -> sum of all elements
+  // Layout: [cap][len][elem0][elem1]...
+  // Uses heap cells for mutable i and acc (SSA-safe)
+  let ctx3 = make_ctx(fn_names) in
+  let _ = alloc_reg(ctx3) in  // reg 0 = lst
+  let sum_params = [uvir.param(0, uvir.ty_any(), "lst")] in
+  let len3_r  = alloc_reg(ctx3) in
+  let zero_r  = alloc_reg(ctx3) in
+  let one3_r  = alloc_reg(ctx3) in
+  let i_cell  = alloc_reg(ctx3) in  // heap cell for i
+  let ac_cell = alloc_reg(ctx3) in  // heap cell for acc
+  let i_r     = alloc_reg(ctx3) in
+  let acc_r   = alloc_reg(ctx3) in
+  let cmp3_r  = alloc_reg(ctx3) in
+  let idx3_r  = alloc_reg(ctx3) in
+  let elem_r  = alloc_reg(ctx3) in
+  let new_acc = alloc_reg(ctx3) in
+  let new_i   = alloc_reg(ctx3) in
+  let lhdr3   = alloc_label(ctx3) in
+  let lbdy3   = alloc_label(ctx3) in
+  let lext3   = alloc_label(ctx3) in
+  let ret3_r  = alloc_reg(ctx3) in
+  // Block 0: init cells, load len
+  let sbb0 = make_bb(0) in
+  let sbb0 = bb_emit(sbb0, uvir.inst_load(len3_r, 0, 8)) in
+  let sbb0 = bb_emit(sbb0, uvir.inst_const(zero_r, uvir.val_int(0))) in
+  let sbb0 = bb_emit(sbb0, uvir.inst_const(one3_r, uvir.val_int(1))) in
+  let sbb0 = bb_emit(sbb0, uvir.inst_alloc(i_cell,  8, "sum_i")) in
+  let sbb0 = bb_emit(sbb0, uvir.inst_alloc(ac_cell, 8, "sum_acc")) in
+  let sbb0 = bb_emit(sbb0, uvir.inst_store(i_cell,  0, zero_r)) in
+  let sbb0 = bb_emit(sbb0, uvir.inst_store(ac_cell, 0, zero_r)) in
+  let sbb0 = bb_finish(sbb0, uvir.term_br(lhdr3)) in
+  // Block lhdr3: load i, check i < len
+  let shdr = make_bb(lhdr3) in
+  let shdr = bb_emit(shdr, uvir.inst_load(i_r, i_cell, 0)) in
+  let shdr = bb_emit(shdr, uvir.inst_int_cmp(cmp3_r, "Lt", i_r, len3_r)) in
+  let shdr = bb_finish(shdr, uvir.term_br_cond(cmp3_r, lbdy3, lext3)) in
+  // Block lbdy3: load acc, elem = lst[i+1], acc+=elem, i++, store back
+  let sbdy = make_bb(lbdy3) in
+  let sbdy = bb_emit(sbdy, uvir.inst_load(acc_r,  ac_cell, 0)) in
+  let sbdy = bb_emit(sbdy, uvir.inst_int_add(idx3_r, i_r, one3_r)) in
+  let sbdy = bb_emit(sbdy, uvir.inst_load_dyn(elem_r, 0, idx3_r)) in
+  let sbdy = bb_emit(sbdy, uvir.inst_int_add(new_acc, acc_r, elem_r)) in
+  let sbdy = bb_emit(sbdy, uvir.inst_int_add(new_i,   i_r,  one3_r)) in
+  let sbdy = bb_emit(sbdy, uvir.inst_store(ac_cell, 0, new_acc)) in
+  let sbdy = bb_emit(sbdy, uvir.inst_store(i_cell,  0, new_i)) in
+  let sbdy = bb_finish(sbdy, uvir.term_br(lhdr3)) in
+  // Block lext3: load acc and return
+  let sext = make_bb(lext3) in
+  let sext = bb_emit(sext, uvir.inst_load(ret3_r, ac_cell, 0)) in
+  let sext = bb_finish(sext, uvir.term_ret(ret3_r)) in
+  let sum_fn = uvir.func("__list_sum__", sum_params, uvir.ty_any(),
+    [sbb0, shdr, sbdy, sext], uvir.func_attrs(false, false)) in
+  [app_fn, pop_fn, sum_fn]
 }
 
 fn lower_module(py_ast) {
@@ -983,7 +1038,7 @@ fn lower_module(py_ast) {
     list.filter(py_ast.body, fn(s) { s.t == "ClassDef" }),
     fn(s) { list.map(list.filter(s.body, fn(m){ m.t == "FunctionDef" }),
       fn(m){ str.concat([s.name, "__", m.name]) }) })) in
-  let all_names = list.concat([fn_names, class_names, class_method_names, ["__main__", "__dict_get__", "__list_append__", "__list_pop__", "fard_print", "fard_print_int", "__py_print__", "__py_print_int__"]]) in
+  let all_names = list.concat([fn_names, class_names, class_method_names, ["__main__", "__dict_get__", "__list_append__", "__list_pop__", "__list_sum__", "fard_print", "fard_print_int", "__py_print__", "__py_print_int__"]]) in
 
   // Pre-register classes by scanning top-level stmts first
   let pre_ctx = make_ctx(all_names) in
