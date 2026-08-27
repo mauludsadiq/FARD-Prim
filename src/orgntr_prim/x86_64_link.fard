@@ -171,18 +171,19 @@ fn link_module_with_vmaddr(encoded_module, base_vmaddr) {
 
 fn elf_entry_stub_size() { 85 }
 fn elf_print_stub_size()  { 285 }  // fard_print(128) + fard_print_int(157)
+fn elf_str_stub_size()    { 530 }  // str_len(16)+str_get(16)+str_concat(160)+int_to_str(284)+str_eq(54)
 fn elf_alloc_stub_size()  { 7 }
 
 fn resolve_call_patch_elf(text, base, patch, sym_table, base_vmaddr) {
   if rec.has(sym_table, patch.symbol) then
     if patch.kind == "AbsReloc" then
       let target_offset = rec.get(sym_table, patch.symbol) in
-      let target_vmaddr = base_vmaddr + elf_entry_stub_size() + elf_print_stub_size() + elf_alloc_stub_size() + target_offset in
+      let target_vmaddr = base_vmaddr + elf_entry_stub_size() + elf_print_stub_size() + elf_str_stub_size() + elf_alloc_stub_size() + target_offset in
       { resolved: true, text: fix.replace8(text, patch.at, target_vmaddr) }
     else
       let target_addr_offset = rec.get(sym_table, patch.symbol) in
-      let target_vmaddr = base_vmaddr + elf_entry_stub_size() + elf_print_stub_size() + elf_alloc_stub_size() + target_addr_offset in
-      let call_next_ip_vmaddr = base_vmaddr + elf_entry_stub_size() + elf_print_stub_size() + elf_alloc_stub_size() + base + patch.next_ip in
+      let target_vmaddr = base_vmaddr + elf_entry_stub_size() + elf_print_stub_size() + elf_str_stub_size() + elf_alloc_stub_size() + target_addr_offset in
+      let call_next_ip_vmaddr = base_vmaddr + elf_entry_stub_size() + elf_print_stub_size() + elf_str_stub_size() + elf_alloc_stub_size() + base + patch.next_ip in
       let rel = target_vmaddr - call_next_ip_vmaddr in
       { resolved: true, text: fix.replace4(text, patch.at, rel) }
   else
@@ -193,8 +194,13 @@ fn link_module_elf_x86(encoded_module, base_vmaddr) {
   let laid_out = layout_funcs(encoded_module.funcs) in
   let sym_table_base = build_symbol_table(laid_out) in
   let sym_table = rec.set(sym_table_base, "fard_alloc", 0 - elf_alloc_stub_size()) in
-  let sym_table = rec.set(sym_table, "fard_print", 0 - elf_alloc_stub_size() - elf_print_stub_size()) in
-  let sym_table = rec.set(sym_table, "fard_print_int", 0 - elf_alloc_stub_size() - elf_print_stub_size() + 128) in
+  let sym_table = rec.set(sym_table, "fard_print", 0 - elf_alloc_stub_size() - elf_str_stub_size() - elf_print_stub_size()) in
+  let sym_table = rec.set(sym_table, "fard_print_int", 0 - elf_alloc_stub_size() - elf_str_stub_size() - elf_print_stub_size() + 128) in
+  let sym_table = rec.set(sym_table, "fard_str_len",    0 - elf_alloc_stub_size() - elf_str_stub_size()) in
+  let sym_table = rec.set(sym_table, "fard_str_get",    0 - elf_alloc_stub_size() - elf_str_stub_size() + 16) in
+  let sym_table = rec.set(sym_table, "fard_str_concat", 0 - elf_alloc_stub_size() - elf_str_stub_size() + 32) in
+  let sym_table = rec.set(sym_table, "fard_int_to_str", 0 - elf_alloc_stub_size() - elf_str_stub_size() + 192) in
+  let sym_table = rec.set(sym_table, "fard_str_eq",     0 - elf_alloc_stub_size() - elf_str_stub_size() + 476) in
   let linked_funcs = list.map(laid_out, fn(entry) {
     let base = entry.base in
     let f = entry.func in
