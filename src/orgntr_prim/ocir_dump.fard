@@ -58,10 +58,26 @@ fn pipeline_to_p1(py_ast) {
   opt.opt_module(sccp.sccp_module(opt.opt_module(ocir)))
 }
 
+fn pipeline_to_p2(py_ast) {
+  let p1 = pipeline_to_p1(py_ast) in
+  sr.sr_module(p1)
+}
+
 fn pipeline_to_p3(py_ast) {
   let p1 = pipeline_to_p1(py_ast) in
   let p2 = sr.sr_module(p1) in
   inl.inline_module(p2)
+}
+
+fn pipeline_to_jt(py_ast) {
+  let p4 = pipeline_to_p4(py_ast) in
+  opt.opt_module(jt.jt_module(p4))
+}
+
+fn pipeline_to_fuse(py_ast) {
+  let p4 = pipeline_to_p4(py_ast) in
+  let p5 = opt.opt_module(jt.jt_module(p4)) in
+  opt.opt_module(fuse.fuse_module(p5))
 }
 
 fn pipeline_to_p4(py_ast) {
@@ -88,6 +104,9 @@ export {
   pass_metrics,
   count_insts_in_block,
   block_op_counts,
+  pipeline_to_p2,
+  pipeline_to_jt,
+  pipeline_to_fuse,
   pipeline_to_p1,
   pipeline_to_p3,
   pipeline_to_p4,

@@ -85,6 +85,30 @@ CASES = [
         "desc": "IV-SR does not increase MulI64 count (early passes may already eliminate them)",
     },
     {
+        "name": "dse_reduces_stores",
+        "src": "x=1\ny=2\nx+y",
+        "check": "dump.count_op(dump.pipeline_to_p4(ast), \"StoreHeap\") <= dump.count_op(dump.pipeline_to_p2(ast), \"StoreHeap\")",
+        "desc": "DSE eliminates dead stores (stores to locations never read)",
+    },
+    {
+        "name": "inline_reduces_calls",
+        "src": "def add(a,b):\n  return a+b\nadd(10,32)",
+        "check": "dump.count_op(dump.pipeline_to_p3(ast), \"CallDirect\") <= dump.count_op(dump.pipeline_to_p2(ast), \"CallDirect\")",
+        "desc": "Inliner eliminates CallDirect for small functions",
+    },
+    {
+        "name": "jt_reduces_blocks",
+        "src": "x=1\nif x>0:\n  y=42\nelse:\n  y=0\ny",
+        "check": "dump.count_blocks(dump.pipeline_to_jt(ast)) <= dump.count_blocks(dump.pipeline_to_p4(ast))",
+        "desc": "Jump threading removes blocks after threading constant condition",
+    },
+    {
+        "name": "fuse_reduces_blocks",
+        "src": "i=0\nj=0\nwhile i<5:\n  i=i+1\nwhile j<5:\n  j=j+1\ni+j",
+        "check": "dump.count_blocks(dump.pipeline_to_fuse(ast)) <= dump.count_blocks(dump.pipeline_to_jt(ast))",
+        "desc": "Loop fusion merges two adjacent loops with same bound",
+    },
+    {
         "name": "ivsr_has_add",
         "src": "i=0\ns=0\nwhile i<10:\n  s=s+(i*3)\n  i=i+1\ns",
         "check": "dump.count_op(dump.pipeline_to_ivsr(ast), \"AddI64\") > 0",
