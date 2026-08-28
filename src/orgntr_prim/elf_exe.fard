@@ -9,6 +9,7 @@
 ///   0x002000: data section (heap bump pointer + heap)
 
 import("std/list") as list
+import("std/bits") as bits
 import("std/rec")  as rec
 import("../orgntr_prim/x86_64_encode") as enc
 
@@ -127,13 +128,36 @@ fn find_func_offset(funcs, name) {
   if rec.has(found, "some") then found.some.base else 0
 }
 
+fn patch4(bs, at, val) {
+  // Patch 4 bytes at offset `at` with little-endian val
+  let b0 = bits.band(val, 255) in
+  let b1 = bits.band(bits.shr(val, 8), 255) in
+  let b2 = bits.band(bits.shr(val, 16), 255) in
+  let b3 = bits.band(bits.shr(val, 24), 255) in
+  let pre  = list.take(bs, at) in
+  let post = list.drop(bs, at + 4) in
+  list.concat([pre, [b0, b1, b2, b3], post])
+}
+
 fn build_text(linked, entry_func) {
   let stub_size = 85 in
   let alloc_stub = list.flatten(alloc_stub_x86()) in
   let fn_offset = stub_size + enc.stdlib_size() + enc.str_stdlib_size() + alloc_stub_size() + find_func_offset(linked.funcs, entry_func) in
   let entry_stub = entry_stub_linux(fn_offset) in
   let print_stubs = list.flatten([enc.fard_print_stub(), enc.fard_print_int_stub()]) in
-  let str_stubs   = enc.fard_str_stubs() in
+  // Patch str_stubs internal alloc calls for ELF layout
+  // str_concat call at offset 38 (rel32 at bytes 39-42), next_ip=43
+  // int_to_str call at offset 211 (rel32 at bytes 212-215), next_ip=216
+  // alloc is at: stub_size(85) + print(285) + str_stubs(530) = 900 from text start
+  // str_concat starts at: 85+285+16+16=402, call next_ip=402+43=445, rel32=900-445=455
+  // int_to_str starts at: 402+160=562, call next_ip=562+216=778, rel32=900-778=122
+  let str_stubs_raw = enc.fard_str_stubs() in
+  let sc_rel32 = 443 in  // alloc(888) - str_concat_next_ip(445) = 443
+  let it_rel32 = 110 in  // alloc(888) - int_to_str_next_ip(778) = 110
+  // str_concat is at offset 32 in str_stubs (after str_len+str_get = 16+16)
+  let str_stubs1 = patch4(str_stubs_raw, 32 + 39, sc_rel32) in
+  // int_to_str is at offset 192 (16+16+160)
+  let str_stubs  = patch4(str_stubs1, 192 + 212, it_rel32) in
   list.concat([entry_stub, print_stubs, str_stubs, alloc_stub, linked.text])
 }
 
