@@ -154,9 +154,9 @@ fn build_text(linked, entry_func) {
   let str_stubs_raw = enc.fard_str_stubs() in
   let sc_rel32 = 443 in  // alloc(888) - str_concat_next_ip(445) = 443
   let it_rel32 = 110 in  // alloc(888) - int_to_str_next_ip(778) = 110
-  // str_concat is at offset 32 in str_stubs (after str_len+str_get = 16+16)
+  // str_concat starts at offset 32 (str_len+str_get=16+16), call rel32 at byte 39
   let str_stubs1 = patch4(str_stubs_raw, 32 + 39, sc_rel32) in
-  // int_to_str is at offset 192 (16+16+160)
+  // int_to_str starts at offset 192 (16+16+160), call rel32 at byte 212
   let str_stubs  = patch4(str_stubs1, 192 + 212, it_rel32) in
   list.concat([entry_stub, print_stubs, str_stubs, alloc_stub, linked.text])
 }
