@@ -177,7 +177,7 @@ fn lower_expr(node, env, bb, ctx) {
           type.of(arg_node.value) == "string" || type.of(arg_node.value) == "text"
         else false in
       if arg_is_str then
-        { reg: dst2, bb: bb_emit(ar.bb, uvir.inst_str_len(dst2, lst)), extra: ar.extra }
+        { reg: dst2, bb: bb_emit(ar.bb, uvir.inst_load(dst2, lst, 0)), extra: ar.extra }
       else
         { reg: dst2, bb: bb_emit(ar.bb, uvir.inst_load(dst2, lst, 8)), extra: ar.extra }
     else if fn_name == "sum" then
