@@ -1,0 +1,3 @@
+// bust 1787771294.831739
+import("../src/orgntr_prim/python_source_to_native") as pipeline
+pipeline.compile_ast_and_emit({"t": "Module", "body": [{"t": "Assign", "targets": [{"t": "Name", "id": "xs"}], "value": {"t": "List", "elts": [{"t": "Constant", "value": 10}, {"t": "Constant", "value": 20}, {"t": "Constant", "value": 30}], "ctx": {"t": "Load"}}}, {"t": "Expr", "value": {"t": "Subscript", "value": {"t": "Name", "id": "xs"}, "slice": {"t": "Constant", "value": 1}}}]}, "out/t_list_basic")

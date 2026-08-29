@@ -143,7 +143,7 @@ fn lower_expr(node, env, bb, ctx) {
         type.of(node.left.value) == "string" || type.of(node.left.value) == "text"
       else false in
     let ins = if op == "==" && left_is_str then
-        uvir.inst_call_direct(dst, "fard_str_eq", [lv.reg, cv.reg])
+        uvir.inst_call_direct(dst, "__str_eq__", [lv.reg, cv.reg])
       else uvir.inst_int_cmp(dst, op, lv.reg, cv.reg) in
     { reg: dst, bb: bb_emit(cv.bb, ins),
       extra: list.concat([lv.extra, cv.extra]) }
@@ -1059,7 +1059,63 @@ fn build_list_helpers(fn_names) {
   let sext = bb_finish(sext, uvir.term_ret(ret3_r)) in
   let sum_fn = uvir.func("__list_sum__", sum_params, uvir.ty_any(),
     [sbb0, shdr, sbdy, sext], uvir.func_attrs(false, false)) in
-  [app_fn, pop_fn, sum_fn]
+  // __str_eq__(a, b) -> 1 if equal, 0 otherwise
+  // Load len_a, len_b; if different return 0
+  // Loop: compare char by char using inst_load_dyn
+  let ctx_se = make_ctx(fn_names) in
+  let _ = alloc_reg(ctx_se) in  // reg 0 = a
+  let _ = alloc_reg(ctx_se) in  // reg 1 = b
+  let se_params = [uvir.param(0, uvir.ty_any(), "a"), uvir.param(1, uvir.ty_any(), "b")] in
+  let se_lena   = alloc_reg(ctx_se) in
+  let se_lenb   = alloc_reg(ctx_se) in
+  let se_cmp    = alloc_reg(ctx_se) in
+  let se_zero   = alloc_reg(ctx_se) in
+  let se_one    = alloc_reg(ctx_se) in
+  let se_i_cell = alloc_reg(ctx_se) in
+  let se_i      = alloc_reg(ctx_se) in
+  let se_ca     = alloc_reg(ctx_se) in
+  let se_cb     = alloc_reg(ctx_se) in
+  let se_ceq    = alloc_reg(ctx_se) in
+  let se_ni     = alloc_reg(ctx_se) in
+  let se_idx    = alloc_reg(ctx_se) in
+  let lse_neq   = alloc_label(ctx_se) in
+  let lse_hdr   = alloc_label(ctx_se) in
+  let lse_bdy   = alloc_label(ctx_se) in
+  let lse_ok    = alloc_label(ctx_se) in
+  let lse_fail  = alloc_label(ctx_se) in
+  // Block 0: load lengths, compare
+  let se0 = make_bb(0) in
+  let se0 = bb_emit(se0, uvir.inst_load(se_lena, 0, 0)) in
+  let se0 = bb_emit(se0, uvir.inst_load(se_lenb, 1, 0)) in
+  let se0 = bb_emit(se0, uvir.inst_const(se_zero, uvir.val_int(0))) in
+  let se0 = bb_emit(se0, uvir.inst_const(se_one,  uvir.val_int(1))) in
+  let se0 = bb_emit(se0, uvir.inst_int_cmp(se_cmp, "Eq", se_lena, se_lenb)) in
+  let se0 = bb_emit(se0, uvir.inst_alloc(se_i_cell, 8, "se_i")) in
+  let se0 = bb_emit(se0, uvir.inst_store(se_i_cell, 0, se_zero)) in
+  let se0 = bb_finish(se0, uvir.term_br_cond(se_cmp, lse_hdr, lse_fail)) in
+  // Block lse_hdr: check i < len
+  let se_hdr = make_bb(lse_hdr) in
+  let se_hdr = bb_emit(se_hdr, uvir.inst_load(se_i, se_i_cell, 0)) in
+  let se_hdr = bb_emit(se_hdr, uvir.inst_int_cmp(se_cmp, "Lt", se_i, se_lena)) in
+  let se_hdr = bb_finish(se_hdr, uvir.term_br_cond(se_cmp, lse_bdy, lse_ok)) in
+  // Block lse_bdy: compare chars, advance
+  let se_bdy = make_bb(lse_bdy) in
+  let se_bdy = bb_emit(se_bdy, uvir.inst_load_dyn(se_ca, 0, se_i)) in
+  let se_bdy = bb_emit(se_bdy, uvir.inst_load_dyn(se_cb, 1, se_i)) in
+  let se_bdy = bb_emit(se_bdy, uvir.inst_int_cmp(se_ceq, "Eq", se_ca, se_cb)) in
+  let se_bdy = bb_emit(se_bdy, uvir.inst_int_add(se_ni, se_i, se_one)) in
+  let se_bdy = bb_emit(se_bdy, uvir.inst_store(se_i_cell, 0, se_ni)) in
+  let se_bdy = bb_finish(se_bdy, uvir.term_br_cond(se_ceq, lse_hdr, lse_fail)) in
+  // Block lse_ok: return 1
+  let se_ok = make_bb(lse_ok) in
+  let se_ok = bb_finish(se_ok, uvir.term_ret(se_one)) in
+  // Block lse_fail: return 0
+  let se_fail = make_bb(lse_fail) in
+  let se_fail = bb_finish(se_fail, uvir.term_ret(se_zero)) in
+  let str_eq_fn = uvir.func("__str_eq__", se_params, uvir.ty_any(),
+    [se0, se_hdr, se_bdy, se_ok, se_fail], uvir.func_attrs(false, false)) in
+
+  [app_fn, pop_fn, sum_fn, str_eq_fn]
 }
 
 fn lower_module(py_ast) {
@@ -1074,7 +1130,7 @@ fn lower_module(py_ast) {
     list.filter(py_ast.body, fn(s) { s.t == "ClassDef" }),
     fn(s) { list.map(list.filter(s.body, fn(m){ m.t == "FunctionDef" }),
       fn(m){ str.concat([s.name, "__", m.name]) }) })) in
-  let all_names = list.concat([fn_names, class_names, class_method_names, ["__main__", "__dict_get__", "__list_append__", "__list_pop__", "__list_sum__", "fard_print", "fard_print_int", "__py_print__", "__py_print_int__"]]) in
+  let all_names = list.concat([fn_names, class_names, class_method_names, ["__main__", "__dict_get__", "__list_append__", "__list_pop__", "__list_sum__", "__str_eq__", "__str_concat__", "fard_print", "fard_print_int", "__py_print__", "__py_print_int__"]]) in
 
   // Pre-register classes by scanning top-level stmts first
   let pre_ctx = make_ctx(all_names) in

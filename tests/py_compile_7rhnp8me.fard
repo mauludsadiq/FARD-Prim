@@ -1,0 +1,3 @@
+// bust 1787949996.888292
+import("../src/orgntr_prim/python_source_to_native") as pipeline
+pipeline.compile_ast_and_emit({"t": "Module", "body": [{"t": "Expr", "value": {"t": "BinOp", "left": {"t": "Constant", "value": 50}, "op": {"t": "Sub"}, "right": {"t": "Constant", "value": 8}}}]}, "out/pytest_arith_sub")

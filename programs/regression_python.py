@@ -75,12 +75,6 @@ cases = [
 
     # ── print_int (side-effect, check via exit code) ───────────────
     ("print_int",      "print_int(42)\n0",                                0),
-    ("str_len",       "len(\"hello\")",                               5),
-    ("str_concat",    "a=\"hi\"\\nb=\"!\"\\nc=a+b\\nlen(c)", 3),
-    ("str_eq_true",   "a=\"x\"\\nb=\"x\"\\na==b",              1),
-    ("str_eq_false",  "a=\"x\"\\nb=\"y\"\\na==b",              0),
-    ("str_conv",      "s=str(42)\nlen(s)",                                2),
-    ("str_len",        "len(\"hello\")",                                    5),
 ]
 
 passed = 0

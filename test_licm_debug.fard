@@ -1,0 +1,25 @@
+import("src/orgntr_prim/ocir_licm") as licm
+import("src/orgntr_prim/ocir_loop_ir") as loop_ir
+import("src/orgntr_prim/python_source_to_native") as pipeline
+import("std/str") as str
+
+let ast = {
+  "t": "Module",
+  "body": [
+    {"t":"Assign","targets":[{"t":"Name","id":"i"}],"value":{"t":"Constant","value":0}},
+    {"t":"Assign","targets":[{"t":"Name","id":"total"}],"value":{"t":"Constant","value":0}},
+    {"t":"While","test":{"t":"Compare","left":{"t":"Name","id":"i"},"ops":[{"t":"Lt"}],"comparators":[{"t":"Constant","value":5}]},"body":[
+      {"t":"Assign","targets":[{"t":"Name","id":"j"}],"value":{"t":"Constant","value":0}},
+      {"t":"While","test":{"t":"Compare","left":{"t":"Name","id":"j"},"ops":[{"t":"Lt"}],"comparators":[{"t":"Name","id":"i"}]},"body":[
+        {"t":"AugAssign","target":{"t":"Name","id":"total"},"op":{"t":"Add"},"value":{"t":"Constant","value":1}},
+        {"t":"AugAssign","target":{"t":"Name","id":"j"},"op":{"t":"Add"},"value":{"t":"Constant","value":1}}
+      ]},
+      {"t":"AugAssign","target":{"t":"Name","id":"i"},"op":{"t":"Add"},"value":{"t":"Constant","value":1}}
+    ]},
+    {"t":"Expr","value":{"t":"Name","id":"total"}}
+  ]
+}
+
+let ocir = pipeline.compile_ast_and_emit_ocir(ast)
+// Just show loop info
+"done"
