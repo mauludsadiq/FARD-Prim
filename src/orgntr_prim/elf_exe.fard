@@ -131,9 +131,9 @@ fn find_func_offset(funcs, name) {
 fn patch4(bs, at, val) {
   // Patch 4 bytes at offset `at` with little-endian val
   let b0 = bits.band(val, 255) in
-  let b1 = bits.band(bits.shr(val, 8), 255) in
-  let b2 = bits.band(bits.shr(val, 16), 255) in
-  let b3 = bits.band(bits.shr(val, 24), 255) in
+  let b1 = bits.band(bits.bshr(val, 8), 255) in
+  let b2 = bits.band(bits.bshr(val, 16), 255) in
+  let b3 = bits.band(bits.bshr(val, 24), 255) in
   let pre  = list.take(bs, at) in
   let post = list.drop(bs, at + 4) in
   list.concat([pre, [b0, b1, b2, b3], post])
