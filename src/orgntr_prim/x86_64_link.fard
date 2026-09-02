@@ -148,11 +148,8 @@ fn link_module_with_vmaddr(encoded_module, base_vmaddr) {
   let sym_table = rec.set(sym_table_base, "fard_alloc", 0 - alloc_stub_size()) in
   let sym_table = rec.set(sym_table, "fard_print", 0 - 1295) in
   let sym_table = rec.set(sym_table, "fard_print_int", 0 - 1167) in
-  let sym_table = rec.set(sym_table, "fard_str_len",    -525) in
-  let sym_table = rec.set(sym_table, "fard_str_get",    -509) in
-  let sym_table = rec.set(sym_table, "fard_str_concat", -493) in
-  let sym_table = rec.set(sym_table, "fard_int_to_str", -333) in
-  let sym_table = rec.set(sym_table, "fard_str_eq",     -61) in
+  let sym_table = rec.set(sym_table, "fard_str_concat", -306) in
+  let sym_table = rec.set(sym_table, "fard_int_to_str", -181) in
   let sym_table = rec.set(sym_table, "fard_fs_open", -492) in
   let sym_table = rec.set(sym_table, "fard_fs_read", -416) in
   let sym_table = rec.set(sym_table, "fard_fs_write", -397) in
@@ -171,7 +168,7 @@ fn link_module_with_vmaddr(encoded_module, base_vmaddr) {
 
 fn elf_entry_stub_size() { 85 }
 fn elf_print_stub_size()  { 285 }  // fard_print(128) + fard_print_int(157)
-fn elf_str_stub_size()    { 518 }  // str_len(16)+str_get(16)+str_concat(160)+int_to_str(272)+str_eq(54)
+fn elf_str_stub_size()    { 299 }  // linux_str_concat(125)+linux_int_to_str(174)
 fn elf_alloc_stub_size()  { 7 }
 
 fn resolve_call_patch_elf(text, base, patch, sym_table, base_vmaddr) {
@@ -196,11 +193,8 @@ fn link_module_elf_x86(encoded_module, base_vmaddr) {
   let sym_table = rec.set(sym_table_base, "fard_alloc", 0 - elf_alloc_stub_size()) in
   let sym_table = rec.set(sym_table, "fard_print", 0 - elf_alloc_stub_size() - elf_str_stub_size() - elf_print_stub_size()) in
   let sym_table = rec.set(sym_table, "fard_print_int", 0 - elf_alloc_stub_size() - elf_str_stub_size() - elf_print_stub_size() + 128) in
-  let sym_table = rec.set(sym_table, "fard_str_len",    -525) in
-  let sym_table = rec.set(sym_table, "fard_str_get",    -509) in
-  let sym_table = rec.set(sym_table, "fard_str_concat", -493) in
-  let sym_table = rec.set(sym_table, "fard_int_to_str", -333) in
-  let sym_table = rec.set(sym_table, "fard_str_eq",     -61) in
+  let sym_table = rec.set(sym_table, "fard_str_concat", -306) in
+  let sym_table = rec.set(sym_table, "fard_int_to_str", -181) in
   let linked_funcs = list.map(laid_out, fn(entry) {
     let base = entry.base in
     let f = entry.func in

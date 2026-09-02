@@ -139,26 +139,20 @@ fn patch4(bs, at, val) {
   list.concat([pre, [b0, b1, b2, b3], post])
 }
 
+fn linux_str_concat() { [85, 72, 137, 229, 65, 84, 65, 85, 65, 86, 65, 87, 73, 137, 244, 73, 137, 213, 76, 139, 54, 76, 139, 58, 76, 137, 247, 76, 1, 255, 72, 255, 199, 72, 193, 231, 3, 232, 1, 1, 0, 0, 76, 137, 241, 76, 1, 249, 72, 137, 8, 73, 137, 195, 72, 49, 255, 77, 133, 246, 116, 18, 73, 139, 76, 252, 8, 73, 137, 76, 251, 8, 72, 255, 199, 73, 57, 254, 124, 238, 72, 49, 246, 77, 133, 255, 116, 24, 76, 137, 240, 72, 1, 240, 73, 139, 76, 245, 8, 74, 137, 76, 195, 8, 72, 255, 198, 73, 57, 247, 124, 232, 76, 137, 216, 65, 95, 65, 94, 65, 93, 65, 92, 93, 195] }
+fn linux_int_to_str() { [85, 72, 137, 229, 65, 84, 65, 85, 65, 86, 65, 87, 83, 72, 131, 236, 40, 73, 137, 244, 77, 49, 237, 77, 49, 246, 77, 133, 228, 121, 9, 77, 247, 220, 73, 255, 198, 77, 133, 228, 117, 13, 198, 69, 216, 48, 73, 255, 197, 235, 30, 77, 133, 228, 116, 26, 76, 137, 224, 72, 49, 210, 73, 186, 10, 0, 0, 0, 0, 0, 0, 0, 73, 247, 242, 73, 137, 196, 128, 194, 48, 66, 136, 84, 45, 216, 73, 255, 197, 235, 216, 77, 133, 246, 116, 8, 66, 198, 68, 45, 216, 45, 73, 255, 197, 76, 137, 239, 72, 255, 199, 72, 193, 231, 3, 232, 54, 0, 0, 0, 76, 137, 40, 77, 49, 255, 77, 133, 237, 116, 23, 77, 137, 233, 77, 41, 249, 73, 255, 201, 66, 15, 182, 84, 45, 216, 74, 137, 84, 248, 8, 73, 255, 199, 77, 57, 253, 127, 228, 72, 131, 196, 40, 91, 65, 95, 65, 94, 65, 93, 65, 92, 93, 195] }
+fn linux_str_stub_size() { 299 }  // str_concat(125) + int_to_str(174)
+
 fn build_text(linked, entry_func) {
   let stub_size = 85 in
   let alloc_stub = list.flatten(alloc_stub_x86()) in
-  let fn_offset = stub_size + enc.stdlib_size() + enc.str_stdlib_size() + alloc_stub_size() + find_func_offset(linked.funcs, entry_func) in
+  // Layout: entry(85) + print(285) + str_concat(125) + int_to_str(174) + alloc(7) + functions
+  let fn_offset = stub_size + enc.stdlib_size() + linux_str_stub_size() + alloc_stub_size() + find_func_offset(linked.funcs, entry_func) in
   let entry_stub = entry_stub_linux(fn_offset) in
   let print_stubs = list.flatten([enc.fard_print_stub(), enc.fard_print_int_stub()]) in
-  // Patch str_stubs internal alloc calls for ELF layout
-  // str_concat call at offset 38 (rel32 at bytes 39-42), next_ip=43
-  // int_to_str call at offset 211 (rel32 at bytes 212-215), next_ip=216
-  // alloc is at: stub_size(85) + print(285) + str_stubs(530) = 900 from text start
-  // str_concat starts at: 85+285+16+16=402, call next_ip=402+43=445, rel32=900-445=455
-  // int_to_str starts at: 402+160=562, call next_ip=562+216=778, rel32=900-778=122
-  let str_stubs_raw = enc.fard_str_stubs() in
-  let sc_rel32 = 443 in  // alloc(888) - str_concat_next_ip(445) = 443
-  let it_rel32 = 110 in  // alloc(888) - int_to_str_next_ip(778) = 110
-  // str_concat starts at offset 32 (str_len+str_get=16+16), call rel32 at byte 39
-  let str_stubs1 = patch4(str_stubs_raw, 32 + 39, sc_rel32) in
-  // int_to_str starts at offset 192 (16+16+160), call rel32 at byte 212
-  let str_stubs  = patch4(str_stubs1, 192 + 212, it_rel32) in
-  list.concat([entry_stub, print_stubs, str_stubs, alloc_stub, linked.text])
+  // Linux-native str_concat and int_to_str stubs with correct alloc call offsets
+  let linux_stubs = list.concat([linux_str_concat(), linux_int_to_str()]) in
+  list.concat([entry_stub, print_stubs, linux_stubs, alloc_stub, linked.text])
 }
 
 // ── Data section ──────────────────────────────────────────────────────────────
