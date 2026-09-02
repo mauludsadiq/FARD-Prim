@@ -185,6 +185,9 @@ fn lower_expr(node, env, bb, ctx) {
     else if fn_name == "str" then
       let arg0 = list.get(ar.regs, 0) in
       { reg: dst, bb: bb_emit(ar.bb, uvir.inst_int_to_str(dst, arg0)), extra: ar.extra }
+    else if fn_name == "str" then
+      let arg0 = list.get(ar.regs, 0) in
+      { reg: dst, bb: bb_emit(ar.bb, uvir.inst_int_to_str(dst, arg0)), extra: ar.extra }
     else if fn_name == "dict_get" then
       { reg: dst, bb: bb_emit(ar.bb, uvir.inst_call_direct(dst, "__dict_get__", ar.regs)), extra: ar.extra }
     else if fn_name == "dict_set" then
@@ -270,11 +273,19 @@ fn lower_expr(node, env, bb, ctx) {
           [ob.reg, ix.reg])),
         extra: list.concat([ob.extra, ix.extra]) }
     else
+      let obj_name = if node.value.t == "Name" then node.value.id else "" in
+      let obj_is_str = if obj_name != "" then
+        env_get(env, str.concat(["__type__", obj_name])) == "__str__"
+        else if node.value.t == "Constant" then
+          type.of(node.value.value) == "string" || type.of(node.value.value) == "text"
+        else false in
       let idx2_r = alloc_reg(ctx) in
       let one_r  = alloc_reg(ctx) in
-      let bb_idx = bb_emit(ix.bb, uvir.inst_const(one_r, uvir.val_int(1))) in
-      let bb_idx = bb_emit(bb_idx, uvir.inst_int_add(idx2_r, ix.reg, one_r)) in
-      { reg: dst, bb: bb_emit(bb_idx, uvir.inst_load_dyn(dst, ob.reg, idx2_r)),
+      let b1 = bb_emit(ix.bb, uvir.inst_const(one_r, uvir.val_int(1))) in
+      let b2 = bb_emit(b1, uvir.inst_int_add(idx2_r, ix.reg, one_r)) in
+      let bb_final = if obj_is_str then ix.bb else b2 in
+      let idx_r    = if obj_is_str then ix.reg else idx2_r in
+      { reg: dst, bb: bb_emit(bb_final, uvir.inst_load_dyn(dst, ob.reg, idx_r)),
         extra: list.concat([ob.extra, ix.extra]) }
   else if t == "IfExp" then
     // Ternary: a if cond else b
