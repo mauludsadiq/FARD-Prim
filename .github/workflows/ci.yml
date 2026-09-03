@@ -77,25 +77,6 @@ jobs:
       - name: Run optimizer differential tests
         run: python3 programs/regression_opt_differential.py
 
-      - name: Debug ELF str stubs
-        run: |
-          python3 programs/compile_python.py 'a="hi"
-b="!"
-c=a+b
-len(c)' out/t_debug_str || true
-          python3 -c "
-import struct
-with open('out/t_debug_str','rb') as f: d=f.read()
-text=4096
-# Find str_concat stub (starts at entry+print = 85+285=370)
-sc_start = text+370
-print('str_concat bytes 36-43:',list(d[sc_start+36:sc_start+44]))
-print('Expected call: [232,...]')
-print('rel32:',struct.unpack("<i",d[sc_start+38:sc_start+42])[0])
-# Find alloc stub
-alloc_start = text+370+299
-print('alloc bytes:',list(d[alloc_start:alloc_start+7]))
-print('Expected: [72,137,216,72,1,251,195]')
 " || true
       - name: Run Python regression suite (x86-64)
         run: python3 programs/regression_python.py
