@@ -77,7 +77,6 @@ jobs:
       - name: Run optimizer differential tests
         run: python3 programs/regression_opt_differential.py
 
-" || true
       - name: Run Python regression suite (x86-64)
         run: python3 programs/regression_python.py
 
