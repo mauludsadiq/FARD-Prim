@@ -77,16 +77,6 @@ jobs:
       - name: Run optimizer differential tests
         run: python3 programs/regression_opt_differential.py
 
-      - name: Debug str_concat on Linux
-        run: |
-          python3 programs/compile_python.py 'a="hi"' out/t_str_debug
-          file out/t_str_debug
-          python3 -c "import struct; d=open('out/t_str_debug','rb').read(); sc=d[4096+370:4096+375]; print('sc_start_bytes:', list(sc)); rel=struct.unpack('<i',d[4096+408:4096+412])[0]; print('sc_rel32:', rel, 'alloc_pos:', 4096+669, 'call_next_ip:', 4096+412); alloc=d[4096+669:4096+676]; print('alloc_bytes:', list(alloc))"
-      - name: Debug str_concat on Linux
-        run: |
-          python3 programs/compile_python.py 'a="hi"' out/t_str_debug
-          file out/t_str_debug
-          python3 -c "import struct; d=open('out/t_str_debug','rb').read(); sc=d[4096+370:4096+375]; print('sc_start_bytes:', list(sc)); rel=struct.unpack('<i',d[4096+408:4096+412])[0]; print('sc_rel32:', rel, 'alloc_pos:', 4096+669, 'call_next_ip:', 4096+412); alloc=d[4096+669:4096+676]; print('alloc_bytes:', list(alloc))"
       - name: Run Python regression suite (x86-64)
         run: python3 programs/regression_python.py
 
