@@ -100,14 +100,16 @@ fn link_module_with_vmaddr(encoded_module, base_vmaddr) {
 
 fn link_module_elf_arm64(encoded_module) {
   // ELF ARM64 text layout: entry(60)+print_int(180)+alloc(16)+str_concat(208)+int_to_str(264)+fns
-  // fn_start = 728, fard_str_concat at 256, fard_int_to_str at 464
-  let base_vmaddr = 4198400 in
+  // fn_start at text_offset 728, vmaddr = 4198400+728 = 4199128
+  // fn_vmaddr_with_base adds entry(60)+print(180)+alloc(16)=256
+  // So pass base_vmaddr = 4199128-256 = 4198872 to make functions resolve correctly
+  let base_vmaddr = 4198872 in
   let laid_out = layout_funcs(encoded_module.funcs) in
   let sym_table_base = build_symbol_table(laid_out) in
-  let alloc_offset = 0 - alloc_stub_size() - 208 - 264 in  // alloc at -488 from fn_start
-  let sym_table = rec.set(sym_table_base, "fard_alloc", alloc_offset) in
-  let sym_table = rec.set(sym_table, "fard_print_int", 0 - alloc_stub_size() - 208 - 264 - ret_stub_size()) in
-  let sym_table = rec.set(sym_table, "fard_print", 0 - alloc_stub_size() - 208 - 264 - ret_stub_size()) in
+  // Offsets relative to fn_start=728: alloc at 240, so -488; sc at 256, so -472; it at 464, so -264
+  let sym_table = rec.set(sym_table_base, "fard_alloc", -488) in
+  let sym_table = rec.set(sym_table, "fard_print_int", -668) in
+  let sym_table = rec.set(sym_table, "fard_print", -668) in
   let sym_table = rec.set(sym_table, "fard_str_concat", -472) in
   let sym_table = rec.set(sym_table, "fard_int_to_str", -264) in
   let linked_funcs = list.map(laid_out, fn(entry) {
