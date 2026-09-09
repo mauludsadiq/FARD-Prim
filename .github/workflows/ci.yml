@@ -77,6 +77,10 @@ jobs:
       - name: Run optimizer differential tests
         run: python3 programs/regression_opt_differential.py
 
+      - name: Debug str stubs
+        run: |
+          python3 programs/compile_python.py 's=str(42)' out/t_str_debug
+          python3 programs/debug_stubs.py
       - name: Run Python regression suite (x86-64)
         run: python3 programs/regression_python.py
 
