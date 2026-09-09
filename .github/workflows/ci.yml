@@ -77,10 +77,6 @@ jobs:
       - name: Run optimizer differential tests
         run: python3 programs/regression_opt_differential.py
 
-      - name: Debug int_to_str on Linux
-        run: |
-          python3 programs/compile_python.py "s=str(42)" out/t_its_debug
-          python3 programs/debug_its.py
       - name: Run Python regression suite (x86-64)
         run: python3 programs/regression_python.py
 
