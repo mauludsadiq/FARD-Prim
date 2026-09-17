@@ -410,6 +410,25 @@ fn encode_inst(inst, frame_size) {
   else if op == "Jne" then bne_placeholder()
   else if op == "Jmp" then b_placeholder()
   else if op == "CallReloc" then bl_placeholder()
+  else if op == "StrCall2Direct" then
+    // Load arg1->x0, arg2->x1 from stack, bl stub, store x0->dst
+    let s = inst.arg_slot in
+    let s2 = inst.arg2_slot in
+    let d = inst.dst_slot in
+    list.concat([
+      [ldur_fp(x9(), s), mov_reg(x0(), x9())],  // arg1 -> x0
+      [ldur_fp(x9(), s2), mov_reg(x1(), x9())], // arg2 -> x1
+      bl_placeholder(),                           // call func
+      [stur_fp(x0(), d)]                         // x0 -> dst
+    ])
+  else if op == "StrCall1Direct" then
+    let s = inst.arg_slot in
+    let d = inst.dst_slot in
+    list.concat([
+      [ldur_fp(x9(), s), mov_reg(x0(), x9())],
+      bl_placeholder(),
+      [stur_fp(x0(), d)]
+    ])
   else if op == "StoreParam" then
     [stur_fp(arg_reg(inst.arg_idx), inst.slot)]
   else if op == "LoadArg" then

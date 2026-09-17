@@ -99,6 +99,16 @@ fn scan_labels_and_patches(insts) {
       { pc: acc.pc + 4, labels: acc.labels,
         patches: list.append(acc.patches,
           { kind: "BL", at: acc.pc, next_ip: acc.pc + 4, symbol: inst.name }) }
+    else if op == "StrCall2Direct" then
+      // ldur+mov(x0)=8 + ldur+mov(x1)=8 + bl=4 + stur=4 = 24 bytes
+      { pc: acc.pc + 24, labels: acc.labels,
+        patches: list.append(acc.patches,
+          { kind: "BL", at: acc.pc + 16, next_ip: acc.pc + 20, symbol: inst.func }) }
+    else if op == "StrCall1Direct" then
+      // ldur+mov(x0)=8 + bl=4 + stur=4 = 16 bytes
+      { pc: acc.pc + 16, labels: acc.labels,
+        patches: list.append(acc.patches,
+          { kind: "BL", at: acc.pc + 8, next_ip: acc.pc + 12, symbol: inst.func }) }
     else if op == "StoreFnPtr" then
       // mov_imm64(x9,0)=16 + ldur_fp(x10,slot)=4 + str_imm(x9,x10,0)=4 = 24 bytes
       { pc: acc.pc + 24, labels: acc.labels,
