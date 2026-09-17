@@ -34,6 +34,10 @@ jobs:
           chmod +x out/r_* 2>/dev/null || true
           python3 programs/regression_run.py /tmp/reg/result.json
 
+      - name: Debug ARM64 stubs
+        run: |
+          python3 programs/compile_python.py 's=str(42)' out/t_str_debug
+          python3 programs/debug_arm64_stubs.py
       - name: Run Python regression suite
         run: python3 programs/regression_python.py
 
